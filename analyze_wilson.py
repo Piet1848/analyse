@@ -6,7 +6,6 @@ parameter r0/a for one or multiple dataset folders.
 
 from __future__ import annotations
 
-import argparse
 import math
 from collections import defaultdict
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 from load_input_yaml import load_params
+import data_organizer as do
 
 
 @dataclass
@@ -26,11 +26,6 @@ class WilsonLoopRecord:
 
 @dataclass
 class DatasetResult:
-    dataset: Path
-    beta: float | None
-    epsilon1: float | None
-    epsilon2: float | None
-    lattice_extents: Tuple[int, int, int, int] | None
     averages: Dict[Tuple[int, int], float]
     potentials: Dict[int, Dict[int, float]]
     effective_potential: Dict[int, float]
@@ -42,22 +37,24 @@ class DatasetResult:
     physical_volume_fm4: float | None
 
 
-def read_w_temp(path: Path, start_step: int = 0) -> List[WilsonLoopRecord]:
-    """Read W_temp.out as a list of WilsonLoopRecord entries."""
+def load_w_temp(WLoop: list[do.ObservableData]) -> List[WilsonLoopRecord]:
+    """Convert ObservableData to a list of WilsonLoopRecord entries."""
     records: List[WilsonLoopRecord] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            parts = [p.strip() for p in stripped.split(",")]
-            if len(parts) != 4:
-                raise ValueError(f"Unexpected line in {path}: {line}")
-            step, L, T = map(int, parts[:3])
-            if step < start_step:
-                continue
-            value = float(parts[3])
-            records.append(WilsonLoopRecord(step=step, L=L, T=T, value=value))
+
+    steps  = [wl for wl in WLoop if wl.name == "# step"]
+    Ls     = [wl for wl in WLoop if wl.name == "L"]
+    Ts     = [wl for wl in WLoop if wl.name == "T"]
+    values = [wl for wl in WLoop if wl.name == "W_temp"]
+
+    for step, L, T, val in zip(steps[0].values, Ls[0].values, Ts[0].values, values[0].values):
+        record = WilsonLoopRecord(
+            step=int(step),
+            L=int(L),
+            T=int(T),
+            value=float(val)
+        )
+        records.append(record)
+    
     return records
 
 
@@ -151,69 +148,6 @@ def interpolate_sommer_parameter(
         return r0
     return None
 
-
-def analyze_dataset(dataset: Path, start_step: int = 0, sommer_target: float = 1.65) -> DatasetResult:
-    """Full analysis pipeline for one dataset folder."""
-    w_temp_path = dataset / "W_temp.out"
-    if not w_temp_path.exists():
-        raise FileNotFoundError(f"No W_temp.out found in {dataset}")
-
-    records = read_w_temp(w_temp_path, start_step=start_step)
-    averages = average_wilson_loops(records)
-    potentials = compute_potentials(averages)
-    effective, sources = select_effective_potential(potentials)
-    forces = compute_force(effective)
-    r0_over_a = interpolate_sommer_parameter(forces, target=sommer_target)
-    lattice_spacing = None
-    if r0_over_a and r0_over_a > 0:
-        lattice_spacing = 0.5 / r0_over_a
-
-    beta = None
-    epsilon1 = None
-    epsilon2 = None
-    lattice_extents = None
-    physical_extent_fm = None
-    physical_volume_fm4 = None
-    input_path = dataset / "input.yaml"
-    if input_path.exists():
-        metro, _ = load_params(str(input_path))
-        beta = metro.beta
-        epsilon1 = metro.epsilon1
-        epsilon2 = metro.epsilon2
-        lattice_extents = (metro.L0, metro.L1, metro.L2, metro.L3)
-        if lattice_spacing:
-            Ls = [d * lattice_spacing for d in lattice_extents]
-            physical_extent_fm = tuple(Ls)  # type: ignore[assignment]
-            physical_volume_fm4 = Ls[0] * Ls[1] * Ls[2] * Ls[3]
-
-    return DatasetResult(
-        dataset=dataset,
-        beta=beta,
-        epsilon1=epsilon1,
-        epsilon2=epsilon2,
-        lattice_extents=lattice_extents,
-        averages=averages,
-        potentials=potentials,
-        effective_potential=effective,
-        effective_sources=sources,
-        forces=forces,
-        r0_over_a=r0_over_a,
-        lattice_spacing_fm=lattice_spacing,
-        physical_extent_fm=physical_extent_fm,
-        physical_volume_fm4=physical_volume_fm4,
-    )
-
-
-def discover_datasets(base_path: Path) -> List[Path]:
-    """Return all subdirectories under base_path that contain W_temp.out."""
-    if (base_path / "W_temp.out").exists():
-        return [base_path]
-    datasets = [
-        p for p in base_path.iterdir() if p.is_dir() and (p / "W_temp.out").exists()
-    ]
-    return sorted(datasets)
-
-
 def format_dataset_result(result: DatasetResult) -> str:
     lines: List[str] = []
     header = f"Dataset: {result.dataset}"
@@ -254,34 +188,3 @@ def format_dataset_result(result: DatasetResult) -> str:
     else:
         lines.append("  Sommer parameter r0/a: not found (no crossing of r^2 F = 1.65).")
     return "\n".join(lines)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Analyze temporal Wilson loops and extract V(R), F(r), and r0/a."
-    )
-    parser.add_argument(
-        "path",
-        type=Path,
-        help="Dataset folder or base directory containing dataset subfolders.",
-    )
-    parser.add_argument(
-        "--start-step",
-        type=int,
-        default=0,
-        help="Ignore measurements before this Monte Carlo step (thermalization cut).",
-    )
-    args = parser.parse_args()
-
-    datasets = discover_datasets(args.path)
-    if not datasets:
-        raise SystemExit(f"No datasets with W_temp.out found under {args.path}")
-
-    for dataset in datasets:
-        result = analyze_dataset(dataset, start_step=args.start_step)
-        print(format_dataset_result(result))
-        print()
-
-
-if __name__ == "__main__":
-    main()

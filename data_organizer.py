@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import csv
@@ -34,20 +35,39 @@ class FileData:
         self.observables: List[ObservableData] = []
 
     def read_file(self):
-        """Read CSV and populate observables."""
+        """Read CSV and populate observables. Skip empty files gracefully."""
         if not self.path.exists():
             raise FileNotFoundError(f"{self.path} not found")
 
         with self.path.open() as f:
             reader = csv.reader(f)
-            headers = next(reader)
+            # get header safely
+            headers = next(reader, None)
+            if headers is None:
+                # empty file -> leave observables empty and return
+                return self
+
+            # normalize header names (strip BOM if present)
+            headers = [h.strip().lstrip("\ufeff") for h in headers]
             self.observables = [ObservableData(name) for name in headers]
 
-            for row in reader:
+            for row_idx, row in enumerate(reader, start=1):
+                # skip blank rows
+                if not row or all(not cell.strip() for cell in row):
+                    continue
+                if len(row) < len(self.observables):
+                    raise ValueError(
+                        f"Row {row_idx} in {self.path} has fewer columns than header: {row!r}"
+                    )
+                # only map up to number of headers
                 for obs, val in zip(self.observables, row):
-                    obs.append(float(val))
+                    try:
+                        obs.append(float(val))
+                    except ValueError as e:
+                        raise ValueError(f"Non-numeric value in {self.path} row {row_idx}: {val!r}") from e
 
         return self
+
 
     def get(self, name: str) -> ObservableData:
         for obs in self.observables:
