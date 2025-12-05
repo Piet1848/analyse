@@ -6,6 +6,7 @@ Read and store parameters from input.yaml into Python dataclasses.
 from dataclasses import dataclass
 from typing import List, Tuple
 import yaml
+import argparse
 
 
 # ---------- Dataclass definitions ----------
@@ -44,6 +45,25 @@ class GaugeObservableParams:
     RetraceU_filename: str
     write_to_file: bool
 
+    # str
+    def __str__(self) -> str:
+        lines = [
+            f"measurement_interval: {self.measurement_interval}",
+            f"measure_plaquette: {self.measure_plaquette}",
+            f"measure_wilson_loop_temporal: {self.measure_wilson_loop_temporal}",
+            f"measure_wilson_loop_mu_nu: {self.measure_wilson_loop_mu_nu}",
+            f"measure_retrace_U: {self.measure_retrace_U}",
+            f"W_temp_L_T_pairs: {self.W_temp_L_T_pairs}",
+            f"W_mu_nu_pairs: {self.W_mu_nu_pairs}",
+            f"W_Lmu_Lnu_pairs: {self.W_Lmu_Lnu_pairs}",
+            f"plaquette_filename: {self.plaquette_filename}",
+            f"W_temp_filename: {self.W_temp_filename}",
+            f"W_mu_nu_filename: {self.W_mu_nu_filename}",
+            f"RetraceU_filename: {self.RetraceU_filename}",
+            f"write_to_file: {self.write_to_file}",
+        ]
+        return "\n".join(lines)
+
 
 # ---------- Load function ----------
 
@@ -79,3 +99,15 @@ def load_params(yaml_path: str) -> tuple[MetropolisParams, GaugeObservableParams
 
     return metro, gauge
 
+
+if __name__ == "__main__":
+    args = argparse.ArgumentParser()
+    args.add_argument("path", type=str, help="Path to dataset folder")
+    parsed_args = args.parse_args()
+    path = parsed_args.path
+    # Example usage
+    metro_params, gauge_params = load_params(path + "/input.yaml")
+    print("Metropolis Parameters:")
+    print(metro_params)
+    print("\nGauge Observable Parameters:")
+    print(gauge_params)

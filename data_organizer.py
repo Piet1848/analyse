@@ -97,7 +97,7 @@ class ExperimentData:
         """Scan the folder for .out files and return a dict of FileData lists."""
         data_dict: Dict[str, List[FileData]] = {}
         for file_path in self.path.iterdir():
-            if file_path.is_file() and file_path.suffix == ".out":
+            if file_path.is_file() and file_path.suffix == ".out" and not file_path.name.startswith("_"):
                 fd = FileData(str(file_path))
                 fd.read_file()
                 data_dict.setdefault(file_path.stem, []).append(fd)
