@@ -1,71 +1,128 @@
+import json
+import hashlib
+import os
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import numpy as np
 import data_organizer as do
 import analyze_wilson as wilson
 import argparse
-import math
-import numpy as np
 
-def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65):
-    # Depending on how your data_organizer works, you might need to adjust this access
-    # Assuming .get("W_temp") returns a list of ObservableData sets
-    fileData = data.data.get("W_temp")[0] 
+CALC_RESULT_BASE = Path("../data/calcResult")
+
+def get_run_id(path: str) -> str:
+    """
+    Generate a unique, filesystem-safe ID for a dataset path.
+    We use a hash of the absolute path to ensure uniqueness.
+    """
+    abs_path = os.path.abspath(path)
+    return hashlib.md5(abs_path.encode('utf-8')).hexdigest()
+
+def get_result_path(run_id: str) -> Path:
+    return CALC_RESULT_BASE / f"{run_id}.json"
+
+def load_cached_result(run_id: str) -> Optional[Dict[str, Any]]:
+    """Try to load results from JSON."""
+    p = get_result_path(run_id)
+    if p.exists():
+        try:
+            with open(p, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
+    return None
+
+def save_result(run_id: str, data: Dict[str, Any]):
+    """Save results to JSON."""
+    CALC_RESULT_BASE.mkdir(parents=True, exist_ok=True)
+    p = get_result_path(run_id)
+    with open(p, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[str, Any]:
+    """
+    Calculate Sommer parameter and Lattice spacing.
+    Returns a dictionary of results.
+    """
+    # Check if data available
+    if "W_temp" not in data.data or not data.data["W_temp"]:
+        return {"error": "No W_temp data found"}
+
+    fileData = data.data["W_temp"][0] 
     
-    # 1. Create Bootstrap samples
+    # Bootstrap samples
     fileData_bootstrap = fileData.get_bootstrap(n_bootstrap=200, seed=42)
 
     sommer_parameters = []
     lattice_spacings = []
 
-    print(f"Starting bootstrap analysis on {len(fileData_bootstrap)} samples...")
-
-    for i, fd in enumerate(fileData_bootstrap):
-        # 2. Load records from the bootstrap sample
+    for fd in fileData_bootstrap:
         records = wilson.load_w_temp(fd.observables)
-        
-        # 3. Average the Wilson loops W(R,T)
         averages = wilson.average_wilson_loops(records)
-
-        # 4. Fit V(R) from the time dependence (NEW FUNCTION)
-        # Returns potentials dict and errors dict
         potentials, _ = wilson.fit_potential_from_time(averages, t_min=2)
-
-        # 5. Fit the Sommer parameter r0/a (NEW FUNCTION)
-        # Returns r0 and the dictionary of Cornell parameters
         r0_over_a, _ = wilson.fit_sommer_parameter(potentials, target_force_r2=sommer_target)
 
         if r0_over_a and r0_over_a > 0:
-            lattice_spacing = 0.5 / r0_over_a # Assuming r0_phys = 0.5 fm
+            # Assuming r0_phys = 0.5 fm
+            lattice_spacing = 0.5 / r0_over_a 
             sommer_parameters.append(r0_over_a)
             lattice_spacings.append(lattice_spacing)
     
     if not lattice_spacings:
-        print("Could not determine Sommer parameter for any bootstrap sample.")
-        return None, None
+        return {"error": "Could not determine Sommer parameter"}
 
-    # Compute mean and stddev for Lattice Spacing
-    mean_a = np.mean(lattice_spacings)
-    stddev_a = np.std(lattice_spacings, ddof=1) # ddof=1 for sample stddev
+    # Compute statistics
+    mean_a = float(np.mean(lattice_spacings))
+    stddev_a = float(np.std(lattice_spacings, ddof=1))
+    mean_r0 = float(np.mean(sommer_parameters))
+    stddev_r0 = float(np.std(sommer_parameters, ddof=1))
 
-    # Compute mean and stddev for r0/a
-    mean_r0 = np.mean(sommer_parameters)
-    stddev_r0 = np.std(sommer_parameters, ddof=1)
+    return {
+        "r0": mean_r0,
+        "r0_err": stddev_r0,
+        "a": mean_a,
+        "a_err": stddev_a,
+        "n_samples": len(lattice_spacings)
+    }
 
-    print(f"Results over {len(lattice_spacings)} successful bootstrap samples:")
-    print(f"  r0/a:               {mean_r0:.5f} ± {stddev_r0:.5f}")
-    print(f"  Lattice spacing a:  {mean_a:.5f} ± {stddev_a:.5f} fm")
+def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
+    """
+    The main entry point for other tools.
+    Checks cache -> loads data -> calculates -> saves -> returns.
+    """
+    run_id = get_run_id(path)
+    
+    if not force_recalc:
+        cached = load_cached_result(run_id)
+        if cached:
+            return cached
 
-    return mean_a, stddev_a
+    try:
+        if not os.path.isdir(path):
+             return {"error": "Directory not found"}
 
+        exp_data = do.ExperimentData(path)
+
+        result = sommer_parameter(exp_data)
+        
+        result["path"] = path
+        result["run_id"] = run_id
+
+        if "error" not in result:
+            save_result(run_id, result)
+            
+        return result
+        
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
-    args = argparse.ArgumentParser()
-    args.add_argument("path", type=str, help="Path to dataset folder")
-    parsed_args = args.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", type=str, help="Path to dataset folder")
+    parser.add_argument("--force", action="store_true", help="Force recalculation")
+    args = parser.parse_args()
     
-    path = parsed_args.path
-    # path = "../data/20251205/3" 
-    
-    try:
-        exp_data = do.ExperimentData(path)
-        sommer_parameter(exp_data)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    print(f"Processing {args.path}...")
+    res = get_or_calculate(args.path, force_recalc=args.force)
+    print(json.dumps(res, indent=2))

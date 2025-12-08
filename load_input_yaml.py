@@ -8,9 +8,6 @@ from typing import List, Tuple
 import yaml
 import argparse
 
-
-# ---------- Dataclass definitions ----------
-
 @dataclass
 class MetropolisParams:
     Ndims: int
