@@ -100,6 +100,7 @@ def fit_potential_from_time(
         ws = np.array([p[1] for p in points])
         
         try:
+            # Initial guess
             p0_V = -np.log(ws[1]/ws[0]) if ws[0] > 0 and ws[1] > 0 else 0.5
             p0_C = ws[0] * np.exp(p0_V * ts[0])
             

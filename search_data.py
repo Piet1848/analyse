@@ -27,10 +27,6 @@ CALCULATED_FIELDS = {
 }
 
 def build_field_map() -> Dict[str, Tuple[str, Any]]:
-    """
-    Map parameter name -> (block_name, type).
-    block_name is "metro", "gauge", or "calc".
-    """
     field_map: Dict[str, Tuple[str, Any]] = {}
 
     metro_types = get_type_hints(MetropolisParams)
