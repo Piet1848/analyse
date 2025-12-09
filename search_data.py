@@ -2,9 +2,7 @@
 """
 Search lattice runs by YAML parameters AND calculated results.
 Sorts output by the order of requested parameters.
-
-Usage examples:
-python3 search_data.py ../data beta=2.3 r0 a
+Parallelized version.
 """
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ import argparse
 import os
 import sys
 from typing import Any, Dict, Tuple, List, Optional, get_type_hints, get_origin
+import concurrent.futures  # Import for parallel execution
 
 # Import the calculation logic
 import run_evaluation
@@ -105,10 +104,45 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
             matches.append(dirpath)
     return matches
 
+# --- Helper function for Parallel Processing ---
+def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
+    """
+    Worker function to process a single path.
+    Loads params, runs calculation if needed, and extracts output values.
+    """
+    try:
+        metro, gauge = load_params(os.path.join(path, "input.yaml"))
+        
+        # Check if we need to run calculations based on requested outputs
+        needs_calc = any(FIELD_MAP[out][0] == "calc" for out in outputs)
+        
+        calc_data = None
+        if needs_calc:
+            # This is the expensive part that runs in parallel
+            calc_data = run_evaluation.get_or_calculate(path)
+
+        vals = []
+        for name in outputs:
+            block, _ = FIELD_MAP[name]
+            if block == "metro":
+                vals.append(getattr(metro, name))
+            elif block == "gauge":
+                vals.append(getattr(gauge, name))
+            elif block == "calc":
+                if calc_data and "error" not in calc_data:
+                    vals.append(calc_data.get(name, None))
+                else:
+                    vals.append(None)
+        return path, vals
+    except Exception as e:
+        # Return path and None values in case of failure to keep alignment
+        return path, [None] * len(outputs)
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search data runs and calculate missing values.")
     parser.add_argument("root", help="Root data directory")
     parser.add_argument("tokens", nargs="*", help="Filters (NAME=VAL) and outputs (NAME)")
+    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of parallel workers")
     args = parser.parse_args()
 
     if not args.tokens:
@@ -130,38 +164,25 @@ def main() -> None:
         print("No matching runs found.")
         return
 
-    # Fetch Data
+    print(f"Found {len(matches)} matching runs. Processing with {args.workers} workers...", file=sys.stderr)
+
     rows = []
-    for path in matches:
-        metro, gauge = load_params(os.path.join(path, "input.yaml"))
+    # Use ProcessPoolExecutor to parallelize the work
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_row, path, outputs): path for path in matches}
         
-        calc_data = None
-        needs_calc = any(FIELD_MAP[out][0] == "calc" for out in outputs)
-        
-        if needs_calc:
-            print(f"Fetching/Calculating for {os.path.basename(path)}...", file=sys.stderr, end="\r")
-            calc_data = run_evaluation.get_or_calculate(path)
+        # Gather results as they complete
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            path, vals = future.result()
+            rows.append((path, vals))
+            # Optional: Simple progress indicator
+            print(f"Processed {i+1}/{len(matches)}", file=sys.stderr, end="\r")
 
-        vals = []
-        for name in outputs:
-            block, _ = FIELD_MAP[name]
-            if block == "metro":
-                vals.append(getattr(metro, name))
-            elif block == "gauge":
-                vals.append(getattr(gauge, name))
-            elif block == "calc":
-                if calc_data and "error" not in calc_data:
-                    vals.append(calc_data.get(name, None))
-                else:
-                    vals.append(None)
-        
-        rows.append((path, vals))
-    
-    print(" " * 60, file=sys.stderr, end="\r")
+    print(" " * 60, file=sys.stderr, end="\r") # Clear progress line
 
-    # Sorting 
+    # Sorting logic
     def sort_key(row):
-        # row is (path, vals)
         key_parts = []
         for val in row[1]:
             if val is None:
@@ -172,8 +193,10 @@ def main() -> None:
 
     rows.sort(key=sort_key)
 
+    # Print Header
     print("\t".join(["path"] + outputs))
 
+    # Print Data
     for path, vals in rows:
         out_strs = [str(v) if v is not None else "N/A" for v in vals]
         print("\t".join([path] + out_strs))
