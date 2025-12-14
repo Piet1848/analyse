@@ -142,7 +142,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Search data runs and calculate missing values.")
     parser.add_argument("root", help="Root data directory")
     parser.add_argument("tokens", nargs="*", help="Filters (NAME=VAL) and outputs (NAME)")
-    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers")
     args = parser.parse_args()
 
     if not args.tokens:

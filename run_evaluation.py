@@ -48,7 +48,7 @@ def save_result(run_id: str, data: Dict[str, Any]):
 def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[str, Any]:
     """
     Calculate Sommer parameter and Lattice spacing.
-    Returns a dictionary of results.
+    Uses iterative bootstrapping to save RAM.
     """
     # Check if data available
     if "W_temp" not in data.data or not data.data["W_temp"]:
@@ -56,39 +56,47 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
 
     fileData = data.data["W_temp"][0] 
     
-    # --- FIX 1: Apply Thermalization Cut ---
-    # This removes the initial configurations before bootstrapping
+    # 1. Apply Thermalization Cut
     fileData.remove_thermalization(THERMALIZATION_STEPS)
     
     if not fileData.observables or len(fileData.observables[0].values) == 0:
         return {"error": "No data left after thermalization cut"}
 
-    # Bootstrap samples
-    fileData_bootstrap = fileData.get_bootstrap(n_bootstrap=200, seed=42)
-
     sommer_parameters = []
     lattice_spacings = []
+    
+    # --- SMART MEMORY FIX ---
+    # Instead of generating 200 samples at once, we loop and generate 1 at a time.
+    # This keeps RAM usage constant (low) throughout the process.
+    n_bootstrap_samples = 200
+    base_seed = 42
 
-    for fd in fileData_bootstrap:
+    for i in range(n_bootstrap_samples):
+        # Generate exactly ONE bootstrap sample
+        # We use (base_seed + i) to ensure every sample is unique but reproducible
+        # [0] is needed because get_bootstrap returns a list
+        fd = fileData.get_bootstrap(n_bootstrap=1, seed=base_seed + i)[0]
+
+        # --- Analysis Logic (Same as before) ---
         records = wilson.load_w_temp(fd.observables)
         averages = wilson.average_wilson_loops(records)
         
-        # --- FIX 2: Use Weighted Fit ---
-        # Capture errors from the first fit
+        # Fit Potential
         potentials, errors = wilson.fit_potential_from_time(averages, t_min=2)
         
-        # Pass errors to the second fit
+        # Fit Sommer Parameter
         r0_over_a, _ = wilson.fit_sommer_parameter(
             potentials, 
-            errors=errors,  # <--- Critical fix
+            errors=errors,
             target_force_r2=sommer_target
         )
 
         if r0_over_a and r0_over_a > 0:
-            # Assuming r0_phys = 0.5 fm
             lattice_spacing = 0.5 / r0_over_a 
             sommer_parameters.append(r0_over_a)
             lattice_spacings.append(lattice_spacing)
+        
+        # Python automatically frees the memory for 'fd' here because it goes out of scope
     
     if not lattice_spacings:
         return {"error": "Could not determine Sommer parameter"}
