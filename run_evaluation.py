@@ -11,6 +11,11 @@ import argparse
 
 CALC_RESULT_BASE = Path("../data/calcResult")
 
+# --- CONFIGURATION ---
+# Number of update steps to discard as thermalization
+THERMALIZATION_STEPS = 500 
+# ---------------------
+
 def get_run_id(path: str) -> str:
     """
     Generate a unique, filesystem-safe ID for a dataset path.
@@ -51,6 +56,13 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
 
     fileData = data.data["W_temp"][0] 
     
+    # --- FIX 1: Apply Thermalization Cut ---
+    # This removes the initial configurations before bootstrapping
+    fileData.remove_thermalization(THERMALIZATION_STEPS)
+    
+    if not fileData.observables or len(fileData.observables[0].values) == 0:
+        return {"error": "No data left after thermalization cut"}
+
     # Bootstrap samples
     fileData_bootstrap = fileData.get_bootstrap(n_bootstrap=200, seed=42)
 
@@ -60,8 +72,17 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
     for fd in fileData_bootstrap:
         records = wilson.load_w_temp(fd.observables)
         averages = wilson.average_wilson_loops(records)
-        potentials, _ = wilson.fit_potential_from_time(averages, t_min=2)
-        r0_over_a, _ = wilson.fit_sommer_parameter(potentials, target_force_r2=sommer_target)
+        
+        # --- FIX 2: Use Weighted Fit ---
+        # Capture errors from the first fit
+        potentials, errors = wilson.fit_potential_from_time(averages, t_min=2)
+        
+        # Pass errors to the second fit
+        r0_over_a, _ = wilson.fit_sommer_parameter(
+            potentials, 
+            errors=errors,  # <--- Critical fix
+            target_force_r2=sommer_target
+        )
 
         if r0_over_a and r0_over_a > 0:
             # Assuming r0_phys = 0.5 fm
