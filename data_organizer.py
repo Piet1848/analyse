@@ -6,6 +6,34 @@ import csv
 import numpy as np
 
 
+class VariableData:
+    def __init__(self, name: str):
+        self.name = name
+        self.value = None
+        self.error = None
+        self.bootstrap_samples = None
+
+    def set_value(self, value: Any, bootstrap_samples: List[Any] = None):
+        self.value = value
+        if bootstrap_samples is not None:
+            self.bootstrap_samples = bootstrap_samples
+            self.error = np.std(bootstrap_samples)
+        else:
+            self.error = None
+
+    def get(self) -> Any:
+        return self.value
+
+    def err(self) -> Any:
+        return self.error
+    
+    def bootstrap(self) -> List[Any]:
+        return self.bootstrap_samples
+    
+    def __repr__(self):
+        return f"VariableData(name={self.name}, value={self.value}, error={self.error})"
+
+
 class ObservableData:
     def __init__(self, name: str, values: List[float] = None):
         self.name = name
