@@ -13,8 +13,9 @@ CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
 
 def get_run_id(path: str) -> str:
-    abs_path = os.path.abspath(path)
-    return hashlib.md5(abs_path.encode('utf-8')).hexdigest()
+    # Use relative path from the script location or project root
+    rel_path = os.path.relpath(path, start="../data") 
+    return hashlib.md5(rel_path.encode('utf-8')).hexdigest()
 
 def get_result_path(run_id: str) -> Path:
     return CALC_RESULT_BASE / f"{run_id}.json"
