@@ -45,15 +45,20 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
     Calculate Sommer parameter and Lattice spacing.
     Returns a dictionary of results.
     """
-    # Check if data available
     if "W_temp" not in data.data or not data.data["W_temp"]:
         return {"error": "No W_temp data found"}
 
     fileData = data.data["W_temp"][0] 
     
-    # Bootstrap samples
+    # --- NEW: Calculate Nominal Fit (for plotting) ---
+    records_nominal = wilson.load_w_temp(fileData.observables)
+    avgs_nominal = wilson.average_wilson_loops(records_nominal)
+    pots_nominal, errs_nominal = wilson.fit_potential_from_time(avgs_nominal, t_min=2)
+    _, params_nominal = wilson.fit_sommer_parameter(pots_nominal, target_force_r2=sommer_target)
+    
+    # Bootstrap samples (existing code)
     fileData_bootstrap = fileData.get_bootstrap(n_bootstrap=200, seed=42)
-
+    
     sommer_parameters = []
     lattice_spacings = []
 
@@ -64,7 +69,6 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
         r0_over_a, _ = wilson.fit_sommer_parameter(potentials, target_force_r2=sommer_target)
 
         if r0_over_a and r0_over_a > 0:
-            # Assuming r0_phys = 0.5 fm
             lattice_spacing = 0.5 / r0_over_a 
             sommer_parameters.append(r0_over_a)
             lattice_spacings.append(lattice_spacing)
@@ -72,7 +76,6 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
     if not lattice_spacings:
         return {"error": "Could not determine Sommer parameter"}
 
-    # Compute statistics
     mean_a = float(np.mean(lattice_spacings))
     stddev_a = float(np.std(lattice_spacings, ddof=1))
     mean_r0 = float(np.mean(sommer_parameters))
@@ -83,7 +86,13 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
         "r0_err": stddev_r0,
         "a": mean_a,
         "a_err": stddev_a,
-        "n_samples": len(lattice_spacings)
+        "n_samples": len(lattice_spacings),
+        # --- NEW: Return nominal data for plotting ---
+        "plot_meta": {
+            "potentials": pots_nominal,          # The V(r) points
+            "potential_errors": errs_nominal,    # Errors on V(r)
+            "cornell_params": params_nominal     # The fit A, B, sigma
+        }
     }
 
 def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
