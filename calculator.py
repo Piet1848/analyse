@@ -55,8 +55,8 @@ class Calculator:
     
     ### Variable implementations ###
 
-    @register("V_R_T")
-    def _calc_V_R_T(self, R: int, T: int) -> data_organizer.VariableData:
+    @register("W_R_T")
+    def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData:
         try:
             obs_val = self.file_data.get("W_temp").values 
             obs_L   = self.file_data.get("L").values
@@ -75,7 +75,7 @@ class Calculator:
         if len(selected_values) == 0:
             raise ValueError(f"No data found for R={R}, T={T}")
 
-        var_data = data_organizer.VariableData("V_R_T")
+        var_data = data_organizer.VariableData("W_R_T")
         
         mean_val = np.mean(selected_values)
         var_data.set_value(mean_val, bootstrap_samples=selected_values, R=R, T=T)
