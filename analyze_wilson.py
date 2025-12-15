@@ -104,7 +104,16 @@ def fit_potential_from_time(
             p0_V = -np.log(ws[1]/ws[0]) if ws[0] > 0 and ws[1] > 0 else 0.5
             p0_C = ws[0] * np.exp(p0_V * ts[0])
             
-            popt, pcov = curve_fit(exponential_ansatz, ts, ws, p0=[p0_C, p0_V])
+            # FIX: Add bounds. 
+            # Bounds format is ([low_C, low_V], [high_C, high_V])
+            # We restrict V to be > -10 (or 0) to prevent -V*t from blowing up.
+            popt, pcov = curve_fit(
+                exponential_ansatz, 
+                ts, 
+                ws, 
+                p0=[p0_C, p0_V],
+                bounds=([-np.inf, -10.0], [np.inf, np.inf]) 
+            )
             
             V_fit = popt[1]
             V_err = np.sqrt(np.diag(pcov))[1]
@@ -120,8 +129,10 @@ def fit_potential_from_time(
 
 def fit_sommer_parameter(
     potentials: Dict[int, float], 
+    errors: Dict[int, float] = None,   # <--- NEW ARGUMENT
     target_force_r2: float = 1.65
 ) -> Tuple[float | None, Dict[str, float] | None]:
+    
     Ls = sorted(potentials.keys())
     if len(Ls) < 3:
         return None, None
@@ -129,17 +140,38 @@ def fit_sommer_parameter(
     rs = np.array(Ls, dtype=float)
     Vs = np.array([potentials[L] for L in Ls])
     
+    # Setup weights (errors)
+    sigma = None
+    if errors is not None:
+        # Extract errors in the same order as Ls
+        sigma = np.array([errors.get(L, 1.0) for L in Ls])
+        
+        # Handle zero or missing errors to prevent div-by-zero in curve_fit
+        # If error is 0 or None, set it to a high number (low weight) or average
+        avg_err = np.mean([e for e in sigma if e > 0]) if np.any(sigma > 0) else 1.0
+        sigma = np.where(sigma <= 0, avg_err * 10, sigma)
+
     try:
-        popt, _ = curve_fit(cornell_potential_ansatz, rs, Vs, p0=[0.0, 0.1, 0.26])
-        A, sigma, B = popt
+        # Pass sigma to curve_fit for weighted least squares
+        # absolute_sigma=True means the errors are real physical units, not just relative weights
+        popt, pcov = curve_fit(
+            cornell_potential_ansatz, 
+            rs, 
+            Vs, 
+            p0=[0.0, 0.1, 0.26],
+            sigma=sigma,             # <--- USE ERRORS
+            absolute_sigma=(sigma is not None)
+        )
+        
+        A, sigma_val, B = popt
         
         numerator = target_force_r2 - B
-        if numerator < 0 or sigma <= 0:
-            return None, {'A': A, 'sigma': sigma, 'B': B}
+        if numerator < 0 or sigma_val <= 0:
+            return None, {'A': A, 'sigma': sigma_val, 'B': B}
             
-        r0 = np.sqrt(numerator / sigma)
+        r0 = np.sqrt(numerator / sigma_val)
         
-        return r0, {'A': A, 'sigma': sigma, 'B': B}
+        return r0, {'A': A, 'sigma': sigma_val, 'B': B}
         
     except (RuntimeError, ValueError):
         return None, None

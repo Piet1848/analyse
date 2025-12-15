@@ -15,6 +15,11 @@ class ObservableData:
 
     def extend(self, values: List[float]):
         self.values.extend(values)
+        
+    def slice(self, indices: List[int]):
+        """Keep only values at specific indices."""
+        # Use numpy for faster indexing if possible, but list comp is fine here
+        self.values = [self.values[i] for i in indices]
 
     def __repr__(self):
         sample = self.values[:5]
@@ -24,6 +29,9 @@ class ObservableData:
         """Generate bootstrap samples for this observable."""
         rng = np.random.default_rng(seed)
         arr = np.array(self.values)
+        if len(arr) == 0:
+            return [ObservableData(self.name, []) for _ in range(n_bootstrap)]
+            
         indices = rng.integers(0, len(arr), size=(n_bootstrap, len(arr)))
         return [ObservableData(self.name, arr[idx].tolist()) for idx in indices]
 
@@ -41,33 +49,49 @@ class FileData:
 
         with self.path.open() as f:
             reader = csv.reader(f)
-            # get header safely
             headers = next(reader, None)
             if headers is None:
-                # empty file -> leave observables empty and return
                 return self
 
-            # normalize header names (strip BOM if present)
             headers = [h.strip().lstrip("\ufeff") for h in headers]
             self.observables = [ObservableData(name) for name in headers]
 
             for row_idx, row in enumerate(reader, start=1):
-                # skip blank rows
                 if not row or all(not cell.strip() for cell in row):
                     continue
                 if len(row) < len(self.observables):
-                    raise ValueError(
-                        f"Row {row_idx} in {self.path} has fewer columns than header: {row!r}"
-                    )
-                # only map up to number of headers
+                    continue # Skip malformed rows
+                
                 for obs, val in zip(self.observables, row):
                     try:
                         obs.append(float(val))
-                    except ValueError as e:
-                        raise ValueError(f"Non-numeric value in {self.path} row {row_idx}: {val!r}") from e
+                    except ValueError:
+                        pass # Skip non-numeric
 
         return self
 
+    def remove_thermalization(self, min_step: int):
+        """
+        Discard all data points where 'step' < min_step.
+        Looks for column named '# step' or 'step'.
+        """
+        step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
+        
+        if step_obs is None:
+            # If no step column found, we cannot reliably thermalize by step count.
+            # You might optionally warn here.
+            return
+
+        # Find indices where step >= min_step
+        keep_indices = [i for i, s in enumerate(step_obs.values) if s >= min_step]
+        
+        # If no data needs to be removed
+        if len(keep_indices) == len(step_obs.values):
+            return
+
+        # Update ALL observables in this file to keep only these rows
+        for obs in self.observables:
+            obs.slice(keep_indices)
 
     def get(self, name: str) -> ObservableData:
         for obs in self.observables:
@@ -92,10 +116,11 @@ class ExperimentData:
         self.path = Path(path)
         self.data: Dict[str, List[FileData]] = self._get_data()
 
-
     def _get_data(self) -> Dict[str, List[FileData]]:
-        """Scan the folder for .out files and return a dict of FileData lists."""
         data_dict: Dict[str, List[FileData]] = {}
+        if not self.path.exists():
+            return data_dict
+            
         for file_path in self.path.iterdir():
             if file_path.is_file() and file_path.suffix == ".out" and not file_path.name.startswith("_"):
                 fd = FileData(str(file_path))
@@ -103,9 +128,7 @@ class ExperimentData:
                 data_dict.setdefault(file_path.stem, []).append(fd)
         return data_dict
 
-
     def get_bootstrap_data(self, n_bootstrap: int, seed: int) -> List[ExperimentData]:
-        """Generate bootstrap samples for all files and observables in the experiment."""
         bootstrap_experiments: List[ExperimentData] = []
         for i in range(n_bootstrap):
             bootstrap_exp = ExperimentData(str(self.path))
@@ -121,9 +144,9 @@ class ExperimentData:
             bootstrap_experiments.append(bootstrap_exp)
         return bootstrap_experiments
 
-
 if __name__ == "__main__":
     exp_data = ExperimentData("../data/20251124/01/")
-    bootstrap_samples = exp_data.get_bootstrap_data(n_bootstrap=1000, seed=42)
-    for obs_name, samples in bootstrap_samples.items():
-        print(f"Observable: {obs_name}, Number of bootstrap samples: {len(samples)}")
+    # Test thermalization
+    # for files in exp_data.data.values():
+    #     for f in files: f.remove_thermalization(100)
+    pass

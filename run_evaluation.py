@@ -11,6 +11,11 @@ import argparse
 
 CALC_RESULT_BASE = Path("../data/calcResult")
 
+# --- CONFIGURATION ---
+# Number of update steps to discard as thermalization
+THERMALIZATION_STEPS = 500 
+# ---------------------
+
 def get_run_id(path: str) -> str:
     """
     Generate a unique, filesystem-safe ID for a dataset path.
@@ -43,35 +48,54 @@ def save_result(run_id: str, data: Dict[str, Any]):
 def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[str, Any]:
     """
     Calculate Sommer parameter and Lattice spacing.
-    Returns a dictionary of results.
+    Uses iterative bootstrapping to save RAM.
     """
     if "W_temp" not in data.data or not data.data["W_temp"]:
         return {"error": "No W_temp data found"}
 
     fileData = data.data["W_temp"][0] 
     
-    # --- NEW: Calculate Nominal Fit (for plotting) ---
-    records_nominal = wilson.load_w_temp(fileData.observables)
-    avgs_nominal = wilson.average_wilson_loops(records_nominal)
-    pots_nominal, errs_nominal = wilson.fit_potential_from_time(avgs_nominal, t_min=2)
-    _, params_nominal = wilson.fit_sommer_parameter(pots_nominal, target_force_r2=sommer_target)
+    # 1. Apply Thermalization Cut
+    fileData.remove_thermalization(THERMALIZATION_STEPS)
     
-    # Bootstrap samples (existing code)
-    fileData_bootstrap = fileData.get_bootstrap(n_bootstrap=200, seed=42)
-    
+    if not fileData.observables or len(fileData.observables[0].values) == 0:
+        return {"error": "No data left after thermalization cut"}
+
     sommer_parameters = []
     lattice_spacings = []
+    
+    # --- SMART MEMORY FIX ---
+    # Instead of generating 200 samples at once, we loop and generate 1 at a time.
+    # This keeps RAM usage constant (low) throughout the process.
+    n_bootstrap_samples = 200
+    base_seed = 42
 
-    for fd in fileData_bootstrap:
+    for i in range(n_bootstrap_samples):
+        # Generate exactly ONE bootstrap sample
+        # We use (base_seed + i) to ensure every sample is unique but reproducible
+        # [0] is needed because get_bootstrap returns a list
+        fd = fileData.get_bootstrap(n_bootstrap=1, seed=base_seed + i)[0]
+
+        # --- Analysis Logic (Same as before) ---
         records = wilson.load_w_temp(fd.observables)
         averages = wilson.average_wilson_loops(records)
-        potentials, _ = wilson.fit_potential_from_time(averages, t_min=2)
-        r0_over_a, _ = wilson.fit_sommer_parameter(potentials, target_force_r2=sommer_target)
+        
+        # Fit Potential
+        potentials, errors = wilson.fit_potential_from_time(averages, t_min=2)
+        
+        # Fit Sommer Parameter
+        r0_over_a, _ = wilson.fit_sommer_parameter(
+            potentials, 
+            errors=errors,
+            target_force_r2=sommer_target
+        )
 
         if r0_over_a and r0_over_a > 0:
             lattice_spacing = 0.5 / r0_over_a 
             sommer_parameters.append(r0_over_a)
             lattice_spacings.append(lattice_spacing)
+        
+        # Python automatically frees the memory for 'fd' here because it goes out of scope
     
     if not lattice_spacings:
         return {"error": "Could not determine Sommer parameter"}
