@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
+from collections import defaultdict
 import csv
 import numpy as np
 
@@ -18,7 +19,6 @@ class ObservableData:
         
     def slice(self, indices: List[int]):
         """Keep only values at specific indices."""
-        # Use numpy for faster indexing if possible, but list comp is fine here
         self.values = [self.values[i] for i in indices]
 
     def __repr__(self):
@@ -26,7 +26,7 @@ class ObservableData:
         return f"ObservableData(name={self.name}, values={sample}{'...' if len(self.values) > 5 else ''})"
     
     def get_bootstrap_samples(self, n_bootstrap: int, seed: int) -> List[ObservableData]:
-        """Generate bootstrap samples for this observable."""
+        """Generate independent (IID) bootstrap samples."""
         rng = np.random.default_rng(seed)
         arr = np.array(self.values)
         if len(arr) == 0:
@@ -43,7 +43,7 @@ class FileData:
         self.observables: List[ObservableData] = []
 
     def read_file(self):
-        """Read CSV and populate observables. Skip empty files gracefully."""
+        """Read CSV and populate observables."""
         if not self.path.exists():
             raise FileNotFoundError(f"{self.path} not found")
 
@@ -60,36 +60,23 @@ class FileData:
                 if not row or all(not cell.strip() for cell in row):
                     continue
                 if len(row) < len(self.observables):
-                    continue # Skip malformed rows
+                    continue 
                 
                 for obs, val in zip(self.observables, row):
                     try:
                         obs.append(float(val))
                     except ValueError:
-                        pass # Skip non-numeric
+                        pass
 
         return self
 
     def remove_thermalization(self, min_step: int):
-        """
-        Discard all data points where 'step' < min_step.
-        Looks for column named '# step' or 'step'.
-        """
         step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
-        
-        if step_obs is None:
-            # If no step column found, we cannot reliably thermalize by step count.
-            # You might optionally warn here.
-            return
+        if step_obs is None: return
 
-        # Find indices where step >= min_step
         keep_indices = [i for i, s in enumerate(step_obs.values) if s >= min_step]
-        
-        # If no data needs to be removed
-        if len(keep_indices) == len(step_obs.values):
-            return
+        if len(keep_indices) == len(step_obs.values): return
 
-        # Update ALL observables in this file to keep only these rows
         for obs in self.observables:
             obs.slice(keep_indices)
 
@@ -100,7 +87,7 @@ class FileData:
         raise ValueError(f"Observable '{name}' not found in {self.path}")
     
     def get_bootstrap(self, n_bootstrap: int, seed: int) -> List[FileData]:
-        """Generate bootstrap samples for all observables in the file."""
+        """Legacy IID bootstrap (row-based)."""
         bootstrap_files: List[FileData] = []
         for i in range(n_bootstrap):
             bootstrap_file = FileData(self.path)
@@ -108,6 +95,63 @@ class FileData:
                 obs.get_bootstrap_samples(1, seed + i)[0] for obs in self.observables
             ]
             bootstrap_files.append(bootstrap_file)
+        return bootstrap_files
+
+    def get_blocked_bootstrap(self, n_bootstrap: int, block_size: int, seed: int) -> List[FileData]:
+        """
+        Generate bootstrap samples using BLOCKED resampling of STEPS.
+        1. Identifies unique steps.
+        2. Resamples steps in blocks of size `block_size` to preserve autocorrelation.
+        3. Selects all data rows corresponding to the sampled steps.
+        """
+        step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
+        if step_obs is None or block_size <= 1:
+            # Fallback to standard if no step info or block_size is 1
+            return self.get_bootstrap(n_bootstrap, seed)
+            
+        steps = np.array(step_obs.values)
+        unique_steps = np.unique(steps) # Sorted unique steps
+        n_steps = len(unique_steps)
+        
+        # Map step -> list of row indices
+        # (Optimization: We assume data might be interleaved, so we build a full map)
+        step_to_indices = defaultdict(list)
+        for idx, s in enumerate(steps):
+            step_to_indices[s].append(idx)
+            
+        rng = np.random.default_rng(seed)
+        bootstrap_files = []
+        
+        for _ in range(n_bootstrap):
+            # Block Bootstrap the unique steps
+            n_blocks = int(np.ceil(n_steps / block_size))
+            max_start = max(1, n_steps - block_size + 1)
+            
+            # Pick random start positions for blocks
+            starts = rng.integers(0, max_start, size=n_blocks)
+            
+            selected_row_indices = []
+            
+            for start_idx in starts:
+                end_idx = min(start_idx + block_size, n_steps)
+                block_steps = unique_steps[start_idx : end_idx]
+                
+                for s in block_steps:
+                    selected_row_indices.extend(step_to_indices[s])
+            
+            # Construct new FileData with these rows
+            # We convert to numpy for faster indexing
+            new_fd = FileData(str(self.path))
+            new_fd.observables = []
+            
+            for obs in self.observables:
+                arr = np.array(obs.values)
+                # Take slice
+                new_vals = arr[selected_row_indices].tolist()
+                new_fd.observables.append(ObservableData(obs.name, new_vals))
+                
+            bootstrap_files.append(new_fd)
+            
         return bootstrap_files
 
 
@@ -127,26 +171,3 @@ class ExperimentData:
                 fd.read_file()
                 data_dict.setdefault(file_path.stem, []).append(fd)
         return data_dict
-
-    def get_bootstrap_data(self, n_bootstrap: int, seed: int) -> List[ExperimentData]:
-        bootstrap_experiments: List[ExperimentData] = []
-        for i in range(n_bootstrap):
-            bootstrap_exp = ExperimentData(str(self.path))
-            bootstrap_exp.data = {}
-            for obs_name, file_list in self.data.items():
-                bootstrap_exp.data[obs_name] = []
-                for file_data in file_list:
-                    bootstrap_file = FileData(str(file_data.path))
-                    bootstrap_file.observables = [
-                        obs.get_bootstrap_samples(1, seed + i)[0] for obs in file_data.observables
-                    ]
-                    bootstrap_exp.data[obs_name].append(bootstrap_file)
-            bootstrap_experiments.append(bootstrap_exp)
-        return bootstrap_experiments
-
-if __name__ == "__main__":
-    exp_data = ExperimentData("../data/20251124/01/")
-    # Test thermalization
-    # for files in exp_data.data.values():
-    #     for f in files: f.remove_thermalization(100)
-    pass

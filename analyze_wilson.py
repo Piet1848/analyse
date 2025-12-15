@@ -37,11 +37,49 @@ class DatasetResult:
     physical_extent_fm: Tuple[float, float, float, float] | None
     physical_volume_fm4: float | None
     
+    # New field for autocorrelation
+    tau_int: float | None = None
+    
     dataset: str = "Unknown"
     beta: float | None = None
     epsilon1: float | None = None
     epsilon2: float | None = None
     lattice_extents: Tuple[int, int, int, int] | None = None
+
+
+def calculate_tau_int(series: np.ndarray, S: float = 1.5) -> float:
+    """
+    Calculate the integrated autocorrelation time tau_int using 
+    automatic windowing (W >= S * tau).
+    """
+    n = len(series)
+    if n < 100: return 0.5 # Not enough data
+    
+    # Subtract mean
+    series = series - np.mean(series)
+    var = np.var(series)
+    if var == 0: return 0.5
+
+    # Calculate autocorrelation function rho(t) using FFT
+    ft = np.fft.rfft(series)
+    spec = np.abs(ft)**2
+    acf = np.fft.irfft(spec)
+    # Only keep first half
+    acf = acf[:n//2] 
+    
+    # Normalize
+    # We use simple N normalization for the FFT estimate
+    rho = (acf / np.arange(n, n - len(acf), -1)) / var 
+
+    # Integrate rho to find tau
+    tau = 0.5
+    for t in range(1, len(rho)):
+        tau += rho[t]
+        # Automatic Windowing condition
+        if t >= S * tau:
+            return tau
+            
+    return tau
 
 
 def load_w_temp(WLoop: list[do.ObservableData]) -> List[WilsonLoopRecord]:
@@ -85,7 +123,7 @@ def fit_potential_from_time(
     # Group data by L
     data_by_L = defaultdict(list)
     for (L, T), val in avg.items():
-        if T >= t_min and val > 0: # Filter early times and bad data
+        if T >= t_min and val > 0: 
             data_by_L[L].append((T, val))
     
     potentials = {}
@@ -104,9 +142,6 @@ def fit_potential_from_time(
             p0_V = -np.log(ws[1]/ws[0]) if ws[0] > 0 and ws[1] > 0 else 0.5
             p0_C = ws[0] * np.exp(p0_V * ts[0])
             
-            # FIX: Add bounds. 
-            # Bounds format is ([low_C, low_V], [high_C, high_V])
-            # We restrict V to be > -10 (or 0) to prevent -V*t from blowing up.
             popt, pcov = curve_fit(
                 exponential_ansatz, 
                 ts, 
@@ -121,7 +156,6 @@ def fit_potential_from_time(
             potentials[L] = V_fit
             errors[L] = V_err
         except (RuntimeError, ValueError, Warning):
-            # Fallback or skip if fit fails
             pass
             
     return potentials, errors
@@ -129,7 +163,7 @@ def fit_potential_from_time(
 
 def fit_sommer_parameter(
     potentials: Dict[int, float], 
-    errors: Dict[int, float] = None,   # <--- NEW ARGUMENT
+    errors: Dict[int, float] = None,
     target_force_r2: float = 1.65
 ) -> Tuple[float | None, Dict[str, float] | None]:
     
@@ -140,26 +174,19 @@ def fit_sommer_parameter(
     rs = np.array(Ls, dtype=float)
     Vs = np.array([potentials[L] for L in Ls])
     
-    # Setup weights (errors)
     sigma = None
     if errors is not None:
-        # Extract errors in the same order as Ls
         sigma = np.array([errors.get(L, 1.0) for L in Ls])
-        
-        # Handle zero or missing errors to prevent div-by-zero in curve_fit
-        # If error is 0 or None, set it to a high number (low weight) or average
         avg_err = np.mean([e for e in sigma if e > 0]) if np.any(sigma > 0) else 1.0
         sigma = np.where(sigma <= 0, avg_err * 10, sigma)
 
     try:
-        # Pass sigma to curve_fit for weighted least squares
-        # absolute_sigma=True means the errors are real physical units, not just relative weights
         popt, pcov = curve_fit(
             cornell_potential_ansatz, 
             rs, 
             Vs, 
             p0=[0.0, 0.1, 0.26],
-            sigma=sigma,             # <--- USE ERRORS
+            sigma=sigma,             
             absolute_sigma=(sigma is not None)
         )
         
@@ -175,30 +202,3 @@ def fit_sommer_parameter(
         
     except (RuntimeError, ValueError):
         return None, None
-
-# --- Formatting ---
-def format_dataset_result(result: DatasetResult) -> str:
-    lines: List[str] = []
-    header = f"Dataset: {result.dataset}"
-    if result.beta is not None:
-        header += f" (beta={result.beta})"
-    lines.append(header)
-
-    lines.append("  Fitted Potentials V(R) [from W(T) = C*exp(-VT)]:")
-    for L in sorted(result.effective_potential):
-        V = result.effective_potential[L]
-        err = result.potential_errors.get(L, 0.0)
-        lines.append(f"    R={L:>2d}: V={V:.6f} +/- {err:.6f}")
-
-    if result.cornell_params:
-        p = result.cornell_params
-        lines.append("  Cornell Fit V(r) = A + sigma*r - B/r:")
-        lines.append(f"    sigma={p['sigma']:.4f}, B={p['B']:.4f}, A={p['A']:.4f}")
-
-    if result.r0_over_a is not None:
-        lines.append(f"  Sommer parameter r0/a: {result.r0_over_a:.4f}")
-        lines.append(f"  Lattice spacing a [fm] (assuming r0=0.5 fm): {result.lattice_spacing_fm:.4f}")
-    else:
-        lines.append("  Sommer parameter r0/a: Could not be determined.")
-        
-    return "\n".join(lines)
