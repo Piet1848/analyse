@@ -18,9 +18,24 @@ def get_key_params(key: Key) -> dict[str, Any]:
 def exponential_ansatz(t, C, V):
     return C * np.exp(-V * t)
 
+def cornell_potential_ansatz(r, A, sigma, B):
+    return A + sigma * r - B / r
+
+def register(name: str):
+    def decorator(method):
+        method._calc_name = name
+        return method
+    return decorator
+
 
 class Calculator:
     _registry: dict[str, Callable] = {}
+
+    def __init_subclass__(cls):
+        super().__init_subclass__()
+        for attr in cls.__dict__.values():
+            if callable(attr) and hasattr(attr, "_calc_name"):
+                cls._registry[attr._calc_name] = attr
 
     def __init__(self, file_data: data_organizer.FileData, n_bootstrap: int = 200, seed: int = 42, step_size: int = 1):
         self.file_data = file_data
@@ -33,14 +48,6 @@ class Calculator:
         
         # Cache for indices
         self._bootstrap_indices: np.ndarray | None = None
-
-    @classmethod
-    def register(cls, name: str):
-        """Decorator to register a method as a calculator for a specific variable name."""
-        def decorator(method):
-            cls._registry[name] = method
-            return method
-        return decorator
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
         key = make_key(name, params)
@@ -190,4 +197,144 @@ class Calculator:
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min)
         
+        return var_data
+    
+    @register("tau_int")
+    def _calc_tau_int(self, obs_name: str = "plaquette", S: float = 1.5) -> data_organizer.VariableData:
+        try:
+            obs = self.get_observable(obs_name)
+        except KeyError:
+            # Fallback for commonly used names if exact match fails
+            found = False
+            for alias in ["plaquette", "retrace", "W_temp"]:
+                 if alias in self.file_data.observables: # Simplified check
+                     for o in self.file_data.observables:
+                         if o.name == alias:
+                             obs = o
+                             found = True
+                             break
+            if not found:
+                 raise KeyError(f"Observable '{obs_name}' not found for tau_int calculation.")
+
+        series = np.array(obs.values)
+        n = len(series)
+        
+        # Default fallback if series is too short
+        tau = 0.5 
+
+        if n >= 100:
+            # Subtract mean
+            series_centered = series - np.mean(series)
+            var = np.var(series_centered)
+            
+            if var > 0:
+                # FFT for autocorrelation
+                ft = np.fft.rfft(series_centered)
+                spec = np.abs(ft)**2
+                acf = np.fft.irfft(spec)
+                acf = acf[:n//2]
+                
+                # Normalize (N-normalization for FFT estimate)
+                rho = (acf / np.arange(n, n - len(acf), -1)) / var
+
+                # Integrate rho to find tau with automatic windowing
+                tau_sum = 0.5
+                for t in range(1, len(rho)):
+                    tau_sum += rho[t]
+                    if t >= S * tau_sum:
+                        tau = tau_sum
+                        break
+
+        var_data = data_organizer.VariableData("tau_int")
+        var_data.set_value(tau, obs_name=obs_name)
+        return var_data
+
+    @register("r0")
+    def _calc_r0(self, t_min: int = 2, target_force: float = 1.65) -> data_organizer.VariableData:
+        """
+        Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
+        Replaces analyze_wilson.fit_sommer_parameter.
+        """
+        # 1. Identify available R values
+        # We assume R corresponds to 'L' in W_temp data
+        try:
+            all_L = np.array(self.file_data.get("L").values)
+            unique_Rs = sorted(np.unique(all_L))
+        except ValueError:
+             raise KeyError("Could not determine available R (L) values from file data.")
+
+        # 2. Gather V(R) for all R
+        rs = []
+        vs = []
+        errs = []
+        
+        # We need a consistent set of bootstrap samples to propagate errors correctly
+        # So we collect the bootstrap arrays from each V_R
+        bootstrap_matrix = []
+
+        for r in unique_Rs:
+            try:
+                # Reuse the existing V_R calculator
+                v_var = self.get_variable("V_R", R=int(r), t_min=t_min)
+                
+                val = v_var.get()
+                if np.isnan(val) or np.isinf(val): continue
+
+                rs.append(r)
+                vs.append(val)
+                errs.append(v_var.err() if v_var.err() is not None else 1.0)
+                
+                # Collect bootstraps. Must ensure they align (same seed/length).
+                # The Calculator class ensures consistent seeding in __init__.
+                if v_var.bootstrap() is not None:
+                    bootstrap_matrix.append(v_var.bootstrap())
+                
+            except (ValueError, RuntimeError):
+                continue
+        
+        if len(rs) < 3:
+            raise ValueError(f"Not enough valid V(R) points to fit r0 (found {len(rs)})")
+
+        rs = np.array(rs)
+        vs = np.array(vs)
+        errs = np.array(errs)
+        
+        # Handle zero errors for fitting
+        sigma = errs.copy()
+        if np.any(sigma <= 0):
+            mean_err = np.mean(sigma[sigma > 0]) if np.any(sigma > 0) else 1.0
+            sigma[sigma <= 0] = mean_err
+
+        def perform_fit(r_vals, v_vals, sigma_vals=None):
+            try:
+                popt, _ = curve_fit(
+                    cornell_potential_ansatz, r_vals, v_vals, 
+                    p0=[0.0, 0.1, 0.26], sigma=sigma_vals, 
+                    absolute_sigma=(sigma_vals is not None), maxfev=2000
+                )
+                A, sig, B = popt
+                
+                # r0 definition: r^2 * (sigma + B/r^2) = 1.65  => r^2 = (1.65 - B)/sigma
+                numerator = target_force - B
+                if numerator < 0 or sig <= 0:
+                    return np.nan, (A, sig, B)
+                return np.sqrt(numerator / sig), (A, sig, B)
+            except (RuntimeError, ValueError, TypeError):
+                return np.nan, (0,0,0)
+
+        # Main Fit
+        r0_val, fit_params = perform_fit(rs, vs, sigma)
+        corn_params = {'A': fit_params[0], 'sigma': fit_params[1], 'B': fit_params[2]}
+
+        # Bootstrap Fits
+        r0_bootstraps = []
+        if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
+            boot_data = np.array(bootstrap_matrix).T
+            for i in range(len(boot_data)):
+                val, _ = perform_fit(rs, boot_data[i], sigma)
+                if not np.isnan(val):
+                    r0_bootstraps.append(val)
+
+        var_data = data_organizer.VariableData("r0")
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, cornell_params=corn_params)
         return var_data

@@ -14,7 +14,7 @@ from typing import Dict, Any, List, Tuple
 # Import your existing tools
 import search_data
 import run_evaluation
-import analyze_wilson  # <--- ADDED THIS IMPORT
+from calculator import cornell_potential_ansatz
 from load_input_yaml import load_params
 
 # --- Configuration for Units ---
@@ -159,8 +159,8 @@ def plot_potential_fit(matches: List[str]):
         # Plot Fit
         if params:
             r_dense = np.linspace(min(rs), max(rs), 100)
-            V_fit = analyze_wilson.cornell_potential_ansatz(
-                r_dense, params['A'], params['sigma'], params['B']
+            V_fit = cornell_potential_ansatz(
+               r_dense, params['A'], params['sigma'], params['B']
             )
             ax.plot(r_dense, V_fit, '--', color=color, alpha=0.7)
 

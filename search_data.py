@@ -14,6 +14,10 @@ from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
 
 # --- Added tau_int ---
 CALCULATED_FIELDS = {
+    "W_R_T": float,
+    "W_R_T_err": float,
+    "V_R": float,
+    "V_R_err": float,
     "r0": float,
     "r0_err": float,
     "a": float,
