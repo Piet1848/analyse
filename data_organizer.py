@@ -12,14 +12,16 @@ class VariableData:
         self.value = None
         self.error = None
         self.bootstrap_samples = None
+        self.parameters: Dict[str, Any] = {}
 
-    def set_value(self, value: Any, bootstrap_samples: List[Any] = None):
+    def set_value(self, value: Any, bootstrap_samples: List[Any] = None, **params):
         self.value = value
         if bootstrap_samples is not None:
             self.bootstrap_samples = bootstrap_samples
             self.error = np.std(bootstrap_samples)
         else:
             self.error = None
+        self.parameters.update(params)
 
     def get(self) -> Any:
         return self.value
