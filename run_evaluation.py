@@ -105,15 +105,21 @@ def sommer_parameter(data: do.ExperimentData, sommer_target: float = 1.65) -> Di
     if not lattice_spacings:
         return {"error": "Could not determine Sommer parameter"}
 
+    mean_a = float(np.mean(lattice_spacings))
+    stddev_a = float(np.std(lattice_spacings, ddof=1))
+    mean_r0 = float(np.mean(sommer_parameters))
+    stddev_r0 = float(np.std(sommer_parameters, ddof=1))
+
     return {
-        "r0": float(np.mean(sommer_parameters)),
-        "r0_err": float(np.std(sommer_parameters, ddof=1)),
-        "a": float(np.mean(lattice_spacings)),
-        "a_err": float(np.std(lattice_spacings, ddof=1)),
-        "tau_int": float(tau_int_val),
-        "block_size": block_size_steps,
-        "n_samples": len(lattice_spacings)
+        "r0": mean_r0,
+        "r0_err": stddev_r0,
+        "a": mean_a,
+        "a_err": stddev_a,
+         "tau_int": float(tau_int_val),
+         "block_size": block_size_steps,
+        "n_samples": len(lattice_spacings),
     }
+
 
 def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
     run_id = get_run_id(path)

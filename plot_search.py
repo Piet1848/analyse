@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Tuple
 # Import your existing tools
 import search_data
 import run_evaluation
+import analyze_wilson  # <--- ADDED THIS IMPORT
 from load_input_yaml import load_params
 
 # --- Configuration for Units ---
@@ -66,11 +67,130 @@ def weighted_mean(values: List[float], errors: List[float]) -> Tuple[float, floa
     err = 1.0 / np.sqrt(w_sum)
     return mean, err
 
+def plot_potential_fit(matches: List[str]):
+    """
+    Specialized plotting function for V(r) vs r.
+    Automatically detects varying parameters for the legend 
+    and constant parameters for the title.
+    Sorted by beta.
+    """
+    set_plot_style()
+    fig, ax = plt.subplots()
+    
+    # --- 1. Pre-scan data to determine Legend vs Title ---
+    valid_entries = []
+    param_tracker = defaultdict(set)
+    interesting_params = ["beta", "epsilon1", "epsilon2"]
+
+    print(f"Loading metadata for {len(matches)} runs...", file=sys.stderr)
+
+    for path in matches:
+        try:
+            yaml_path = os.path.join(path, "input.yaml")
+            metro, gauge = load_params(yaml_path)
+            
+            calc_res = run_evaluation.get_or_calculate(path)
+            
+            # Recalc if plot_meta is missing
+            if "error" not in calc_res and "plot_meta" not in calc_res:
+                calc_res = run_evaluation.get_or_calculate(path, force_recalc=True)
+
+            if "error" in calc_res or "plot_meta" not in calc_res:
+                continue
+
+            entry = {
+                "path": path,
+                "metro": metro,
+                "meta": calc_res["plot_meta"]
+            }
+            valid_entries.append(entry)
+
+            for p in interesting_params:
+                val = getattr(metro, p)
+                if isinstance(val, float):
+                    val = round(val, 6)
+                param_tracker[p].add(val)
+
+        except Exception as e:
+            print(f"Skipped {path}: {e}", file=sys.stderr)
+            continue
+
+    if not valid_entries:
+        print("No valid potential data found to plot.", file=sys.stderr)
+        return
+
+    # --- NEW: Sort entries by beta ---
+    # This ensures the legend appears as 2.2, 2.3, 2.4, ... instead of random order
+    valid_entries.sort(key=lambda x: x["metro"].beta)
+
+    # --- 2. Determine Labels ---
+    legend_keys = [k for k in interesting_params if len(param_tracker[k]) > 1]
+    title_keys = [k for k in interesting_params if len(param_tracker[k]) == 1]
+
+    # --- 3. Plotting Loop ---
+    for entry in valid_entries:
+        meta = entry["meta"]
+        metro = entry["metro"]
+        
+        raw_pots = meta["potentials"]
+        raw_errs = meta["potential_errors"]
+        pots = {int(k): v for k, v in raw_pots.items()}
+        errs = {int(k): v for k, v in raw_errs.items()}
+        params = meta["cornell_params"]
+        
+        if not pots: 
+            continue
+
+        rs = sorted(pots.keys())
+        Vs = [pots[r] for r in rs]
+        V_errs = [errs.get(r, 0.0) for r in rs]
+        
+        # Generate Dynamic Label
+        if legend_keys:
+            label_parts = [f"{k}={getattr(metro, k)}" for k in legend_keys]
+            label = ", ".join(label_parts)
+        else:
+            label = os.path.basename(entry["path"])
+
+        # Plot Data
+        p = ax.errorbar(rs, Vs, yerr=V_errs, fmt='o', label=label, capsize=3)
+        color = p[0].get_color()
+        
+        # Plot Fit
+        if params:
+            r_dense = np.linspace(min(rs), max(rs), 100)
+            V_fit = analyze_wilson.cornell_potential_ansatz(
+                r_dense, params['A'], params['sigma'], params['B']
+            )
+            ax.plot(r_dense, V_fit, '--', color=color, alpha=0.7)
+
+    # --- 4. Titles and Formatting ---
+    base_title = "Static Quark Potential V(r)"
+    if title_keys:
+        subset_str = ", ".join([f"{k}={list(param_tracker[k])[0]}" for k in title_keys])
+        ax.set_title(f"{base_title}\n({subset_str})")
+    else:
+        ax.set_title(base_title)
+
+    ax.set_xlabel("r/a")
+    ax.set_ylabel("aV(r)")
+    ax.legend()
+    ax.grid(True, linestyle='--', alpha=0.3)
+    
+    plot_file = "plot_potential.png"
+    plt.tight_layout()
+    plt.savefig(plot_file, dpi=150)
+    print(f"Plot saved to {plot_file}")
+    plt.show()
+
 def main():
     parser = argparse.ArgumentParser(description="Search and Plot Lattice Data")
     parser.add_argument("root", help="Root data directory")
-    parser.add_argument("tokens", nargs="*", help="Filters (param=val) and Plot Config (x=..., y=..., hue=...)")
+    # Make tokens optional so we can just run a search without x/y if needed
+    parser.add_argument("tokens", nargs="*", help="Filters (param=val) and Plot Config (x=..., y=...)")
     parser.add_argument("--no-agg", action="store_true", help="Disable aggregation of duplicate points")
+    # NEW ARGUMENT
+    parser.add_argument("--plot-potential", action="store_true", help="Plot V(r) fit instead of scalar trends")
     args = parser.parse_args()
 
     # --- 1. Parse Arguments ---
@@ -86,11 +206,14 @@ def main():
             else:
                 search_tokens.append(token)
         else:
-            print(f"Ignored invalid token: {token}", file=sys.stderr)
+            # Allow clean pass-through if user didn't specify x/y but we don't need them for potential
+            pass
 
-    if not plot_config["x"] or not plot_config["y"]:
-        print("Error: You must specify x and y axes (e.g., x=beta y=r0)", file=sys.stderr)
-        sys.exit(1)
+    # Validation: If NOT plotting potential, we strictly need X and Y
+    if not args.plot_potential:
+        if not plot_config["x"] or not plot_config["y"]:
+            print("Error: You must specify x and y axes (e.g., x=beta y=r0) OR use --plot-potential", file=sys.stderr)
+            sys.exit(1)
 
     # --- 2. Find Matching Runs ---
     print(f"Searching in {args.root}...", file=sys.stderr)
@@ -105,9 +228,14 @@ def main():
         print("No matching runs found.", file=sys.stderr)
         sys.exit(0)
 
-    print(f"Found {len(matches)} matching runs. Processing...", file=sys.stderr)
+    print(f"Found {len(matches)} matching runs.", file=sys.stderr)
 
-    # --- 3. Collect Data ---
+    # --- BRANCH: Plot Potential vs Plot Trend ---
+    if args.plot_potential:
+        plot_potential_fit(matches)
+        sys.exit(0)
+
+    # --- 3. Collect Data (Standard Mode) ---
     raw_data = defaultdict(list)
     x_name = plot_config["x"]
     y_name = plot_config["y"]
@@ -140,7 +268,7 @@ def main():
             print(f"Error processing {path}: {e}", file=sys.stderr)
             continue
 
-    # --- 4. Plotting ---
+    # --- 4. Plotting (Standard Mode) ---
     set_plot_style()
     fig, ax = plt.subplots()
     
