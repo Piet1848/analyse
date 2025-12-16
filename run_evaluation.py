@@ -70,7 +70,6 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
     # 3. Main Calculation (with Blocking)
     # Instantiate a NEW calculator with the correct block size
     calc = Calculator(file_data, step_size=block_size)
-    
     try:
         # Calculate r0 (this triggers V_R calculations internally)
         r0_var = calc.get_variable("r0", target_force=sommer_target)

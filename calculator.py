@@ -31,20 +31,27 @@ def register(name: str):
 class Calculator:
     _registry: dict[str, Callable] = {}
 
-    def __init_subclass__(cls):
-        super().__init_subclass__()
-        for attr in cls.__dict__.values():
+    @classmethod
+    def _populate_registry(cls):
+        """Scans the class for registered methods and populates the registry."""
+        # Using dir(cls) is safer than __dict__ as it covers the MRO if you ever inherit
+        for attr_name in dir(cls):
+            attr = getattr(cls, attr_name)
             if callable(attr) and hasattr(attr, "_calc_name"):
                 cls._registry[attr._calc_name] = attr
 
     def __init__(self, file_data: data_organizer.FileData, n_bootstrap: int = 200, seed: int = 42, step_size: int = 1):
+        # Trigger registration if it hasn't happened yet
+        if not self._registry:
+            self._populate_registry()
+
         self.file_data = file_data
         self.variables: dict[Key, data_organizer.VariableData] = {}
         
         # Bootstrap configuration
         self.n_bootstrap = n_bootstrap
         self.seed = seed
-        self.step_size = step_size  # <--- NEW
+        self.step_size = step_size
         
         # Cache for indices
         self._bootstrap_indices: np.ndarray | None = None
@@ -53,7 +60,6 @@ class Calculator:
         key = make_key(name, params)
         if key in self.variables:
             return self.variables[key]
-
         if name in self._registry:
             try:
                 # Call the registered method (passing self and params)
@@ -170,6 +176,7 @@ class Calculator:
                 )
                 return popt[1] # Return V
             except (RuntimeError, ValueError, TypeError):
+                print(f"Fit failed for V_R (R={R}) with ts={ts} and ws={ws}")
                 return np.nan
 
         # Weighted Fit
@@ -196,7 +203,6 @@ class Calculator:
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min)
-        
         return var_data
     
     @register("tau_int")
