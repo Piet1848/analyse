@@ -130,40 +130,60 @@ class Calculator:
     @register("V_R")
     def _calc_V_R(self, R: int, t_min: int = 1) -> data_organizer.VariableData:
         """
-        Calculates V(R) and its error by fitting W(R,T) for every bootstrap sample.
-        Performs a weighted fit using the errors of W(R,T) as weights.
+        Calculates V(R) and its error by fitting W(R,T).
+        Includes robust handling for negative signal and array shape mismatches.
         """
         all_L = np.array(self.file_data.get("L").values)
         all_T = np.array(self.file_data.get("T").values)
         unique_ts = np.unique(all_T[all_L == R])
-        
+
         # Filter T >= t_min
         ts_to_fit = sorted([t for t in unique_ts if t >= t_min])
         
-        if len(ts_to_fit) < 3:
-            raise ValueError(f"Not enough time points to fit V(R) for R={R} (found {len(ts_to_fit)})")
-
         # W_R_T Variables
         w_vars = [self.get_variable("W_R_T", R=R, T=t) for t in ts_to_fit]
         
         ws_main = np.array([v.get() for v in w_vars])
         ts_fit  = np.array(ts_to_fit)
-        ws_err = np.array([v.err() for v in w_vars])
+        ws_err  = np.array([v.err() for v in w_vars])
 
-        # Handle case where errors might be zero (to prevent fit issues)
+        # --- Positivity Cut ---
+        # Find the first index where data becomes non-positive
+        bad_indices = np.where(ws_main <= 0)[0]
+        if len(bad_indices) > 0:
+            first_bad = bad_indices[0]
+            # Truncate everything after and including the first bad point
+            ws_main = ws_main[:first_bad]
+            ts_fit  = ts_fit[:first_bad]
+            ws_err  = ws_err[:first_bad]
+            
+        # Check if we still have enough points after truncation
+        if len(ts_fit) < 3:
+            # Signal lost (values became negative) too early.
+            var_data = data_organizer.VariableData("V_R")
+            var_data.set_value(np.nan, bootstrap_samples=[np.nan]*self.n_bootstrap, R=R)
+            return var_data
+
+        # Store the valid length to slice bootstrap samples later
+        valid_len = len(ts_fit)
+
+        # Handle case where errors might be zero
         if np.any(ws_err == 0):
-             # Replace 0 with mean of non-zero errors, or 1.0 if all are 0
              mean_err = np.mean(ws_err[ws_err > 0]) if np.any(ws_err > 0) else 1.0
              ws_err[ws_err == 0] = mean_err
 
         def fit_potential(ts, ws, sigma=None):
+            # Check for empty or non-positive data before fitting to avoid log errors
+            if len(ws) == 0 or np.any(ws <= 0):
+                return np.nan
+
             # initial guess
-            if ws[0] > 0 and ws[1] > 0:
+            try:
                 denom = ts[1] - ts[0]
                 if denom == 0: denom = 1.0
                 p0_V = -np.log(ws[1]/ws[0]) / denom
                 p0_C = ws[0] * np.exp(p0_V * ts[0])
-            else:
+            except (IndexError, ValueError, RuntimeWarning):
                 p0_V, p0_C = 0.5, 1.0
                 
             try:
@@ -176,14 +196,16 @@ class Calculator:
                 )
                 return popt[1] # Return V
             except (RuntimeError, ValueError, TypeError):
-                print(f"Fit failed for V_R (R={R}) with ts={ts} and ws={ws}")
                 return np.nan
 
         # Weighted Fit
         V_main = fit_potential(ts_fit, ws_main, sigma=ws_err)
         
         if np.isnan(V_main):
-            raise ValueError(f"Main fit failed for V_R (R={R})")
+            # If the main fit fails, return NaN immediately
+            var_data = data_organizer.VariableData("V_R")
+            var_data.set_value(np.nan, bootstrap_samples=[np.nan]*self.n_bootstrap, R=R)
+            return var_data
 
         # Bootstrap Fits
         n_boot = self.n_bootstrap
@@ -193,13 +215,19 @@ class Calculator:
         all_boots_T = all_boots.T 
         
         for i in range(n_boot):
-            ws_sample = all_boots_T[i] # The W(T) curve for the i-th bootstrap universe
+            # FIX: Slice the bootstrap sample to match the truncated time array
+            ws_sample = all_boots_T[i][:valid_len] 
             
-            # Fit this universe using the SAME weights (ws_err) from the main fit
+            # Skip this universe if it fluctuates into negative values within the window
+            if np.any(ws_sample <= 0):
+                bootstrap_Vs.append(np.nan)
+                continue
+            
+            # Fit using the SAME weights (ws_err) from the main fit
             v_boot = fit_potential(ts_fit, ws_sample, sigma=ws_err)
             
-            if not np.isnan(v_boot):
-                bootstrap_Vs.append(v_boot)
+            # Append result (NaN or float)
+            bootstrap_Vs.append(v_boot)
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min)
