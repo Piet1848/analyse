@@ -12,12 +12,12 @@ import concurrent.futures
 import run_evaluation
 from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
 
-# --- Added tau_int ---
+# --- Added tau_int and updated types ---
 CALCULATED_FIELDS = {
     "W_R_T": float,
     "W_R_T_err": float,
-    "V_R": float,
-    "V_R_err": float,
+    "V_R": dict,      # Changed to dict
+    "V_R_err": dict,  # Changed to dict
     "r0": float,
     "r0_err": float,
     "a": float,
@@ -49,10 +49,15 @@ def parse_bool(s: str) -> bool:
 
 def convert_value(value_str: str, typ: Any) -> Any:
     origin = get_origin(typ)
-    if origin is not None: raise ValueError(f"List/tuple fields not supported: {typ}")
+    if origin is not None: 
+        # For simple list/dict types, we treat input as string for now
+        if typ is dict: return value_str 
+        raise ValueError(f"List/tuple fields not supported: {typ}")
+    
     if typ is int: return int(value_str)
     if typ is float: return float(value_str)
     if typ is bool: return parse_bool(value_str)
+    if typ is dict: return value_str
     return value_str
 
 def parse_tokens(tokens: list[str]) -> tuple[Dict[str, Any], list[str]]:
@@ -104,6 +109,8 @@ def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
         needs_calc = any(FIELD_MAP[out][0] == "calc" for out in outputs)
         calc_data = None
         if needs_calc:
+            # We don't force recalc here to speed things up, 
+            # but run_evaluation will handle missing r0 gracefully now.
             calc_data = run_evaluation.get_or_calculate(path)
 
         vals = []
@@ -162,8 +169,15 @@ def main() -> None:
     def sort_key(row):
         key_parts = []
         for val in row[1]:
-            key_parts.append((0, 0) if val is None else (1, val))
+            if val is None:
+                key_parts.append((0, ""))
+            elif isinstance(val, (dict, list)):
+                # Convert dicts/lists to string for sorting purposes
+                key_parts.append((1, str(val)))
+            else:
+                key_parts.append((1, val))
         return tuple(key_parts)
+        
     rows.sort(key=sort_key)
 
     print("\t".join(["path"] + outputs))
