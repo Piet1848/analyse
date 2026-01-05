@@ -11,6 +11,7 @@ import concurrent.futures
 
 import run_evaluation
 from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
+import re
 
 # --- Added tau_int and updated types ---
 CALCULATED_FIELDS = {
@@ -25,6 +26,10 @@ CALCULATED_FIELDS = {
     "tau_int": float, 
     "block_size": int,
     "sommer": str,
+    "r0_chi": float,
+    "r0_chi_err": float,
+    "chi": dict,
+    "F_chi": dict,
 }
 
 def build_field_map() -> Dict[str, Tuple[str, Any]]:
@@ -46,6 +51,31 @@ def parse_bool(s: str) -> bool:
     if sl in ("true", "1", "yes", "y", "t"): return True
     if sl in ("false", "0", "no", "n", "f"): return False
     raise ValueError(f"Cannot parse boolean from '{s}'")
+
+def parse_dynamic_token(tok: str):
+    """Parses tokens like V_R5, W_R5_T3, W_R5_T, or W_R_T4."""
+    # V_R<R>
+    m = re.fullmatch(r"V_R(\d+)", tok)
+    if m: return "V_R", {"R": int(m.group(1))}
+    # W_R<R>_T<T>
+    m = re.fullmatch(r"W_R(\d+)_T(\d+)", tok)
+    if m: return "W_R_T", {"R": int(m.group(1)), "T": int(m.group(2))}
+    # W_R<R>_T
+    m = re.fullmatch(r"W_R(\d+)_T", tok)
+    if m: return "W_R_T", {"R": int(m.group(1))}
+    # W_R_T<T>
+    m = re.fullmatch(r"W_R_T(\d+)", tok)
+    if m: return "W_R_T", {"T": int(m.group(1))}
+    return None, None
+
+def get_field_info(name: str):
+    """Unified lookup for static and dynamic fields."""
+    if name in FIELD_MAP:
+        return FIELD_MAP[name]
+    base, _ = parse_dynamic_token(name)
+    if base:
+        return ("calc", Any)
+    return None
 
 def convert_value(value_str: str, typ: Any) -> Any:
     origin = get_origin(typ)
@@ -77,8 +107,9 @@ def parse_tokens(tokens: list[str]) -> tuple[Dict[str, Any], list[str]]:
         else:
             name = tok.strip()
             if not name: continue
-            if name not in FIELD_MAP:
-                raise KeyError(f"Unknown output parameter '{name}'")
+            info = get_field_info(name)
+            if not info:
+                raise KeyError(f"Unknown parameter '{name}'")
             outputs.append(name)
     return criteria, outputs
 
@@ -106,23 +137,40 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
 def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
     try:
         metro, gauge = load_params(os.path.join(path, "input.yaml"))
-        needs_calc = any(FIELD_MAP[out][0] == "calc" for out in outputs)
-        calc_data = None
-        if needs_calc:
-            # We don't force recalc here to speed things up, 
-            # but run_evaluation will handle missing r0 gracefully now.
-            calc_data = run_evaluation.get_or_calculate(path)
+        needs_calc = any(get_field_info(out)[0] == "calc" for out in outputs)
+        calc_data = run_evaluation.get_or_calculate(path) if needs_calc else None
 
         vals = []
         for name in outputs:
-            block, _ = FIELD_MAP[name]
-            if block == "metro": vals.append(getattr(metro, name))
-            elif block == "gauge": vals.append(getattr(gauge, name))
-            elif block == "calc":
-                if calc_data and "error" not in calc_data:
-                    vals.append(calc_data.get(name, None))
-                else:
+            info = get_field_info(name)
+            block, _ = info
+            if block == "calc":
+                if not calc_data or "error" in calc_data:
                     vals.append(None)
+                elif name in calc_data:
+                    vals.append(calc_data[name])
+                else:
+                    # Dynamic extraction
+                    base, params = parse_dynamic_token(name)
+                    if base == "V_R":
+                        vals.append(calc_data.get("V_R", {}).get(str(params["R"])))
+                    elif base == "W_R_T":
+                        w_dict = calc_data.get("W_R_T", {})
+                        r, t = params.get("R"), params.get("T")
+                        if r is not None and t is not None:
+                            vals.append(w_dict.get(f"{r},{t}"))
+                        elif r is not None:
+                            # Return dict of all T for this R
+                            sub = {k.split(',')[1]: v for k, v in w_dict.items() if k.startswith(f"{r},")}
+                            vals.append(sub if sub else None)
+                        elif t is not None:
+                            # Return dict of all R for this T
+                            sub = {k.split(',')[0]: v for k, v in w_dict.items() if k.endswith(f",{t}")}
+                            vals.append(sub if sub else None)
+                        else: vals.append(None)
+            else:
+                obj = metro if block == "metro" else gauge
+                vals.append(getattr(obj, name))
         return path, vals
     except Exception:
         return path, [None] * len(outputs)

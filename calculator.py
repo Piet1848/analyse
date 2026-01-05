@@ -3,6 +3,7 @@ from typing import Any, FrozenSet, Callable
 import data_organizer
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
 
 Key = tuple[str, FrozenSet[tuple[str, Any]]]
 
@@ -371,4 +372,180 @@ class Calculator:
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, cornell_params=corn_params)
+        return var_data
+
+    # --- Implementation of Creutz Ratio Analysis ---
+    # The following methods implement the calculation of the lattice scale 'a'
+    # using Creutz Ratios, as discussed in CreutzRatio.md (arXiv:2410.02794v1).
+    #
+    # Regarding the question "Is it possible to do it without smearing?":
+    # Yes, it is possible. The calculations can be performed on unsmeared gauge
+    # configurations (which corresponds to zero smearing/flow time). However, as the
+    # paper points out, smearing significantly reduces the statistical noise (variance)
+    # in the Wilson loops and Creutz ratios. Without smearing, you would need
+    # much higher statistics (more measurements) to achieve a similar level of
+    # precision for the calculated force and the resulting lattice scale r0.
+
+    @register("chi")
+    def _calc_chi(self, R: float, T: float) -> data_organizer.VariableData:
+        """
+        Calculates the Creutz ratio chi(R, T) using Wilson loops.
+        R and T are the half-integer coordinates of the center of the Creutz plaquette.
+        e.g., R=1.5, T=1.5 for the ratio of W(1,1), W(2,1), W(1,2), W(2,2).
+        """
+        # Creutz ratio is defined at half-integer coordinates
+        # chi(t + a/2, r + a/2), so r_int = r - 0.5, t_int = t - 0.5
+        r_int = int(R - 0.5)
+        t_int = int(T - 0.5)
+        
+        try:
+            # Get the four Wilson loops needed for the ratio
+            w_tr   = self.get_variable("W_R_T", R=r_int,     T=t_int)
+            w_t1_r = self.get_variable("W_R_T", R=r_int,     T=t_int + 1)
+            w_t_r1 = self.get_variable("W_R_T", R=r_int + 1, T=t_int)
+            w_t1_r1= self.get_variable("W_R_T", R=r_int + 1, T=t_int + 1)
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Could not get required Wilson loops for chi({R}, {T}): {e}")
+
+        def calculate_log_ratio(w1, w2, w3, w4):
+            # w1 = W(t+a, r), w2 = W(t, r+a), w3 = W(t,r), w4 = W(t+a, r+a)
+            # Formula is ln( (w1 * w2) / (w3 * w4) ) assuming a=1
+            num = w1 * w2
+            den = w3 * w4
+            if num > 0 and den > 0:
+                return np.log(num / den)
+            return np.nan
+
+        # Main value
+        chi_val = calculate_log_ratio(w_t1_r.get(), w_t_r1.get(), w_tr.get(), w_t1_r1.get())
+        
+        # Bootstrap values
+        chi_boots = []
+        # Get bootstrap samples for all 4 loops
+        b_t1_r = w_t1_r.bootstrap()
+        b_t_r1 = w_t_r1.bootstrap()
+        b_tr   = w_tr.bootstrap()
+        b_t1_r1= w_t1_r1.bootstrap()
+
+        # Check if bootstrap samples are available
+        if b_t1_r is None or b_t_r1 is None or b_tr is None or b_t1_r1 is None:
+             raise ValueError(f"Bootstrap samples not available for one of the Wilson loops for chi({R},{T})")
+
+        for i in range(self.n_bootstrap):
+            boot_val = calculate_log_ratio(b_t1_r[i], b_t_r1[i], b_tr[i], b_t1_r1[i])
+            chi_boots.append(boot_val)
+        
+        var_data = data_organizer.VariableData("chi")
+        var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T)
+        return var_data
+
+    @register("F_chi")
+    def _calc_F_chi(self, R: float, t_large: int) -> data_organizer.VariableData:
+        """
+        Extracts the static force F(R) from Creutz ratios chi(R, T)
+        by taking the value at a large time extent, T = t_large.
+        R is a half-integer (e.g., 1.5, 2.5).
+        t_large is an integer, so T for chi will be t_large + 0.5.
+        """
+        T = float(t_large) + 0.5
+        try:
+            chi_var = self.get_variable("chi", R=R, T=T)
+            var_data = data_organizer.VariableData("F_chi")
+            # The value and bootstrap samples are directly from chi(R, t_large)
+            var_data.set_value(chi_var.get(), bootstrap_samples=chi_var.bootstrap(), R=R, t_large=t_large)
+            return var_data
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Could not calculate F_chi for R={R} at t_large={t_large}: {e}")
+
+    @register("r0_chi")
+    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65) -> data_organizer.VariableData:
+        """
+        Calculates Sommer parameter r0/a from Creutz ratios.
+        It interpolates r^2 * F(r) to find where it equals target_force.
+        """
+        # 1. Identify available R values from data.
+        # Creutz ratios are at half-integer R. We'll look at the 'L' values in W_temp
+        # and construct the half-integer R's from them.
+        try:
+            all_L = np.array(self.file_data.get("L").values)
+            unique_Ls = sorted(np.unique(all_L))
+            # Rs for chi are like 1.5, 2.5, ... from L=1,2,3...
+            unique_Rs = [float(L) + 0.5 for L in unique_Ls if L+1 in unique_Ls]
+        except ValueError:
+             raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
+
+        # 2. Gather F_chi(R) for all available R at a fixed large T.
+        rs = []
+        fs = []
+        bootstrap_matrix = []
+        
+        for r_val in unique_Rs:
+            try:
+                f_var = self.get_variable("F_chi", R=r_val, t_large=t_large)
+                val = f_var.get()
+                if np.isnan(val) or np.isinf(val): continue
+                
+                rs.append(r_val)
+                fs.append(val)
+                if f_var.bootstrap() is not None:
+                    bootstrap_matrix.append(f_var.bootstrap())
+            except (ValueError, KeyError):
+                continue
+
+        if len(rs) < 2: # Need at least 2 points for linear interpolation
+            raise ValueError(f"Not enough valid F_chi(R) points to interpolate for r0 (found {len(rs)}).")
+        
+        rs = np.array(rs)
+        fs = np.array(fs)
+
+        def get_r0_from_force(r_vals, f_vals):
+            # Calculate r^2 * F(r)
+            r2f = r_vals**2 * f_vals
+            
+            # Check if target is bracketed
+            if not (np.nanmin(r2f) < target_force < np.nanmax(r2f)):
+                return np.nan
+            
+            # Create a linear interpolation function for r2f - target
+            # Let's find the two points that bracket the target_force
+            idx_above = np.where(r2f > target_force)[0]
+            idx_below = np.where(r2f < target_force)[0]
+            
+            if len(idx_above) == 0 or len(idx_below) == 0:
+                return np.nan # Not bracketed
+            
+            # Find the crossover point
+            i = idx_below[-1]
+            if i + 1 >= len(r_vals): return np.nan # Crossover is at the end
+            
+            # Linear interpolation for r0^2: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            # Here, x is r^2, y is r^2*F(r).
+            r1_sq, r2_sq = r_vals[i]**2, r_vals[i+1]**2
+            y1, y2 = r2f[i], r2f[i+1]
+            
+            if y2 == y1: return np.nan
+            
+            r0_sq = r1_sq + (target_force - y1) * (r2_sq - r1_sq) / (y2 - y1)
+            return np.sqrt(r0_sq)
+
+        # Main value
+        r0_val = get_r0_from_force(rs, fs)
+        
+        # Bootstrap
+        r0_bootstraps = []
+        if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
+            boot_data = np.array(bootstrap_matrix).T
+            for i in range(len(boot_data)):
+                sample_fs = boot_data[i]
+                # Filter out nans from bootstrap sample
+                valid_indices = ~np.isnan(sample_fs)
+                if np.sum(valid_indices) < 2:
+                    r0_bootstraps.append(np.nan)
+                    continue
+
+                val = get_r0_from_force(rs[valid_indices], sample_fs[valid_indices])
+                r0_bootstraps.append(val)
+        
+        var_data = data_organizer.VariableData("r0_chi")
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large)
         return var_data

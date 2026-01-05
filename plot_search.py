@@ -183,6 +183,121 @@ def plot_potential_fit(matches: List[str]):
     print(f"Plot saved to {plot_file}")
     plt.show()
 
+def plot_creutz_data(matches: List[str]):
+    """
+    Specialized plotting function for Creutz Ratio analysis.
+    - Plots chi(R,T) vs T for various R.
+    - Plots R^2 * F(R) vs R to show r0 determination.
+    """
+    set_plot_style()
+    # Using 2 subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 12), sharex=False)
+    
+    # --- 1. Pre-scan and data collection (similar to plot_potential_fit) ---
+    valid_entries = []
+    param_tracker = defaultdict(set)
+    interesting_params = ["beta", "epsilon1", "epsilon2"]
+
+    print(f"Loading metadata for {len(matches)} runs...", file=sys.stderr)
+
+    for path in matches:
+        try:
+            yaml_path = os.path.join(path, "input.yaml")
+            metro, gauge = load_params(yaml_path)
+            
+            calc_res = run_evaluation.get_or_calculate(path, force_recalc=False)
+            if "error" in calc_res or "plot_meta" not in calc_res or "chi" not in calc_res["plot_meta"]:
+                continue
+
+            entry = {"path": path, "metro": metro, "meta": calc_res["plot_meta"]}
+            valid_entries.append(entry)
+
+            for p in interesting_params:
+                param_tracker[p].add(getattr(metro, p, None))
+
+        except Exception as e:
+            print(f"Skipped {path}: {e}", file=sys.stderr)
+            continue
+    
+    if not valid_entries:
+        print("No valid Creutz ratio data found to plot.", file=sys.stderr)
+        return
+
+    valid_entries.sort(key=lambda x: x["metro"].beta)
+    legend_keys = [k for k in interesting_params if len(param_tracker[k]) > 1]
+    title_keys = [k for k in interesting_params if len(param_tracker[k]) == 1]
+
+    # --- 2. Plotting Loop ---
+    markers = ['o', 's', '^', 'D', 'v', '<', '>']
+    
+    for i, entry in enumerate(valid_entries):
+        meta = entry["meta"]
+        metro = entry["metro"]
+        
+        all_chi = meta.get("chi", {})
+        f_chi = meta.get("F_chi", {})
+
+        if not all_chi:
+            continue
+
+        # Generate Dynamic Label
+        if legend_keys:
+            label = ", ".join([f"{k}={getattr(metro, k)}" for k in legend_keys])
+        else:
+            label = os.path.basename(entry["path"])
+        
+        color = plt.cm.viridis(i / max(1, len(valid_entries)))
+        
+        # --- Plot 1: chi(R,T) vs T ---
+        # Group chi values by R
+        chi_by_r = defaultdict(list)
+        for key, val in all_chi.items():
+            r, t = map(float, key.split(','))
+            chi_by_r[r].append((t, val))
+        
+        # Plot for a few R values to avoid clutter
+        sorted_rs = sorted(chi_by_r.keys())
+        for r_idx, r_val in enumerate(sorted_rs[:4]): # Plot for first 4 R values
+            ts, chis = zip(*sorted(chi_by_r[r_val]))
+            marker = markers[r_idx % len(markers)]
+            ax1.plot(ts, chis, marker=marker, linestyle='-', color=color, label=f'{label}, R={r_val}')
+
+        # --- Plot 2: R^2 * F(R) vs R ---
+        if f_chi:
+            rs = sorted([float(k) for k in f_chi.keys()])
+            r2_f = [r**2 * f_chi[str(r)] for r in rs]
+            ax2.plot(rs, r2_f, marker='o', linestyle='--', color=color, label=label)
+
+    # --- 3. Final Touches ---
+    # Plot 1 Formatting
+    ax1.set_xlabel("T/a")
+    ax1.set_ylabel("a$^2 \chi(R,T)$")
+    ax1.set_title("Creutz Ratios vs. Time")
+    ax1.legend(fontsize='small', ncol=max(1, len(valid_entries)))
+    ax1.grid(True, linestyle='--', alpha=0.3)
+
+    # Plot 2 Formatting
+    ax2.axhline(1.65, color='red', linestyle=':', label="Sommer r0 Target (1.65)")
+    ax2.set_xlabel("R/a")
+    ax2.set_ylabel("R$^2$ a$^2$F(R)")
+    ax2.set_title("Static Force from Creutz Ratios")
+    ax2.legend(fontsize='small')
+    ax2.grid(True, linestyle='--', alpha=0.3)
+    
+    # Global Title
+    base_title = "Creutz Ratio Analysis"
+    if title_keys:
+        subset_str = ", ".join([f"{k}={list(param_tracker[k])[0]}" for k in title_keys])
+        fig.suptitle(f"{base_title}\n({subset_str})", fontsize=18)
+    else:
+        fig.suptitle(base_title, fontsize=18)
+
+    plot_file = "plot_creutz.png"
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust for suptitle
+    plt.savefig(plot_file, dpi=150)
+    print(f"Plot saved to {plot_file}")
+    plt.show()
+
 def main():
     parser = argparse.ArgumentParser(description="Search and Plot Lattice Data")
     parser.add_argument("root", help="Root data directory")
@@ -191,6 +306,7 @@ def main():
     parser.add_argument("--no-agg", action="store_true", help="Disable aggregation of duplicate points")
     # NEW ARGUMENT
     parser.add_argument("--plot-potential", action="store_true", help="Plot V(r) fit instead of scalar trends")
+    parser.add_argument("--plot-creutz", action="store_true", help="Plot Creutz ratio analysis (chi vs T, F vs R)")
     args = parser.parse_args()
 
     # --- 1. Parse Arguments ---
@@ -209,10 +325,10 @@ def main():
             # Allow clean pass-through if user didn't specify x/y but we don't need them for potential
             pass
 
-    # Validation: If NOT plotting potential, we strictly need X and Y
-    if not args.plot_potential:
+    # Validation: If NOT plotting potential or creutz, we strictly need X and Y
+    if not args.plot_potential and not args.plot_creutz:
         if not plot_config["x"] or not plot_config["y"]:
-            print("Error: You must specify x and y axes (e.g., x=beta y=r0) OR use --plot-potential", file=sys.stderr)
+            print("Error: You must specify x and y axes (e.g., x=beta y=r0) OR use --plot-potential/--plot-creutz", file=sys.stderr)
             sys.exit(1)
 
     # --- 2. Find Matching Runs ---
@@ -233,6 +349,9 @@ def main():
     # --- BRANCH: Plot Potential vs Plot Trend ---
     if args.plot_potential:
         plot_potential_fit(matches)
+        sys.exit(0)
+    elif args.plot_creutz:
+        plot_creutz_data(matches)
         sys.exit(0)
 
     # --- 3. Collect Data (Standard Mode) ---

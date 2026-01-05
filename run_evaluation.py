@@ -12,7 +12,7 @@ from calculator import Calculator
 # --- CONFIGURATION ---
 CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
-CALC_VERSION = "2.1"  # Bumped version to invalidate old caches
+CALC_VERSION = "2.3"  # Bumped version to invalidate old caches
 
 def get_run_id(path: str) -> str:
     rel_path = os.path.relpath(path, start="../data") 
@@ -68,29 +68,37 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
     calc = Calculator(file_data, step_size=block_size)
     
     # --- A. Explicitly Calculate V(R) for all available R ---
-    # We do this first so we have V_R even if r0 fails later.
     potentials = {}
     potential_errors = {}
-    
     try:
-        # Assuming L column corresponds to spatial separation R
         all_L = np.array(file_data.get("L").values)
         unique_Rs = sorted(np.unique(all_L))
-        
         for r in unique_Rs:
             try:
-                # Calculate V_R for this R
                 v_var = calc.get_variable("V_R", R=int(r))
                 val = v_var.get()
                 if val is not None and not np.isnan(val):
-                    potentials[int(r)] = val
-                    potential_errors[int(r)] = v_var.err()
-            except Exception:
-                continue
-    except Exception as e:
-        # If we can't determine R values, we can't calculate V_R
-        pass
+                    # Store as string keys and native floats
+                    potentials[str(int(r))] = float(val)
+                    potential_errors[str(int(r))] = float(v_var.err())
+            except Exception: continue
+    except Exception: pass
 
+    # --- NEW: Collect W(R, T) for all available pairs ---
+    all_w = {}
+    try:
+        all_T = np.array(file_data.get("T").values)
+        # Find all unique (L, T) pairs
+        pairs = sorted(list(set(zip(all_L, all_T))))
+        for r_p, t_p in pairs:
+            try:
+                w_var = calc.get_variable("W_R_T", R=int(r_p), T=int(t_p))
+                w_val = w_var.get()
+                if w_val is not None:
+                    all_w[f"{int(r_p)},{int(t_p)}"] = float(w_val)
+            except: continue
+    except: pass
+    
     # --- B. Attempt r0 Calculation ---
     r0 = None
     r0_err = None
@@ -117,18 +125,78 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
         lattice_spacing = 0.5 / r0
         a_err = (0.5 / (r0**2)) * r0_err if r0_err else 0.0
 
+    # --- C. Attempt Creutz Ratio (chi) analysis ---
+    all_chi = {}
+    all_f_chi = {}
+    r0_chi = None
+    r0_chi_err = None
+    chi_t_large = 4 # Default large T for extracting the force
+
+    try:
+        # Determine R and T values for chi from Wilson loop pairs
+        # chi is at R+0.5, T+0.5
+        chi_pairs = []
+        # Check if all_L and all_T were defined earlier
+        if 'all_L' in locals() and 'all_T' in locals():
+            r_values = sorted(np.unique(all_L))
+            t_values = sorted(np.unique(all_T))
+            for r in r_values:
+                if r + 1 not in r_values: continue
+                for t in t_values:
+                    if t + 1 not in t_values: continue
+                    chi_pairs.append((r + 0.5, t + 0.5))
+        
+        for r_p, t_p in chi_pairs:
+            try:
+                chi_var = calc.get_variable("chi", R=r_p, T=t_p)
+                chi_val = chi_var.get()
+                if chi_val is not None and not np.isnan(chi_val):
+                    all_chi[f"{r_p},{t_p}"] = float(chi_val)
+            except Exception:
+                continue
+
+        # Extract force F_chi at a fixed t_large
+        r_for_force = sorted(list(set(p[0] for p in chi_pairs if p[1] == chi_t_large + 0.5)))
+        for r_p in r_for_force:
+             try:
+                f_var = calc.get_variable("F_chi", R=r_p, t_large=chi_t_large)
+                f_val = f_var.get()
+                if f_val is not None and not np.isnan(f_val):
+                    all_f_chi[f"{r_p}"] = float(f_val)
+             except Exception:
+                continue
+
+        # Calculate r0 from chi
+        r0_chi_var = calc.get_variable("r0_chi", t_large=chi_t_large, target_force=sommer_target)
+        r0_chi = r0_chi_var.get()
+        if np.isnan(r0_chi):
+            r0_chi = None
+        else:
+            r0_chi_err = r0_chi_var.err()
+
+    except Exception:
+        # Chi analysis can fail, proceed without it
+        pass
+    
     return {
-        "r0": r0,
-        "r0_err": r0_err,
-        "a": lattice_spacing,
-        "a_err": a_err,
-        "tau_int": tau,
-        "block_size": block_size,
-        "V_R": potentials, # Added top-level key for search_data.py
+        "r0": float(r0) if r0 is not None else None,
+        "r0_err": float(r0_err) if r0_err is not None else None,
+        "a": float(lattice_spacing) if lattice_spacing is not None else None,
+        "a_err": float(a_err) if a_err is not None else None,
+        "tau_int": float(tau),
+        "block_size": int(block_size),
+        "V_R": potentials,
+        "W_R_T": all_w,
+        "r0_chi": float(r0_chi) if r0_chi is not None else None,
+        "r0_chi_err": float(r0_chi_err) if r0_chi_err is not None else None,
+        "chi": all_chi,
+        "F_chi": all_f_chi,
         "plot_meta": {
             "potentials": potentials,
             "potential_errors": potential_errors,
-            "cornell_params": cornell_params
+            "cornell_params": cornell_params,
+            "chi": all_chi,
+            "F_chi": all_f_chi,
         }
     }
 
