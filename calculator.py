@@ -458,14 +458,14 @@ class Calculator:
             raise ValueError(f"Could not calculate F_chi for R={R} at t_large={t_large}: {e}")
 
     @register("r0_chi")
-    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65) -> data_organizer.VariableData:
+    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2) -> data_organizer.VariableData:
         """
         Calculates Sommer parameter r0/a from Creutz ratios.
         It interpolates r^2 * F(r) to find where it equals target_force.
+        Points with a high relative error on F(r) can be filtered out.
+        A weighted linear fit over a window of points can be used for interpolation.
         """
         # 1. Identify available R values from data.
-        # Creutz ratios are at half-integer R. We'll look at the 'L' values in W_temp
-        # and construct the half-integer R's from them.
         try:
             all_L = np.array(self.file_data.get("L").values)
             unique_Ls = sorted(np.unique(all_L))
@@ -475,75 +475,100 @@ class Calculator:
              raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
 
         # 2. Gather F_chi(R) for all available R at a fixed large T.
-        rs = []
-        fs = []
-        bootstrap_matrix = []
+        rs, fs, errs, bootstrap_matrix = [], [], [], []
         
         for r_val in unique_Rs:
             try:
                 f_var = self.get_variable("F_chi", R=r_val, t_large=t_large)
-                val = f_var.get()
-                if np.isnan(val) or np.isinf(val): continue
+                val, err = f_var.get(), f_var.err()
+
+                if np.isnan(val) or np.isinf(val) or np.isnan(err) or np.isinf(err):
+                    continue
                 
+                # Filter points with large relative error
+                if max_rel_err is not None and val != 0 and abs(err / val) > max_rel_err:
+                    continue
+
                 rs.append(r_val)
                 fs.append(val)
+                errs.append(err)
                 if f_var.bootstrap() is not None:
                     bootstrap_matrix.append(f_var.bootstrap())
             except (ValueError, KeyError):
                 continue
 
-        if len(rs) < 2: # Need at least 2 points for linear interpolation
-            raise ValueError(f"Not enough valid F_chi(R) points to interpolate for r0 (found {len(rs)}).")
+        if len(rs) < 2: # Need at least 2 points for interpolation/fit
+            raise ValueError(f"Not enough valid F_chi(R) points to process for r0 (found {len(rs)}).")
         
-        rs = np.array(rs)
-        fs = np.array(fs)
+        rs, fs, errs = np.array(rs), np.array(fs), np.array(errs)
 
-        def get_r0_from_force(r_vals, f_vals):
-            # Calculate r^2 * F(r)
-            r2f = r_vals**2 * f_vals
+        def get_r0_from_force(r_vals, f_vals, f_errs=None):
+            """
+            Finds r0 by linearly interpolating/fitting r^2*F(r).
+            Finds the first crossover and can use a weighted fit in a window around it.
+            """
+            if len(r_vals) < 2: return np.nan
             
-            # Check if target is bracketed
-            if not (np.nanmin(r2f) < target_force < np.nanmax(r2f)):
-                return np.nan
+            r2_vals = r_vals**2
+            r2f_vals = r2_vals * f_vals
+
+            # Find the first crossover point, assuming r_vals are sorted.
+            for i in range(len(r_vals) - 1):
+                y1, y2 = r2f_vals[i], r2f_vals[i+1]
+
+                if (y1 <= target_force <= y2) or (y2 <= target_force <= y1):
+                    # Crossover is between index i and i+1
+                    if not use_weighted_fit or f_errs is None or len(f_errs) != len(r_vals):
+                        # Simple linear interpolation
+                        if y2 == y1: continue
+                        r1_sq, r2_sq = r2_vals[i], r2_vals[i+1]
+                        r0_sq = r1_sq + (target_force - y1) * (r2_sq - r1_sq) / (y2 - y1)
+                        if r0_sq > 0: return np.sqrt(r0_sq)
+                    else:
+                        # Weighted linear fit over a window of points.
+                        # Window includes `fit_window-1` points before and `fit_window` points after `i`.
+                        start = max(0, i - fit_window + 1)
+                        end = min(len(r_vals), i + fit_window + 1)
+                        
+                        win_r2 = r2_vals[start:end]
+                        win_r2f = r2f_vals[start:end]
+                        win_f_errs = f_errs[start:end]
+
+                        if len(win_r2) < 2: continue
+
+                        # Weights are inverse of variance of r^2*F(r) -> 1 / (r^4 * err(F)^2)
+                        win_r4f_err2 = (win_r2**2) * (win_f_errs**2)
+                        valid_w = win_r4f_err2 > 0
+                        if np.sum(valid_w) < 2: continue # Not enough points with valid weights
+
+                        weights = np.zeros_like(win_r4f_err2)
+                        weights[valid_w] = 1.0 / win_r4f_err2[valid_w]
+
+                        try:
+                            # y = p[0]*x + p[1]
+                            p = np.polyfit(win_r2[valid_w], win_r2f[valid_w], 1, w=weights[valid_w])
+                            slope, intercept = p[0], p[1]
+                        except (np.linalg.LinAlgError, ValueError):
+                            continue # Fit failed
+
+                        if slope == 0: continue
+                        # Solve for r0^2: slope * r0^2 + intercept = target_force
+                        r0_sq = (target_force - intercept) / slope
+                        if r0_sq > 0: return np.sqrt(r0_sq)
             
-            # Create a linear interpolation function for r2f - target
-            # Let's find the two points that bracket the target_force
-            idx_above = np.where(r2f > target_force)[0]
-            idx_below = np.where(r2f < target_force)[0]
-            
-            if len(idx_above) == 0 or len(idx_below) == 0:
-                return np.nan # Not bracketed
-            
-            # Find the crossover point
-            i = idx_below[-1]
-            if i + 1 >= len(r_vals): return np.nan # Crossover is at the end
-            
-            # Linear interpolation for r0^2: x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-            # Here, x is r^2, y is r^2*F(r).
-            r1_sq, r2_sq = r_vals[i]**2, r_vals[i+1]**2
-            y1, y2 = r2f[i], r2f[i+1]
-            
-            if y2 == y1: return np.nan
-            
-            r0_sq = r1_sq + (target_force - y1) * (r2_sq - r1_sq) / (y2 - y1)
-            return np.sqrt(r0_sq)
+            return np.nan # No crossover found
 
         # Main value
-        r0_val = get_r0_from_force(rs, fs)
-        
+        r0_val = get_r0_from_force(rs, fs, errs)
+
         # Bootstrap
         r0_bootstraps = []
-        if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
+        if len(bootstrap_matrix) > 0 and len(bootstrap_matrix) == len(rs):
             boot_data = np.array(bootstrap_matrix).T
-            for i in range(len(boot_data)):
-                sample_fs = boot_data[i]
-                # Filter out nans from bootstrap sample
-                valid_indices = ~np.isnan(sample_fs)
-                if np.sum(valid_indices) < 2:
-                    r0_bootstraps.append(np.nan)
-                    continue
-
-                val = get_r0_from_force(rs[valid_indices], sample_fs[valid_indices])
+            for sample_fs in boot_data:
+                # For bootstrap samples, we don't have individual errors,
+                # so we use the errors from the main data set as weights.
+                val = get_r0_from_force(rs, sample_fs, errs)
                 r0_bootstraps.append(val)
         
         var_data = data_organizer.VariableData("r0_chi")
