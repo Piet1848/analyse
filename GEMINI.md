@@ -4,46 +4,82 @@ This document provides context for the Gemini code assistant to help it understa
 
 ## Project Overview
 
-This project consists of a collection of Python scripts for data analysis and visualization. The scripts are designed to process, analyze, and plot data as part of a research project, likely for a Master's thesis. The main tasks include searching data, organizing it, performing calculations, and generating various plots.
+This project is a Lattice QCD analysis suite focusing on extracting physical observables like the static potential $V(R)$, string tension $\sigma$, and the Sommer scale $r_0$ from Wilson loop data. It includes tools for searching across large datasets of simulation runs, caching analysis results, and performing robust statistical error analysis (bootstrap).
+
+Explanation of Creutz method in pub045.pdf
 
 ## Key Technologies
 
-*   **Language:** Python 3
-*   **Libraries (likely):**
-    *   `numpy` and `pandas` for data manipulation and numerical operations.
-    *   `matplotlib`, `seaborn`, or `plotly` for data visualization.
-    *   `PyYAML` for reading YAML configuration files (`load_input_yaml.py`).
+*   **Language:** Python 3.10+
+*   **Core Libraries:**
+    *   `numpy`: Heavy numerical lifting (fitting, array manipulation).
+    *   `scipy`: Curve fitting (`curve_fit`) and interpolation.
+    *   `matplotlib`: Plotting (in `plot_*.py` scripts).
+    *   `PyYAML`: Parsing simulation parameters (`input.yaml`).
+    *   `concurrent.futures`: Parallel processing in `search_data.py`.
 
 ## Project Structure
 
-The project is organized into several Python scripts, each with a specific purpose:
+### Core Analysis Logic
+*   **`calculator.py`**: The physics engine.
+    *   Implements the `Calculator` class which lazily computes observables.
+    *   Uses a decorator-based registry (`@register`) to define calculation methods (e.g., `_calc_r0`, `_calc_chi`).
+    *   **Features**: Bootstrap error propagation, global weighted fitting for `r0_chi`, robust handling of negative/noisy data.
+*   **`run_evaluation.py`**: The evaluation pipeline.
+    *   Serves as the bridge between raw CSV data and the `Calculator`.
+    *   Manages **caching** of results in `../data/calcResult/` (hashed by run path).
+    *   Main entry point: `get_or_calculate(run_path)`.
+*   **`data_organizer.py`**: Data structures.
+    *   Classes: `FileData`, `ObservableData`, `VariableData`.
+    *   Handles reading raw `.out` files from simulation runs.
 
-*   `analyze_wilson.py`: Script for a specific analysis, possibly related to a "Wilson" dataset or method.
-*   `calculator.py`: Performs calculations on the data.
-*   `data_organizer.py`: Handles organization and preprocessing of data.
-*   `load_input_yaml.py`: Utility for loading configuration or input data from YAML files.
-*   `plot_history.py`: Generates history plots.
-*   `plot_potential.py`: Generates potential plots.
-*   `plot_search.py`: Generates plots related to search results.
-*   `run_evaluation.py`: Main script to run an evaluation pipeline.
-*   `search_data.py`: Script to search through the dataset.
-*   `__pycache__/`: Directory for Python's cached bytecode.
-*   `.gitignore`: Specifies files to be ignored by Git.
+### CLI Tools & Workflows
+*   **`search_data.py`**: The primary tool for aggregating results.
+    *   **Usage**: `python search_data.py <root_dir> [filters] [outputs]`
+    *   Scans directories, matches parameters (e.g., `beta=2.1`), runs analysis in parallel, and prints a table.
+*   **`analysis_notebook.ipynb`**: Interactive debugging.
+    *   Use this to step through the analysis of a *single* problematic run.
+    *   Great for visualizing why a specific fit (like `r0_chi`) might be failing.
+
+### Plotting Scripts
+*   `plot_potential.py`, `plot_history.py`, `plot_search.py`: Generate visualizations from the analyzed data.
 
 ## How to Run
 
-The scripts are intended to be run from the command line.
+### 1. Bulk Analysis & Search
+To find all runs with $\beta=2.1$ and display their $r_0$ and $\chi$ values:
 
 ```bash
-# Example of running a script
-python run_evaluation.py --input-file data.yaml
+# Syntax: python search_data.py <data_root> <filters> <output_columns>
+python search_data.py ../data "beta=2.1" "L0=43" r0 r0_err r0_chi
 ```
 
-Please inspect individual scripts for specific command-line arguments.
+*   **Filters**: `KEY=VALUE` (e.g., `beta=2.1`).
+*   **Outputs**: Column names (e.g., `r0`, `chi`, `a`, `tau_int`).
+
+### 2. Debugging a Specific Run
+1.  Open `analysis_notebook.ipynb` in VS Code.
+2.  Set the `run_path` variable to the directory of the run you want to investigate.
+3.  Run the cells to see step-by-step extraction of Wilson loops, potentials, and forces.
+
+### 3. Plotting
+(Example inferred)
+```bash
+python plot_potential.py --run-path ../data/20251221/25
+```
+
+## Important Logic Details
+   
+
+*   **r0_chi Calculation**:
+    *   The code attempts to solve $r^2 \chi(r, t_{large}) = 1.65$.
+    *   If data is noisy or negative (non-confining signal), it falls back to a **global weighted linear fit** of $r^2 F(r)$ vs $r^2$ to estimate the crossing point.
+    *   This robustness is critical for analyzing runs with low statistics or large finite-volume effects.
+*   **Caching**:
+    *   Results are cached to JSON. If you change the analysis logic (e.g., in `calculator.py`), you must bump `CALC_VERSION` in `run_evaluation.py` to invalidate old caches.
 
 ## Coding Conventions
 
-*   Please adhere to the **PEP 8 Style Guide for Python Code**.
-*   Maintain the existing coding style and patterns found in the project's files.
-*   When adding new features, ensure they are modular and well-documented.
-*   Add comments to explain complex logic, not to describe what the code is doing.
+*   **Type Hinting**: Use Python's `typing` module (e.g., `List`, `Dict`, `Optional`) for function signatures.
+*   **Error Handling**: Analysis functions should return `None` or `NaN` rather than crashing, allowing `search_data.py` to continue processing other runs.
+*   **Modular Design**: Keep physics logic in `calculator.py` and data management in `data_organizer.py`.

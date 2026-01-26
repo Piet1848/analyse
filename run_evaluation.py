@@ -12,7 +12,7 @@ from calculator import Calculator
 # --- CONFIGURATION ---
 CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
-CALC_VERSION = "2.3"  # Bumped version to invalidate old caches
+CALC_VERSION = "2.4"  # Bumped version to invalidate old caches
 
 def get_run_id(path: str) -> str:
     rel_path = os.path.relpath(path, start="../data") 
@@ -167,7 +167,7 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
                 continue
 
         # Calculate r0 from chi
-        r0_chi_var = calc.get_variable("r0_chi", t_large=chi_t_large, target_force=sommer_target)
+        r0_chi_var = calc.get_variable("r0_chi", t_large=chi_t_large, target_force=sommer_target, discard_negative=True)
         r0_chi = r0_chi_var.get()
         if np.isnan(r0_chi):
             r0_chi = None

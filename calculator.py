@@ -458,12 +458,20 @@ class Calculator:
             raise ValueError(f"Could not calculate F_chi for R={R} at t_large={t_large}: {e}")
 
     @register("r0_chi")
-    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2) -> data_organizer.VariableData:
+    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2, discard_negative: bool = True) -> data_organizer.VariableData:
         """
         Calculates Sommer parameter r0/a from Creutz ratios.
         It interpolates r^2 * F(r) to find where it equals target_force.
         Points with a high relative error on F(r) can be filtered out.
         A weighted linear fit over a window of points can be used for interpolation.
+        
+        Args:
+            t_large: The time extent to use for F_chi extraction.
+            target_force: The target value for r^2 * F(r) (default 1.65).
+            max_rel_err: Filter out F_chi points with relative error > max_rel_err.
+            use_weighted_fit: Use error-weighted fitting for finding r0.
+            fit_window: Window size for local fitting.
+            discard_negative: If True, discard negative F_chi values before solving.
         """
         # 1. Identify available R values from data.
         try:
@@ -485,6 +493,10 @@ class Calculator:
                 if np.isnan(val) or np.isinf(val) or np.isnan(err) or np.isinf(err):
                     continue
                 
+                # Filter negative values if requested
+                if discard_negative and val <= 0:
+                    continue
+
                 # Filter points with large relative error
                 if max_rel_err is not None and val != 0 and abs(err / val) > max_rel_err:
                     continue
@@ -498,7 +510,12 @@ class Calculator:
                 continue
 
         if len(rs) < 2: # Need at least 2 points for interpolation/fit
-            raise ValueError(f"Not enough valid F_chi(R) points to process for r0 (found {len(rs)}).")
+            # If we don't have enough points, we can't do anything.
+            # But returning a VariableData with None value is safer than crashing
+            # if we just filtered everything out.
+            var_data = data_organizer.VariableData("r0_chi")
+            var_data.set_value(None, t_large=t_large)
+            return var_data
         
         rs, fs, errs = np.array(rs), np.array(fs), np.array(errs)
 
@@ -506,13 +523,14 @@ class Calculator:
             """
             Finds r0 by linearly interpolating/fitting r^2*F(r).
             Finds the first crossover and can use a weighted fit in a window around it.
+            If no crossover is found, attempts a global weighted fit if use_weighted_fit is True.
             """
             if len(r_vals) < 2: return np.nan
             
             r2_vals = r_vals**2
             r2f_vals = r2_vals * f_vals
 
-            # Find the first crossover point, assuming r_vals are sorted.
+            # A. Try to find a local crossover first
             for i in range(len(r_vals) - 1):
                 y1, y2 = r2f_vals[i], r2f_vals[i+1]
 
@@ -556,7 +574,35 @@ class Calculator:
                         r0_sq = (target_force - intercept) / slope
                         if r0_sq > 0: return np.sqrt(r0_sq)
             
-            return np.nan # No crossover found
+            # B. If no crossover found, and we want to fit globally (or robustly)
+            if use_weighted_fit and f_errs is not None and len(f_errs) == len(r_vals):
+                 # Fit a line to r^2*F(r) vs r^2 for all points?
+                 # Or maybe r^2*F(r) vs r?
+                 # Assuming approximate linearity of r^2 F(r) vs r^2 (string tension dominance)
+                 # F(r) ~ sigma => r^2 F(r) ~ sigma * r^2.
+                 
+                 x_fit = r2_vals
+                 y_fit = r2f_vals
+                 
+                 weights_fit = np.zeros_like(x_fit)
+                 var_y = (x_fit * f_errs)**2
+                 valid_w = var_y > 0
+                 if np.sum(valid_w) >= 2:
+                     weights_fit[valid_w] = 1.0 / var_y[valid_w]
+                     try:
+                         # Linear fit: y = slope * x + intercept
+                         # r^2 F = slope * r^2 + intercept
+                         p = np.polyfit(x_fit[valid_w], y_fit[valid_w], 1, w=weights_fit[valid_w])
+                         slope, intercept = p[0], p[1]
+                         
+                         # Solve slope * r0^2 + intercept = target_force
+                         if slope != 0:
+                            r0_sq = (target_force - intercept) / slope
+                            if r0_sq > 0: return np.sqrt(r0_sq)
+                     except (np.linalg.LinAlgError, ValueError):
+                         pass
+
+            return np.nan # No solution found
 
         # Main value
         r0_val = get_r0_from_force(rs, fs, errs)
@@ -573,4 +619,66 @@ class Calculator:
         
         var_data = data_organizer.VariableData("r0_chi")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large)
+        return var_data
+    
+    @register("creutz_P")
+    def _calc_creutz_P(self, R: int) -> data_organizer.VariableData:
+        """
+        Calculates the physical ratio P(R) defined by Creutz (1981):
+        P(R) = 1 - [W(R,R) * W(R/2,R/2)] / [W(R,R/2)]^2
+        
+        This quantity is used to study RG flow and remove UV divergences.
+        R must be an even integer (representing the larger scale r/a).
+        """
+        if R % 2 != 0:
+            raise ValueError(f"R must be even for Creutz P-ratio calculation (got {R}).")
+        
+        R_half = R // 2
+        
+        try:
+            # Retrieve required Wilson loops: W(R,R), W(R/2,R/2), and W(R, R/2)
+            w_large = self.get_variable("W_R_T", R=R, T=R)           # W(R, R)
+            w_small = self.get_variable("W_R_T", R=R_half, T=R_half) # W(R/2, R/2)
+            
+            # Try getting rectangular loop W(R, R/2). 
+            # If not found, check for the symmetric W(R/2, R).
+            try:
+                w_rect = self.get_variable("W_R_T", R=R, T=R_half)
+            except (ValueError, KeyError):
+                w_rect = self.get_variable("W_R_T", R=R_half, T=R)
+                
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Required Wilson loops for creutz_P({R}) not found: {e}")
+
+        def calculate_P(w_LL, w_ss, w_Ls):
+            # w_LL = W(R,R), w_ss = W(R/2,R/2), w_Ls = W(R,R/2)
+            if w_Ls == 0:
+                return np.nan
+            
+            numerator = w_LL * w_ss
+            denominator = w_Ls ** 2
+            
+            # P = 1 - (W(R,R)W(R/2,R/2)) / W(R,R/2)^2
+            return 1.0 - (numerator / denominator)
+
+        # 1. Calculate Main Value
+        val_P = calculate_P(w_large.get(), w_small.get(), w_rect.get())
+        
+        # 2. Calculate Bootstrap Values
+        P_boots = []
+        b_large = w_large.bootstrap()
+        b_small = w_small.bootstrap()
+        b_rect  = w_rect.bootstrap()
+        
+        # Ensure we have bootstraps for all components
+        if b_large is not None and b_small is not None and b_rect is not None:
+            for i in range(self.n_bootstrap):
+                boot_val = calculate_P(b_large[i], b_small[i], b_rect[i])
+                P_boots.append(boot_val)
+        else:
+            # If bootstraps are missing (e.g. from a fallback), fill with NaNs or empty
+            P_boots = [np.nan] * self.n_bootstrap
+
+        var_data = data_organizer.VariableData("creutz_P")
+        var_data.set_value(val_P, bootstrap_samples=P_boots, R=R)
         return var_data
