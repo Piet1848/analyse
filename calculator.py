@@ -682,3 +682,47 @@ class Calculator:
         var_data = data_organizer.VariableData("creutz_P")
         var_data.set_value(val_P, bootstrap_samples=P_boots, R=R)
         return var_data
+    
+    @register("a_creutz")
+    def _calc_a_creutz(self, R: int, sigma_sqrt_MeV: float = 440.0) -> data_organizer.VariableData:
+        """
+        Calculates lattice spacing 'a' in fm from Creutz ratio P(R).
+        Assumes Area Law dominance: P(R) = 1 - exp(-1/4 * sigma * a^2 * R^2).
+        sigma_sqrt_MeV: Physical string tension sqrt(sigma) in MeV (default 440).
+        """
+        try:
+            p_var = self.get_variable("creutz_P", R=R)
+        except (ValueError, KeyError) as e:
+             raise ValueError(f"Could not calculate a_creutz({R}): {e}")
+
+        hc = 197.3 # MeV fm
+
+        def calculate_a(p_val):
+            # p_val must be < 1.0 for real result. 
+            # In confinement region, p_val approaches 1.0 from below.
+            # Also if p_val <= 0, log is undefined (or imaginary).
+            if np.isnan(p_val) or p_val >= 1.0 or p_val <= 0.0: 
+                return np.nan
+            
+            term = np.sqrt(-np.log(1.0 - p_val))
+            # a = (2 / (R * sqrt(sigma))) * term
+            # Convert to fm using hc / sigma_sqrt
+            a_fm = (hc / sigma_sqrt_MeV) * (2.0 / R) * term
+            return a_fm
+
+        # Main value
+        val_a = calculate_a(p_var.get())
+        
+        # Bootstrap
+        a_boots = []
+        p_boots = p_var.bootstrap()
+        
+        if p_boots is not None:
+            for p_b in p_boots:
+                a_boots.append(calculate_a(p_b))
+        else:
+             a_boots = [np.nan] * self.n_bootstrap
+             
+        var_data = data_organizer.VariableData("a_creutz")
+        var_data.set_value(val_a, bootstrap_samples=a_boots, R=R, sigma_sqrt=sigma_sqrt_MeV)
+        return var_data
