@@ -6,6 +6,8 @@ This document provides context for the Gemini code assistant to help it understa
 
 This project is a Lattice QCD analysis suite focusing on extracting physical observables like the static potential $V(R)$, string tension $\sigma$, and the Sommer scale $r_0$ from Wilson loop data. It includes tools for searching across large datasets of simulation runs, caching analysis results, and performing robust statistical error analysis (bootstrap).
 
+Explanation of Creutz method in pub045.pdf
+
 ## Key Technologies
 
 *   **Language:** Python 3.10+

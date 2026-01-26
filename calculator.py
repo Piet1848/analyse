@@ -620,3 +620,65 @@ class Calculator:
         var_data = data_organizer.VariableData("r0_chi")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large)
         return var_data
+    
+    @register("creutz_P")
+    def _calc_creutz_P(self, R: int) -> data_organizer.VariableData:
+        """
+        Calculates the physical ratio P(R) defined by Creutz (1981):
+        P(R) = 1 - [W(R,R) * W(R/2,R/2)] / [W(R,R/2)]^2
+        
+        This quantity is used to study RG flow and remove UV divergences.
+        R must be an even integer (representing the larger scale r/a).
+        """
+        if R % 2 != 0:
+            raise ValueError(f"R must be even for Creutz P-ratio calculation (got {R}).")
+        
+        R_half = R // 2
+        
+        try:
+            # Retrieve required Wilson loops: W(R,R), W(R/2,R/2), and W(R, R/2)
+            w_large = self.get_variable("W_R_T", R=R, T=R)           # W(R, R)
+            w_small = self.get_variable("W_R_T", R=R_half, T=R_half) # W(R/2, R/2)
+            
+            # Try getting rectangular loop W(R, R/2). 
+            # If not found, check for the symmetric W(R/2, R).
+            try:
+                w_rect = self.get_variable("W_R_T", R=R, T=R_half)
+            except (ValueError, KeyError):
+                w_rect = self.get_variable("W_R_T", R=R_half, T=R)
+                
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Required Wilson loops for creutz_P({R}) not found: {e}")
+
+        def calculate_P(w_LL, w_ss, w_Ls):
+            # w_LL = W(R,R), w_ss = W(R/2,R/2), w_Ls = W(R,R/2)
+            if w_Ls == 0:
+                return np.nan
+            
+            numerator = w_LL * w_ss
+            denominator = w_Ls ** 2
+            
+            # P = 1 - (W(R,R)W(R/2,R/2)) / W(R,R/2)^2
+            return 1.0 - (numerator / denominator)
+
+        # 1. Calculate Main Value
+        val_P = calculate_P(w_large.get(), w_small.get(), w_rect.get())
+        
+        # 2. Calculate Bootstrap Values
+        P_boots = []
+        b_large = w_large.bootstrap()
+        b_small = w_small.bootstrap()
+        b_rect  = w_rect.bootstrap()
+        
+        # Ensure we have bootstraps for all components
+        if b_large is not None and b_small is not None and b_rect is not None:
+            for i in range(self.n_bootstrap):
+                boot_val = calculate_P(b_large[i], b_small[i], b_rect[i])
+                P_boots.append(boot_val)
+        else:
+            # If bootstraps are missing (e.g. from a fallback), fill with NaNs or empty
+            P_boots = [np.nan] * self.n_bootstrap
+
+        var_data = data_organizer.VariableData("creutz_P")
+        var_data.set_value(val_P, bootstrap_samples=P_boots, R=R)
+        return var_data
