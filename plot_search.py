@@ -383,9 +383,12 @@ def main():
     # --- 3. Collect Data (Standard Mode) ---
     raw_data = defaultdict(list)
     x_name = plot_config["x"]
-    y_name = plot_config["y"]
+    
+    # NEW: Split y input by comma to handle multiple variables
+    y_input = plot_config["y"]
+    y_names = [n.strip() for n in y_input.split(',')]
+    
     hue_name = plot_config["hue"]
-    y_err_name = f"{y_name}_err"
 
     for path in matches:
         try:
@@ -396,18 +399,31 @@ def main():
                 continue
 
             x_val = get_value(x_name, metro, gauge, calc_res)
-            y_val = get_value(y_name, metro, gauge, calc_res)
-            y_err = get_value(y_err_name, metro, gauge, calc_res)
             
-            hue_val = "All"
+            # Extract Hue Value (if exists)
+            base_hue = ""
             if hue_name:
                 h = get_value(hue_name, metro, gauge, calc_res)
                 if isinstance(h, float):
                     h = round(h, 6)
-                hue_val = h if h is not None else "None"
+                base_hue = f"{hue_name}={h}" if h is not None else "None"
 
-            if x_val is not None and y_val is not None:
-                raw_data[hue_val].append((x_val, y_val, y_err))
+            # NEW: Loop over all requested Y variables
+            if x_val is not None:
+                for y_var in y_names:
+                    val = get_value(y_var, metro, gauge, calc_res)
+                    err = get_value(f"{y_var}_err", metro, gauge, calc_res)
+                    
+                    if val is not None:
+                        # Create a composite label for the legend
+                        # Case A: Hue + Variable (e.g., "L0=32 (a_creutz6)")
+                        if base_hue:
+                            series_label = f"{base_hue} ({y_var})"
+                        # Case B: Just Variable (e.g., "a_creutz6")
+                        else:
+                            series_label = y_var
+                        
+                        raw_data[series_label].append((x_val, val, err))
                 
         except Exception as e:
             print(f"Error processing {path}: {e}", file=sys.stderr)
@@ -449,7 +465,7 @@ def main():
         ys = [p[1] for p in points]
         yerrs = [p[2] for p in points]
         
-        label = f"{hue_name}={hue_val}" if hue_name else y_name
+        label = hue_val
         
         clean_errs = [e if e else 0 for e in yerrs]
         
@@ -467,20 +483,30 @@ def main():
 
     # --- Labels & Units ---
     x_label = f"{x_name} {UNIT_MAP.get(x_name, '')}"
-    y_label = f"{y_name} {UNIT_MAP.get(y_name, '')}"
+    
+    # NEW: Generate Y label
+    if len(y_names) == 1:
+        # Single variable: use name + unit
+        y_single = y_names[0]
+        y_label = f"{y_single} {UNIT_MAP.get(y_single, '')}"
+        title = f"{y_single} vs {x_name}"
+    else:
+        # Multiple variables: Generic label
+        y_label = "Value [fm]" # Assuming they share units (like 'a')
+        title = f"Comparison vs {x_name}"
 
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     
-    title = f"{y_name} vs {x_name}"
     if hue_name:
         title += f" (grouped by {hue_name})"
     ax.set_title(title)
     
     ax.grid(True, linestyle='--', alpha=0.3)
     
-    if hue_name:
-        ax.legend(title=hue_name, frameon=True, framealpha=0.9)
+    if hue_name or len(y_names) > 1:
+        legend_title = hue_name if hue_name else None
+        ax.legend(title=legend_title, frameon=True, framealpha=0.9)
     
     plt.tight_layout()
     
