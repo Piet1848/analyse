@@ -21,6 +21,8 @@ from load_input_yaml import load_params
 UNIT_MAP = {
     "a": "[fm]",
     "r0": "[fm]",
+    "a_creutz": "[fm]",
+    "creutz_P": "",
     "r0_over_a": "",
     "beta": "",
     "sigma": "[fm$^{-2}$]"
@@ -43,8 +45,32 @@ def set_plot_style():
 
 def get_value(name: str, metro: Any, gauge: Any, calc: Dict[str, Any]) -> Any:
     """Helper to extract a value from metadata or calculated results."""
+    # 1. Direct match in calc results (for static calculated fields)
     if calc and name in calc:
         return calc[name]
+
+    # 2. Handle Dynamic tokens (e.g. V_R4, a_creutz2)
+    # Check for error suffix first
+    lookup_name = name
+    is_err = False
+    if name.endswith("_err"):
+        lookup_name = name[:-4]
+        is_err = True
+
+    base, params = search_data.parse_dynamic_token(lookup_name)
+    if base and calc:
+        if base == "V_R":
+            field = "V_R_err" if is_err else "V_R"
+            return calc.get(field, {}).get(str(params["R"]))
+        elif base == "creutz_P":
+            field = "creutz_P_err" if is_err else "creutz_P"
+            return calc.get(field, {}).get(str(params["R"]))
+        elif base == "a_creutz":
+            field = "a_creutz_err" if is_err else "a_creutz"
+            return calc.get(field, {}).get(str(params["R"]))
+        # Add other dynamic fields if needed (W_R_T etc)
+
+    # 3. Metadata
     if hasattr(metro, name):
         return getattr(metro, name)
     if hasattr(gauge, name):

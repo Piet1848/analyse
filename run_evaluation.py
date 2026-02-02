@@ -12,7 +12,7 @@ from calculator import Calculator
 # --- CONFIGURATION ---
 CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
-CALC_VERSION = "2.4"  # Bumped version to invalidate old caches
+CALC_VERSION = "2.5"  # Bumped version to invalidate old caches
 
 def get_run_id(path: str) -> str:
     rel_path = os.path.relpath(path, start="../data") 
@@ -178,6 +178,39 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
         # Chi analysis can fail, proceed without it
         pass
     
+    # --- D. Creutz P-Ratio and a_creutz ---
+    all_creutz_P = {}
+    all_creutz_P_err = {}
+    all_a_creutz = {}
+    all_a_creutz_err = {}
+
+    try:
+        if 'all_L' in locals():
+            unique_Rs = sorted(np.unique(all_L))
+            even_Rs = [r for r in unique_Rs if r % 2 == 0 and r > 0] # Ensure R > 0
+
+            for r in even_Rs:
+                try:
+                    # P-Ratio
+                    p_var = calc.get_variable("creutz_P", R=int(r))
+                    p_val = p_var.get()
+                    if p_val is not None and not np.isnan(p_val):
+                        all_creutz_P[str(int(r))] = float(p_val)
+                        if p_var.err() is not None:
+                            all_creutz_P_err[str(int(r))] = float(p_var.err())
+
+                    # a_creutz
+                    a_var = calc.get_variable("a_creutz", R=int(r))
+                    a_val = a_var.get()
+                    if a_val is not None and not np.isnan(a_val):
+                        all_a_creutz[str(int(r))] = float(a_val)
+                        if a_var.err() is not None:
+                            all_a_creutz_err[str(int(r))] = float(a_var.err())
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     return {
         "r0": float(r0) if r0 is not None else None,
         "r0_err": float(r0_err) if r0_err is not None else None,
@@ -186,11 +219,16 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
         "tau_int": float(tau),
         "block_size": int(block_size),
         "V_R": potentials,
+        "V_R_err": potential_errors,
         "W_R_T": all_w,
         "r0_chi": float(r0_chi) if r0_chi is not None else None,
         "r0_chi_err": float(r0_chi_err) if r0_chi_err is not None else None,
         "chi": all_chi,
         "F_chi": all_f_chi,
+        "creutz_P": all_creutz_P,
+        "creutz_P_err": all_creutz_P_err,
+        "a_creutz": all_a_creutz,
+        "a_creutz_err": all_a_creutz_err,
         "plot_meta": {
             "potentials": potentials,
             "potential_errors": potential_errors,

@@ -30,6 +30,10 @@ CALCULATED_FIELDS = {
     "r0_chi_err": float,
     "chi": dict,
     "F_chi": dict,
+    "creutz_P": dict,
+    "creutz_P_err": dict,
+    "a_creutz": dict,
+    "a_creutz_err": dict,
 }
 
 def build_field_map() -> Dict[str, Tuple[str, Any]]:
@@ -53,19 +57,29 @@ def parse_bool(s: str) -> bool:
     raise ValueError(f"Cannot parse boolean from '{s}'")
 
 def parse_dynamic_token(tok: str):
-    """Parses tokens like V_R5, W_R5_T3, W_R5_T, or W_R_T4."""
+    """Parses tokens like V_R5, W_R5_T3, W_R5_T, or W_R_T4. Handles _err suffix."""
+    is_err = tok.endswith("_err")
+    check_tok = tok[:-4] if is_err else tok
+
     # V_R<R>
-    m = re.fullmatch(r"V_R(\d+)", tok)
-    if m: return "V_R", {"R": int(m.group(1))}
+    m = re.fullmatch(r"V_R(\d+)", check_tok)
+    if m: return ("V_R_err" if is_err else "V_R"), {"R": int(m.group(1))}
     # W_R<R>_T<T>
-    m = re.fullmatch(r"W_R(\d+)_T(\d+)", tok)
-    if m: return "W_R_T", {"R": int(m.group(1)), "T": int(m.group(2))}
+    m = re.fullmatch(r"W_R(\d+)_T(\d+)", check_tok)
+    if m and not is_err: return "W_R_T", {"R": int(m.group(1)), "T": int(m.group(2))}
     # W_R<R>_T
-    m = re.fullmatch(r"W_R(\d+)_T", tok)
-    if m: return "W_R_T", {"R": int(m.group(1))}
+    m = re.fullmatch(r"W_R(\d+)_T", check_tok)
+    if m and not is_err: return "W_R_T", {"R": int(m.group(1))}
     # W_R_T<T>
-    m = re.fullmatch(r"W_R_T(\d+)", tok)
-    if m: return "W_R_T", {"T": int(m.group(1))}
+    m = re.fullmatch(r"W_R_T(\d+)", check_tok)
+    if m and not is_err: return "W_R_T", {"T": int(m.group(1))}
+    # creutz_P<R>
+    m = re.fullmatch(r"creutz_P(\d+)", check_tok)
+    if m: return ("creutz_P_err" if is_err else "creutz_P"), {"R": int(m.group(1))}
+    # a_creutz<R>
+    m = re.fullmatch(r"a_creutz(\d+)", check_tok)
+    if m: return ("a_creutz_err" if is_err else "a_creutz"), {"R": int(m.group(1))}
+    
     return None, None
 
 def get_field_info(name: str):
@@ -152,9 +166,9 @@ def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
                 else:
                     # Dynamic extraction
                     base, params = parse_dynamic_token(name)
-                    if base == "V_R":
-                        vals.append(calc_data.get("V_R", {}).get(str(params["R"])))
-                    elif base == "W_R_T":
+                    if base in ["V_R", "V_R_err", "creutz_P", "creutz_P_err", "a_creutz", "a_creutz_err"]:
+                        vals.append(calc_data.get(base, {}).get(str(params["R"])))
+                    elif base.startswith("W_R_T"):
                         w_dict = calc_data.get("W_R_T", {})
                         r, t = params.get("R"), params.get("T")
                         if r is not None and t is not None:
