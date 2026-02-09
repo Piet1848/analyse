@@ -176,31 +176,36 @@ class Calculator:
         def fit_potential(ts, ws, sigma=None):
             # Check for empty or non-positive data before fitting to avoid log errors
             if len(ws) == 0 or np.any(ws <= 0):
-                return np.nan
+                return np.nan, np.nan
 
-            # initial guess
             try:
-                denom = ts[1] - ts[0]
-                if denom == 0: denom = 1.0
-                p0_V = -np.log(ws[1]/ws[0]) / denom
-                p0_C = ws[0] * np.exp(p0_V * ts[0])
-            except (IndexError, ValueError, RuntimeWarning):
-                p0_V, p0_C = 0.5, 1.0
+                # Log-Linear Fit: ln(W) = ln(C) - V*t
+                ln_ws = np.log(ws)
                 
-            try:
-                popt, _ = curve_fit(
-                    exponential_ansatz, ts, ws, 
-                    p0=[p0_C, p0_V], 
-                    bounds=([-np.inf, -10.0], [np.inf, np.inf]),
-                    sigma=sigma,
-                    absolute_sigma=(sigma is not None)
-                )
-                return popt[1] # Return V
-            except (RuntimeError, ValueError, TypeError):
-                return np.nan
+                w_weights = None
+                if sigma is not None:
+                    # Weights for polyfit should be inverse variance of y = ln(W)
+                    # var(ln W) ~ (sigma / W)^2
+                    # w = 1/var ~ (W / sigma)^2
+                    # Filter out zero sigma to avoid division by zero (though handled outside)
+                    valid_sigma = (sigma > 0)
+                    if np.all(valid_sigma):
+                         w_weights = (ws / sigma)**2
+                    else:
+                         # Fallback if sigma has zeros (should not happen due to check above)
+                         w_weights = None
+
+                # Fit: y = p[0]*x + p[1]  =>  ln(W) = -V*t + ln(C)
+                p = np.polyfit(ts, ln_ws, 1, w=w_weights)
+                
+                V = -p[0]
+                C = np.exp(p[1])
+                return V, C
+            except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
+                return np.nan, np.nan
 
         # Weighted Fit
-        V_main = fit_potential(ts_fit, ws_main, sigma=ws_err)
+        V_main, C_main = fit_potential(ts_fit, ws_main, sigma=ws_err)
         
         if np.isnan(V_main):
             # If the main fit fails, return NaN immediately
@@ -225,13 +230,13 @@ class Calculator:
                 continue
             
             # Fit using the SAME weights (ws_err) from the main fit
-            v_boot = fit_potential(ts_fit, ws_sample, sigma=ws_err)
+            v_boot, _ = fit_potential(ts_fit, ws_sample, sigma=ws_err)
             
             # Append result (NaN or float)
             bootstrap_Vs.append(v_boot)
 
         var_data = data_organizer.VariableData("V_R")
-        var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min)
+        var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, fit_C=C_main)
         return var_data
     
     @register("tau_int")
@@ -342,10 +347,16 @@ class Calculator:
 
         def perform_fit(r_vals, v_vals, sigma_vals=None):
             try:
+                # Better initial guess
+                sigma_guess = (v_vals[-1] - v_vals[0]) / (r_vals[-1] - r_vals[0]) if len(r_vals) > 1 else 0.1
+                B_guess = 0.26
+                A_guess = v_vals[0] - sigma_guess * r_vals[0] + (B_guess / r_vals[0])
+                p0 = [A_guess, max(1e-4, sigma_guess), B_guess]
+
                 popt, _ = curve_fit(
                     cornell_potential_ansatz, r_vals, v_vals, 
-                    p0=[0.0, 0.1, 0.26], sigma=sigma_vals, 
-                    absolute_sigma=(sigma_vals is not None), maxfev=2000
+                    p0=p0, sigma=sigma_vals, 
+                    absolute_sigma=(sigma_vals is not None), maxfev=5000
                 )
                 A, sig, B = popt
                 
