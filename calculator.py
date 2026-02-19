@@ -290,7 +290,7 @@ class Calculator:
         return var_data
 
     @register("r0")
-    def _calc_r0(self, t_min: int = 2, target_force: float = 1.65) -> data_organizer.VariableData:
+    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65) -> data_organizer.VariableData:
         """
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
@@ -311,7 +311,6 @@ class Calculator:
         # We need a consistent set of bootstrap samples to propagate errors correctly
         # So we collect the bootstrap arrays from each V_R
         bootstrap_matrix = []
-
         for r in unique_Rs:
             try:
                 # Reuse the existing V_R calculator
@@ -331,7 +330,6 @@ class Calculator:
                 
             except (ValueError, RuntimeError):
                 continue
-        
         if len(rs) < 3:
             raise ValueError(f"Not enough valid V(R) points to fit r0 (found {len(rs)})")
 
@@ -341,6 +339,21 @@ class Calculator:
         
         # Handle zero errors for fitting
         sigma = errs.copy()
+
+        # Filter out NaN/Inf values from sigma
+        valid_mask = np.isfinite(sigma)
+        if not np.all(valid_mask):
+            print(f"Warning: Disregarding {np.sum(~valid_mask)} points with non-finite sigma.")
+            rs = rs[valid_mask]
+            vs = vs[valid_mask]
+            sigma = sigma[valid_mask]
+            # Also filter bootstrap_matrix if it matches
+            if len(bootstrap_matrix) == len(valid_mask):
+                bootstrap_matrix = [bootstrap_matrix[i] for i in range(len(valid_mask)) if valid_mask[i]]
+
+            if len(rs) < 3:
+                raise ValueError(f"Not enough valid V(R) points after filtering NaNs to fit r0 (found {len(rs)})")
+
         if np.any(sigma <= 0):
             mean_err = np.mean(sigma[sigma > 0]) if np.any(sigma > 0) else 1.0
             sigma[sigma <= 0] = mean_err
@@ -352,14 +365,12 @@ class Calculator:
                 B_guess = 0.26
                 A_guess = v_vals[0] - sigma_guess * r_vals[0] + (B_guess / r_vals[0])
                 p0 = [A_guess, max(1e-4, sigma_guess), B_guess]
-
                 popt, _ = curve_fit(
                     cornell_potential_ansatz, r_vals, v_vals, 
                     p0=p0, sigma=sigma_vals, 
                     absolute_sigma=(sigma_vals is not None), maxfev=5000
                 )
                 A, sig, B = popt
-                
                 # r0 definition: r^2 * (sigma + B/r^2) = 1.65  => r^2 = (1.65 - B)/sigma
                 numerator = target_force - B
                 if numerator < 0 or sig <= 0:
@@ -371,7 +382,6 @@ class Calculator:
         # Main Fit
         r0_val, fit_params = perform_fit(rs, vs, sigma)
         corn_params = {'A': fit_params[0], 'sigma': fit_params[1], 'B': fit_params[2]}
-
         # Bootstrap Fits
         r0_bootstraps = []
         if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:

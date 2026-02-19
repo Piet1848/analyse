@@ -12,7 +12,7 @@ from calculator import Calculator
 # --- CONFIGURATION ---
 CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
-CALC_VERSION = "2.6"  # Bumped version to invalidate old caches
+CALC_VERSION = "3.0"  # Bumped version to invalidate old caches
 
 def get_run_id(path: str) -> str:
     rel_path = os.path.relpath(path, start="../data") 
