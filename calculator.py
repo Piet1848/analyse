@@ -290,7 +290,7 @@ class Calculator:
         return var_data
 
     @register("r0")
-    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65) -> data_organizer.VariableData:
+    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65, r_min: int = 3) -> data_organizer.VariableData:
         """
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
@@ -299,7 +299,7 @@ class Calculator:
         # We assume R corresponds to 'L' in W_temp data
         try:
             all_L = np.array(self.file_data.get("L").values)
-            unique_Rs = sorted(np.unique(all_L))
+            unique_Rs = sorted([r for r in np.unique(all_L) if r >= r_min])
         except ValueError:
              raise KeyError("Could not determine available R (L) values from file data.")
 
@@ -392,7 +392,7 @@ class Calculator:
                     r0_bootstraps.append(val)
 
         var_data = data_organizer.VariableData("r0")
-        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, cornell_params=corn_params)
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, r_min=r_min, cornell_params=corn_params)
         return var_data
 
     # --- Implementation of Creutz Ratio Analysis ---
@@ -479,7 +479,7 @@ class Calculator:
             raise ValueError(f"Could not calculate F_chi for R={R} at t_large={t_large}: {e}")
 
     @register("r0_chi")
-    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2, discard_negative: bool = True) -> data_organizer.VariableData:
+    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2, discard_negative: bool = True, r_min: int = 1) -> data_organizer.VariableData:
         """
         Calculates Sommer parameter r0/a from Creutz ratios.
         It interpolates r^2 * F(r) to find where it equals target_force.
@@ -493,13 +493,14 @@ class Calculator:
             use_weighted_fit: Use error-weighted fitting for finding r0.
             fit_window: Window size for local fitting.
             discard_negative: If True, discard negative F_chi values before solving.
+            r_min: Minimum R value to include in the fit (default 1).
         """
         # 1. Identify available R values from data.
         try:
             all_L = np.array(self.file_data.get("L").values)
             unique_Ls = sorted(np.unique(all_L))
             # Rs for chi are like 1.5, 2.5, ... from L=1,2,3...
-            unique_Rs = [float(L) + 0.5 for L in unique_Ls if L+1 in unique_Ls]
+            unique_Rs = [float(L) + 0.5 for L in unique_Ls if L+1 in unique_Ls and L >= r_min]
         except ValueError:
              raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
 
@@ -639,7 +640,7 @@ class Calculator:
                 r0_bootstraps.append(val)
         
         var_data = data_organizer.VariableData("r0_chi")
-        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large)
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min)
         return var_data
     
     @register("creutz_P")
