@@ -39,7 +39,7 @@ try:
         print("Calculator initialized.")
 
         # --- 2. Calculate and Display Results ---
-        r0_var = calc.get_variable("r0", t_min=5, target_force=1.65)
+        r0_var = calc.get_variable("r0", t_min=5, target_force=1.65, r_min=2)
         print(f"Calculated r0/a: {r0_var.value:.3f} ± {r0_var.error:.3f}")
 
         # --- 3. Plotting ---
