@@ -185,12 +185,14 @@ class Calculator:
                 w_weights = None
                 if sigma is not None:
                     # Weights for polyfit should be inverse variance of y = ln(W)
-                    # var(ln W) ~ (sigma / W)^2
-                    # w = 1/var ~ (W / sigma)^2
+                    # var(ln W) ~ (sigma / W)
+                    # w = 1/var ~ (W / sigma)
                     # Filter out zero sigma to avoid division by zero (though handled outside)
+
+                    # Attention: np.polyfit squares these weights internally.
                     valid_sigma = (sigma > 0)
                     if np.all(valid_sigma):
-                         w_weights = (ws / sigma)**2
+                         w_weights = (ws / sigma)
                     else:
                          # Fallback if sigma has zeros (should not happen due to check above)
                          w_weights = None
@@ -269,9 +271,9 @@ class Calculator:
             
             if var > 0:
                 # FFT for autocorrelation
-                ft = np.fft.rfft(series_centered)
+                ft = np.fft.rfft(series_centered, n=2*n)
                 spec = np.abs(ft)**2
-                acf = np.fft.irfft(spec)
+                acf = np.fft.irfft(spec, n=2*n)
                 acf = acf[:n//2]
                 
                 # Normalize (N-normalization for FFT estimate)
@@ -577,12 +579,14 @@ class Calculator:
                         if len(win_r2) < 2: continue
 
                         # Weights are inverse of variance of r^2*F(r) -> 1 / (r^4 * err(F)^2)
-                        win_r4f_err2 = (win_r2**2) * (win_f_errs**2)
-                        valid_w = win_r4f_err2 > 0
+
+                        # Attention: np.polyfit squares these weights internally.
+                        win_r4f_err = (win_r2) * (win_f_errs)
+                        valid_w = win_r4f_err > 0
                         if np.sum(valid_w) < 2: continue # Not enough points with valid weights
 
-                        weights = np.zeros_like(win_r4f_err2)
-                        weights[valid_w] = 1.0 / win_r4f_err2[valid_w]
+                        weights = np.zeros_like(win_r4f_err)
+                        weights[valid_w] = 1.0 / win_r4f_err[valid_w]
 
                         try:
                             # y = p[0]*x + p[1]
@@ -681,7 +685,7 @@ class Calculator:
             denominator = w_Ls ** 2
             
             # P = 1 - (W(R,R)W(R/2,R/2)) / W(R,R/2)^2
-            return 1.0 - (numerator / denominator)
+            return 1.0 - (numerator / denominator)  # Attention: Is 1- necesssary?
 
         # 1. Calculate Main Value
         val_P = calculate_P(w_large.get(), w_small.get(), w_rect.get())
