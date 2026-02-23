@@ -22,6 +22,12 @@ def exponential_ansatz(t, C, V):
 def cornell_potential_ansatz(r, A, sigma, B):
     return A + sigma * r - B / r
 
+def calculate_volume_from_r0(L: int, r0_on_a: float, r0_phys: float = 0.5) -> float:
+    if r0_on_a is None or np.isnan(r0_on_a) or r0_on_a <= 0:
+        return np.nan
+    a = r0_phys / r0_on_a
+    return (L * a)**4
+
 def register(name: str):
     def decorator(method):
         method._calc_name = name
@@ -752,3 +758,40 @@ class Calculator:
         var_data = data_organizer.VariableData("a_creutz")
         var_data.set_value(val_a, bootstrap_samples=a_boots, R=R, sigma_sqrt=sigma_sqrt_MeV)
         return var_data
+    
+    @register("volume_r0")
+    def _calc_volume(self, L: int, r0_phys: float = 0.5, **r0_kwargs) -> data_organizer.VariableData:
+        # Volume based on r0. Volume = (L*a)^4. a=r0 / (r0/a)
+        
+        try:
+            r0_var = self.get_variable("r0", **r0_kwargs)
+        except (ValueError, KeyError) as e:
+             raise ValueError(f"Could not calculate r0 for volume: {e}")
+
+        r0_on_a = r0_var.get()
+        
+        def calculate_volume(val_r0_on_a):
+            if val_r0_on_a is None or np.isnan(val_r0_on_a) or val_r0_on_a <= 0:
+                return np.nan
+            a = r0_phys / val_r0_on_a
+            return (L * a)**4
+
+        # Main Value
+        vol_val = calculate_volume(r0_on_a)
+        
+        # Bootstrap
+        vol_boots = []
+        r0_boots = r0_var.bootstrap()
+        
+        if r0_boots is not None:
+             for b in r0_boots:
+                 vol_boots.append(self._calculate_volume_value(L, b, r0_phys))
+        else:
+             vol_boots = [np.nan] * self.n_bootstrap
+             
+        var_data = data_organizer.VariableData("volume_r0")
+        var_data.set_value(vol_val, bootstrap_samples=vol_boots, L=L, r0_phys=r0_phys)
+        return var_data
+
+    def _calculate_volume_value(self, L, val_r0_on_a, r0_phys):
+        return calculate_volume_from_r0(L, val_r0_on_a, r0_phys)

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 import numpy as np
+from load_input_yaml import load_params
 
 # Import the new tools
 import data_organizer as do
@@ -12,7 +13,7 @@ from calculator import Calculator
 # --- CONFIGURATION ---
 CALC_RESULT_BASE = Path("../data/calcResult")
 THERMALIZATION_STEPS = 500 
-CALC_VERSION = "3.1"  # Bumped version to invalidate old caches
+CALC_VERSION = "3.2"  # Bumped version to invalidate old caches
 
 def get_run_id(path: str) -> str:
     rel_path = os.path.relpath(path, start="../data") 
@@ -178,7 +179,24 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
         # Chi analysis can fail, proceed without it
         pass
     
-    # --- D. Creutz P-Ratio and a_creutz ---
+    # --- D. Volume Calculation ---
+    volume_r0 = None
+    volume_r0_err = None
+    try:
+        # Load L from input.yaml
+        yaml_path = data.path / "input.yaml"
+        metro, _ = load_params(str(yaml_path))
+        L_val = metro.L0
+        
+        if r0 is not None:
+             vol_var = calc.get_variable("volume_r0", L=L_val, target_force=sommer_target)
+             if vol_var.get() is not None and not np.isnan(vol_var.get()):
+                 volume_r0 = vol_var.get()
+                 volume_r0_err = vol_var.err()
+    except Exception:
+        pass
+
+    # --- E. Creutz P-Ratio and a_creutz ---
     all_creutz_P = {}
     all_creutz_P_err = {}
     all_a_creutz = {}
@@ -214,6 +232,8 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
     return {
         "r0": float(r0) if r0 is not None else None,
         "r0_err": float(r0_err) if r0_err is not None else None,
+        "volume_r0": float(volume_r0) if volume_r0 is not None else None,
+        "volume_r0_err": float(volume_r0_err) if volume_r0_err is not None else None,
         "a": float(lattice_spacing) if lattice_spacing is not None else None,
         "a_err": float(a_err) if a_err is not None else None,
         "tau_int": float(tau),
