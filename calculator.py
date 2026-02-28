@@ -795,3 +795,40 @@ class Calculator:
 
     def _calculate_volume_value(self, L, val_r0_on_a, r0_phys):
         return calculate_volume_from_r0(L, val_r0_on_a, r0_phys)
+    
+    @register("effective_mass")
+    def _calc_effective_mass(self, R: int, T: int = 1) -> data_organizer.VariableData:
+        """
+        Calculates the effective mass m_eff(R) from Wilson loops W(R,T).
+        m_eff(R) = ln[W(R,T)/W(R,T+1)] for a fixed R and large T.
+        """
+        try:
+            # Get W(R,T) for T and T+1
+            w_t   = self.get_variable("W_R_T", R=R, T=T) # Start with T
+            w_t1  = self.get_variable("W_R_T", R=R, T=T+1) # And T+1 for the ratio
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Could not get required Wilson loops for effective mass at R={R}: {e}")
+
+        def calculate_m_eff(w_T, w_T1):
+            if w_T1 == 0 or w_T <= 0 or w_T1 <= 0:
+                return np.nan
+            return np.log(w_T / w_T1)
+
+        # Main value
+        m_eff_val = calculate_m_eff(w_t.get(), w_t1.get())
+        
+        # Bootstrap values
+        m_eff_boots = []
+        b_t = w_t.bootstrap()
+        b_t1 = w_t1.bootstrap()
+
+        if b_t is not None and b_t1 is not None:
+            for i in range(self.n_bootstrap):
+                boot_val = calculate_m_eff(b_t[i], b_t1[i])
+                m_eff_boots.append(boot_val)
+        else:
+             m_eff_boots = [np.nan] * self.n_bootstrap
+
+        var_data = data_organizer.VariableData("effective_mass")
+        var_data.set_value(m_eff_val, bootstrap_samples=m_eff_boots, R=R, T=T)
+        return var_data
