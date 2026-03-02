@@ -298,7 +298,7 @@ class Calculator:
         return var_data
 
     @register("r0")
-    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65, r_min: int = 3) -> data_organizer.VariableData:
+    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65, r_min: int = 2) -> data_organizer.VariableData:
         """
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
