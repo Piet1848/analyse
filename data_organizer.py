@@ -100,7 +100,25 @@ class FileData:
 
         return self
 
+    def align_lengths(self) -> int:
+        """
+        Truncate all observable arrays to the same minimum length.
+        This guards against malformed rows or partial writes.
+        """
+        if not self.observables:
+            return 0
+
+        min_len = min(len(obs.values) for obs in self.observables)
+        for obs in self.observables:
+            if len(obs.values) != min_len:
+                obs.values = obs.values[:min_len]
+        return min_len
+
     def remove_thermalization(self, min_step: int):
+        if not self.observables:
+            return
+        self.align_lengths()
+
         step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
         if step_obs is None: return
 
@@ -201,3 +219,58 @@ class ExperimentData:
                 fd.read_file()
                 data_dict.setdefault(file_path.stem, []).append(fd)
         return data_dict
+
+
+def combine_file_data(files: List[FileData], min_step: int = 0, source_name: str = "combined") -> FileData | None:
+    """
+    Combine multiple FileData objects by:
+    1. Optional thermalization cut per file.
+    2. Taking only columns common to all files.
+    3. Appending rows file-by-file.
+    """
+    if not files:
+        return None
+
+    prepared: List[FileData] = []
+    for fd in files:
+        fd.align_lengths()
+        if min_step > 0:
+            fd.remove_thermalization(min_step)
+        fd.align_lengths()
+        if not fd.observables:
+            continue
+        if min(len(obs.values) for obs in fd.observables) <= 0:
+            continue
+        prepared.append(fd)
+
+    if not prepared:
+        return None
+
+    common_names = set(obs.name for obs in prepared[0].observables)
+    for fd in prepared[1:]:
+        common_names &= {obs.name for obs in fd.observables}
+
+    if not common_names:
+        return None
+
+    ordered_names = [obs.name for obs in prepared[0].observables if obs.name in common_names]
+
+    combined = FileData(f"{source_name}.out")
+    combined.observables = [ObservableData(name, []) for name in ordered_names]
+    combined_map = {obs.name: obs for obs in combined.observables}
+
+    for fd in prepared:
+        local_map = {obs.name: obs for obs in fd.observables}
+        chunk_len = min(len(local_map[name].values) for name in ordered_names)
+        if chunk_len <= 0:
+            continue
+        for name in ordered_names:
+            combined_map[name].extend(local_map[name].values[:chunk_len])
+
+    if not combined.observables:
+        return None
+    if min((len(obs.values) for obs in combined.observables), default=0) <= 0:
+        return None
+
+    combined.align_lengths()
+    return combined

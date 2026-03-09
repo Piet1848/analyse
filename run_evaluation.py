@@ -1,61 +1,163 @@
 import json
 import hashlib
 import os
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Any, Optional
-import numpy as np
-from load_input_yaml import load_params
+from typing import Dict, Any, Optional, List, Tuple
 
-# Import the new tools
+import numpy as np
+
+from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
+
 import data_organizer as do
 from calculator import Calculator
 
 # --- CONFIGURATION ---
-CALC_RESULT_BASE = Path("../data/calcResult")
-THERMALIZATION_STEPS = 500 
-CALC_VERSION = "3.2"  # Bumped version to invalidate old caches
+DATA_ROOT = Path("../data").resolve()
+CALC_RESULT_BASE = DATA_ROOT / "calcResult"
+THERMALIZATION_STEPS = 500
+CALC_VERSION = "4.0"  # Bumped version: grouped run-combination before calculation
+GROUP_IGNORE_METRO_FIELDS = {"seed"}
+
+_GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
+_GROUP_INDEX_ROOT: Path | None = None
+
 
 def get_run_id(path: str) -> str:
-    rel_path = os.path.relpath(path, start="../data") 
-    return hashlib.md5(rel_path.encode('utf-8')).hexdigest()
+    path_abs = os.path.abspath(path)
+    rel_path = os.path.relpath(path_abs, start=str(DATA_ROOT))
+    return hashlib.md5(rel_path.encode("utf-8")).hexdigest()
 
-def get_result_path(run_id: str) -> Path:
-    return CALC_RESULT_BASE / f"{run_id}.json"
 
-def load_cached_result(run_id: str) -> Optional[Dict[str, Any]]:
-    p = get_result_path(run_id)
+def get_result_path(cache_id: str) -> Path:
+    return CALC_RESULT_BASE / f"{cache_id}.json"
+
+
+def load_cached_result(cache_id: str) -> Optional[Dict[str, Any]]:
+    p = get_result_path(cache_id)
     if p.exists():
         try:
-            with open(p, 'r') as f: 
+            with open(p, "r") as f:
                 data = json.load(f)
                 if data.get("version") == CALC_VERSION:
                     return data
-        except (json.JSONDecodeError, IOError): 
+        except (json.JSONDecodeError, IOError):
             return None
     return None
 
-def save_result(run_id: str, data: Dict[str, Any]):
+
+def save_result(cache_id: str, data: Dict[str, Any]):
     CALC_RESULT_BASE.mkdir(parents=True, exist_ok=True)
     data["version"] = CALC_VERSION
-    p = get_result_path(run_id)
-    with open(p, 'w') as f: json.dump(data, f, indent=2)
+    p = get_result_path(cache_id)
+    with open(p, "w") as f:
+        json.dump(data, f, indent=2)
 
-def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[str, Any]:
+
+def _group_key_from_params(metro: MetropolisParams, gauge: GaugeObservableParams) -> str:
+    metro_dict = asdict(metro)
+    for key in GROUP_IGNORE_METRO_FIELDS:
+        metro_dict.pop(key, None)
+
+    payload = {
+        "metro": metro_dict,
+        "gauge": asdict(gauge),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _group_key_for_run(path: str) -> Optional[str]:
+    yaml_path = Path(path) / "input.yaml"
+    if not yaml_path.exists():
+        return None
+    try:
+        metro, gauge = load_params(str(yaml_path))
+    except Exception:
+        return None
+    return _group_key_from_params(metro, gauge)
+
+
+def _build_group_index(root: Path) -> Dict[str, List[str]]:
+    index: Dict[str, List[str]] = {}
+    if not root.exists():
+        return index
+
+    for dirpath, _, filenames in os.walk(root):
+        if "input.yaml" not in filenames:
+            continue
+        key = _group_key_for_run(dirpath)
+        if key is None:
+            continue
+        index.setdefault(key, []).append(os.path.abspath(dirpath))
+
+    for key in index:
+        index[key] = sorted(set(index[key]))
+    return index
+
+
+def _get_group_index() -> Dict[str, List[str]]:
+    global _GROUP_INDEX_CACHE, _GROUP_INDEX_ROOT
+    if _GROUP_INDEX_CACHE is None or _GROUP_INDEX_ROOT != DATA_ROOT:
+        _GROUP_INDEX_CACHE = _build_group_index(DATA_ROOT)
+        _GROUP_INDEX_ROOT = DATA_ROOT
+    return _GROUP_INDEX_CACHE
+
+
+def _discover_equivalent_runs(path: str) -> Tuple[str, List[str]]:
+    abs_path = os.path.abspath(path)
+    group_key = _group_key_for_run(abs_path)
+    if group_key is None:
+        return f"run_{get_run_id(abs_path)}", [abs_path]
+
+    index = _get_group_index()
+    grouped_paths = list(index.get(group_key, []))
+    if abs_path not in grouped_paths:
+        grouped_paths.append(abs_path)
+    grouped_paths = sorted(set(grouped_paths))
+    return f"group_{group_key}", grouped_paths
+
+
+def _load_combined_w_temp(run_paths: List[str]) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
+    w_temp_files: List[do.FileData] = []
+    runs_with_w_temp = 0
+
+    for run_path in run_paths:
+        exp_data = do.ExperimentData(run_path)
+        files = exp_data.data.get("W_temp", [])
+        if files:
+            runs_with_w_temp += 1
+            w_temp_files.extend(files)
+
+    combined = do.combine_file_data(
+        w_temp_files,
+        min_step=THERMALIZATION_STEPS,
+        source_name="W_temp_combined",
+    )
+
+    combined_samples = 0
+    if combined is not None and combined.observables:
+        combined_samples = len(combined.observables[0].values)
+
+    metadata = {
+        "n_runs_in_group": len(run_paths),
+        "n_runs_with_w_temp": runs_with_w_temp,
+        "n_w_temp_files": len(w_temp_files),
+        "n_samples_after_cut": combined_samples,
+        "thermalization_steps": THERMALIZATION_STEPS,
+    }
+    return combined, metadata
+
+
+def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float = 1.65) -> Dict[str, Any]:
     """
-    Main analysis logic using Calculator. 
-    Calculates as much as possible without failing completely if r0 is missing.
+    Main analysis logic using Calculator.
+    Expects preprocessed (thermalization-cut + combined) W_temp data.
     """
-    # 1. Get the main file (W_temp)
-    if "W_temp" not in data.data or not data.data["W_temp"]:
-        return {"error": "No W_temp data found"}
-    
-    file_data = data.data["W_temp"][0]
-    file_data.remove_thermalization(THERMALIZATION_STEPS)
-    
     if not file_data.observables:
-        return {"error": "No data left after thermalization cut"}
+        return {"error": "No combined W_temp observables available"}
 
-    # 2. Calculate Autocorrelation (Tau) first
+    # 1. Calculate Autocorrelation (Tau) first
     calc_pre = Calculator(file_data)
     try:
         tau_var = calc_pre.get_variable("tau_int", obs_name="plaquette")
@@ -65,9 +167,9 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
 
     block_size = max(1, int(np.ceil(2 * tau)))
 
-    # 3. Main Calculation (with Blocking)
+    # 2. Main Calculation (with Blocking)
     calc = Calculator(file_data, step_size=block_size)
-    
+
     # --- A. Explicitly Calculate V(R) for all available R ---
     potentials = {}
     potential_errors = {}
@@ -79,17 +181,17 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
                 v_var = calc.get_variable("V_R", R=int(r))
                 val = v_var.get()
                 if val is not None and not np.isnan(val):
-                    # Store as string keys and native floats
                     potentials[str(int(r))] = float(val)
                     potential_errors[str(int(r))] = float(v_var.err())
-            except Exception: continue
-    except Exception: pass
+            except Exception:
+                continue
+    except Exception:
+        pass
 
-    # --- NEW: Collect W(R, T) for all available pairs ---
+    # --- B. Collect W(R, T) for all available pairs ---
     all_w = {}
     try:
         all_T = np.array(file_data.get("T").values)
-        # Find all unique (L, T) pairs
         pairs = sorted(list(set(zip(all_L, all_T))))
         for r_p, t_p in pairs:
             try:
@@ -97,56 +199,53 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
                 w_val = w_var.get()
                 if w_val is not None:
                     all_w[f"{int(r_p)},{int(t_p)}"] = float(w_val)
-            except: continue
-    except: pass
-    
-    # --- B. Attempt r0 Calculation ---
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # --- C. Attempt r0 Calculation ---
     r0 = None
     r0_err = None
     cornell_params = None
-    
+
     try:
-        # This will use the cached V_R values from step A
         r0_var = calc.get_variable("r0", target_force=sommer_target)
         r0 = r0_var.get()
-        # Treat NaN as None/Failure for r0
         if np.isnan(r0):
             r0 = None
         else:
             r0_err = r0_var.err()
             cornell_params = r0_var.parameters.get("cornell_params", None)
     except Exception:
-        # r0 calculation failed (e.g., not enough points), but we proceed
         pass
 
-    # Calculate lattice spacing if r0 was found
     lattice_spacing = None
     a_err = None
     if r0 is not None:
         lattice_spacing = 0.5 / r0
         a_err = (0.5 / (r0**2)) * r0_err if r0_err else 0.0
 
-    # --- C. Attempt Creutz Ratio (chi) analysis ---
+    # --- D. Attempt Creutz Ratio (chi) analysis ---
     all_chi = {}
     all_f_chi = {}
     r0_chi = None
     r0_chi_err = None
-    chi_t_large = 4 # Default large T for extracting the force
+    chi_t_large = 4
 
     try:
-        # Determine R and T values for chi from Wilson loop pairs
-        # chi is at R+0.5, T+0.5
         chi_pairs = []
-        # Check if all_L and all_T were defined earlier
-        if 'all_L' in locals() and 'all_T' in locals():
+        if "all_L" in locals() and "all_T" in locals():
             r_values = sorted(np.unique(all_L))
             t_values = sorted(np.unique(all_T))
             for r in r_values:
-                if r + 1 not in r_values: continue
+                if r + 1 not in r_values:
+                    continue
                 for t in t_values:
-                    if t + 1 not in t_values: continue
+                    if t + 1 not in t_values:
+                        continue
                     chi_pairs.append((r + 0.5, t + 0.5))
-        
+
         for r_p, t_p in chi_pairs:
             try:
                 chi_var = calc.get_variable("chi", R=r_p, T=t_p)
@@ -156,19 +255,22 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
             except Exception:
                 continue
 
-        # Extract force F_chi at a fixed t_large
         r_for_force = sorted(list(set(p[0] for p in chi_pairs if p[1] == chi_t_large + 0.5)))
         for r_p in r_for_force:
-             try:
+            try:
                 f_var = calc.get_variable("F_chi", R=r_p, t_large=chi_t_large)
                 f_val = f_var.get()
                 if f_val is not None and not np.isnan(f_val):
                     all_f_chi[f"{r_p}"] = float(f_val)
-             except Exception:
+            except Exception:
                 continue
 
-        # Calculate r0 from chi
-        r0_chi_var = calc.get_variable("r0_chi", t_large=chi_t_large, target_force=sommer_target, discard_negative=True)
+        r0_chi_var = calc.get_variable(
+            "r0_chi",
+            t_large=chi_t_large,
+            target_force=sommer_target,
+            discard_negative=True,
+        )
         r0_chi = r0_chi_var.get()
         if np.isnan(r0_chi):
             r0_chi = None
@@ -176,40 +278,37 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
             r0_chi_err = r0_chi_var.err()
 
     except Exception:
-        # Chi analysis can fail, proceed without it
         pass
-    
-    # --- D. Volume Calculation ---
+
+    # --- E. Volume Calculation ---
     volume_r0 = None
     volume_r0_err = None
     try:
-        # Load L from input.yaml
-        yaml_path = data.path / "input.yaml"
+        yaml_path = input_dir / "input.yaml"
         metro, _ = load_params(str(yaml_path))
         L_val = metro.L0
-        
+
         if r0 is not None:
-             vol_var = calc.get_variable("volume_r0", L=L_val, target_force=sommer_target)
-             if vol_var.get() is not None and not np.isnan(vol_var.get()):
-                 volume_r0 = vol_var.get()
-                 volume_r0_err = vol_var.err()
+            vol_var = calc.get_variable("volume_r0", L=L_val, target_force=sommer_target)
+            if vol_var.get() is not None and not np.isnan(vol_var.get()):
+                volume_r0 = vol_var.get()
+                volume_r0_err = vol_var.err()
     except Exception:
         pass
 
-    # --- E. Creutz P-Ratio and a_creutz ---
+    # --- F. Creutz P-Ratio and a_creutz ---
     all_creutz_P = {}
     all_creutz_P_err = {}
     all_a_creutz = {}
     all_a_creutz_err = {}
 
     try:
-        if 'all_L' in locals():
+        if "all_L" in locals():
             unique_Rs = sorted(np.unique(all_L))
-            even_Rs = [r for r in unique_Rs if r % 2 == 0 and r > 0] # Ensure R > 0
+            even_Rs = [r for r in unique_Rs if r % 2 == 0 and r > 0]
 
             for r in even_Rs:
                 try:
-                    # P-Ratio
                     p_var = calc.get_variable("creutz_P", R=int(r))
                     p_val = p_var.get()
                     if p_val is not None and not np.isnan(p_val):
@@ -217,7 +316,6 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
                         if p_var.err() is not None:
                             all_creutz_P_err[str(int(r))] = float(p_var.err())
 
-                    # a_creutz
                     a_var = calc.get_variable("a_creutz", R=int(r))
                     a_val = a_var.get()
                     if a_val is not None and not np.isnan(a_val):
@@ -255,27 +353,41 @@ def evaluate_run(data: do.ExperimentData, sommer_target: float = 1.65) -> Dict[s
             "cornell_params": cornell_params,
             "chi": all_chi,
             "F_chi": all_f_chi,
-        }
+        },
     }
 
+
 def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
+    path = os.path.abspath(path)
     run_id = get_run_id(path)
-    
+
+    if not os.path.isdir(path):
+        return {"error": "Directory not found"}
+
+    analysis_id, grouped_paths = _discover_equivalent_runs(path)
+
     if not force_recalc:
-        cached = load_cached_result(run_id)
-        if cached: return cached
+        cached = load_cached_result(analysis_id)
+        if cached:
+            result = dict(cached)
+            result["path"] = path
+            result["run_id"] = run_id
+            result["analysis_id"] = analysis_id
+            return result
 
     try:
-        if not os.path.isdir(path): return {"error": "Directory not found"}
-        exp_data = do.ExperimentData(path)
-        result = evaluate_run(exp_data)
+        combined_w_temp, aggregation = _load_combined_w_temp(grouped_paths)
+        if combined_w_temp is None:
+            return {"error": "No W_temp data found in equivalent run group"}
+
+        result = evaluate_run(combined_w_temp, Path(path))
         result["path"] = path
         result["run_id"] = run_id
+        result["analysis_id"] = analysis_id
+        result["aggregation"] = aggregation
 
-        # Only save if we didn't hit a fatal error (missing files)
-        # Partial results (r0=None) are fine to save/return
         if "error" not in result:
-            save_result(run_id, result)
+            save_result(analysis_id, result)
         return result
     except Exception as e:
         return {"error": str(e)}

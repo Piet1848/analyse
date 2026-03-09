@@ -4,7 +4,7 @@ Read and store parameters from input.yaml into Python dataclasses.
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Any
 import yaml
 import argparse
 
@@ -33,9 +33,9 @@ class GaugeObservableParams:
     measure_wilson_loop_temporal: bool
     measure_wilson_loop_mu_nu: bool
     measure_retrace_U: bool
-    W_temp_L_T_pairs: List[Tuple[int, int]]
-    W_mu_nu_pairs: List[Tuple[int, int]]
-    W_Lmu_Lnu_pairs: List[Tuple[int, int]]
+    W_temp_L_T_pairs: List[Any]
+    W_mu_nu_pairs: List[Any]
+    W_Lmu_Lnu_pairs: List[Any]
     plaquette_filename: str
     W_temp_filename: str
     W_mu_nu_filename: str
@@ -79,19 +79,19 @@ def load_params(yaml_path: str) -> tuple[MetropolisParams, GaugeObservableParams
         return [tuple(pair) for pair in gauge_raw.get(key, [])]
 
     gauge = GaugeObservableParams(
-        measurement_interval=gauge_raw["measurement_interval"],
-        measure_plaquette=gauge_raw["measure_plaquette"],
-        measure_wilson_loop_temporal=gauge_raw["measure_wilson_loop_temporal"],
-        measure_wilson_loop_mu_nu=gauge_raw["measure_wilson_loop_mu_nu"],
-        measure_retrace_U=gauge_raw["measure_retrace_U"],
+        measurement_interval=gauge_raw.get("measurement_interval", 1),
+        measure_plaquette=gauge_raw.get("measure_plaquette", True),
+        measure_wilson_loop_temporal=gauge_raw.get("measure_wilson_loop_temporal", False),
+        measure_wilson_loop_mu_nu=gauge_raw.get("measure_wilson_loop_mu_nu", False),
+        measure_retrace_U=gauge_raw.get("measure_retrace_U", False),
         W_temp_L_T_pairs=_pairs("W_temp_L_T_pairs"),
         W_mu_nu_pairs=_pairs("W_mu_nu_pairs"),
         W_Lmu_Lnu_pairs=_pairs("W_Lmu_Lnu_pairs"),
-        plaquette_filename=gauge_raw["plaquette_filename"],
-        W_temp_filename=gauge_raw["W_temp_filename"],
-        W_mu_nu_filename=gauge_raw["W_mu_nu_filename"],
-        RetraceU_filename=gauge_raw["RetraceU_filename"],
-        write_to_file=gauge_raw["write_to_file"],
+        plaquette_filename=gauge_raw.get("plaquette_filename", ""),
+        W_temp_filename=gauge_raw.get("W_temp_filename", ""),
+        W_mu_nu_filename=gauge_raw.get("W_mu_nu_filename", ""),
+        RetraceU_filename=gauge_raw.get("RetraceU_filename", ""),
+        write_to_file=gauge_raw.get("write_to_file", True),
     )
 
     return metro, gauge

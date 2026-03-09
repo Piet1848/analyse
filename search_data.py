@@ -97,8 +97,14 @@ def convert_value(value_str: str, typ: Any) -> Any:
     origin = get_origin(typ)
     if origin is not None: 
         # For simple list/dict types, we treat input as string for now
-        if typ is dict: return value_str 
-        raise ValueError(f"List/tuple fields not supported: {typ}")
+        if origin is list or origin is dict or typ is list or typ is dict: return value_str 
+        try:
+             # Fallback for other generics if they behave like lists/dicts
+             return value_str
+        except Exception:
+             pass
+        # If we really can't handle it, we might raise, but let's be lenient
+        return value_str
     
     if typ is int: return int(value_str)
     if typ is float: return float(value_str)
@@ -135,6 +141,12 @@ def matches_criteria(metro: MetropolisParams, gauge: GaugeObservableParams, crit
         if block_name == "calc": continue 
         obj = metro if block_name == "metro" else gauge
         actual = getattr(obj, name)
+        
+        # Handle complex types (list/dict) via string containment if expected is a string
+        if isinstance(actual, (list, dict)) and isinstance(expected, str):
+            if expected not in str(actual): return False
+            continue
+            
         if actual != expected: return False
     return True
 
@@ -145,7 +157,9 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
         yaml_path = os.path.join(dirpath, "input.yaml")
         try:
             metro, gauge = load_params(yaml_path)
-        except Exception: continue
+        except Exception as e:
+            print(f"Warning: Failed to load parameters from {yaml_path}: {e}", file=sys.stderr)
+            continue
         if matches_criteria(metro, gauge, criteria):
             matches.append(dirpath)
     return matches
