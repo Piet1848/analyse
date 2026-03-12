@@ -75,8 +75,30 @@ def load_params(yaml_path: str) -> tuple[MetropolisParams, GaugeObservableParams
     metro = MetropolisParams(**metro_raw)
 
     # Ensure the list entries are tuples (dataclass type annotation)
+    # and expand string ranges (e.g. "1:4") into list of ints and take Cartesian product
+    def _parse_range(val: Any) -> list[int]:
+        if isinstance(val, int):
+            return [val]
+        elif isinstance(val, str) and ":" in val:
+            parts = val.split(":")
+            if len(parts) == 2:
+                start, end = int(parts[0]), int(parts[1])
+                return list(range(start, end + 1))
+        # fallback, just try to parse as int
+        return [int(val)]
+
     def _pairs(key: str) -> list[tuple[int, int]]:
-        return [tuple(pair) for pair in gauge_raw.get(key, [])]
+        raw_list = gauge_raw.get(key, [])
+        expanded = []
+        for pair in raw_list:
+            if len(pair) != 2:
+                continue
+            l_vals = _parse_range(pair[0])
+            t_vals = _parse_range(pair[1])
+            for l in l_vals:
+                for t in t_vals:
+                    expanded.append((l, t))
+        return expanded
 
     gauge = GaugeObservableParams(
         measurement_interval=gauge_raw.get("measurement_interval", 1),
