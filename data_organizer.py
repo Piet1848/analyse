@@ -77,26 +77,13 @@ class FileData:
         if not self.path.exists():
             raise FileNotFoundError(f"{self.path} not found")
 
-        with self.path.open() as f:
-            reader = csv.reader(f)
-            headers = next(reader, None)
-            if headers is None:
-                return self
+        data = np.genfromtxt(self.path, delimiter=',', names=True, encoding='utf-8-sig', ndmin=1)
+        if data.dtype.names is None:
+            return self
 
-            headers = [h.strip().lstrip("\ufeff") for h in headers]
-            self.observables = [ObservableData(name) for name in headers]
-
-            for row_idx, row in enumerate(reader, start=1):
-                if not row or all(not cell.strip() for cell in row):
-                    continue
-                if len(row) < len(self.observables):
-                    continue 
-                
-                for obs, val in zip(self.observables, row):
-                    try:
-                        obs.append(float(val))
-                    except ValueError:
-                        pass
+        self.observables = []
+        for name in data.dtype.names:
+            self.observables.append(ObservableData(name, data[name].tolist()))
 
         return self
 

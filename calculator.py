@@ -62,6 +62,23 @@ class Calculator:
         
         # Cache for indices
         self._bootstrap_indices: np.ndarray | None = None
+        
+        # Pre-index W_temp data for O(1) lookup
+        self._w_rt_cache = {}
+        if any(o.name == "W_temp" for o in self.file_data.observables):
+            try:
+                obs_val = np.array(self.file_data.get("W_temp").values)
+                obs_L = np.array(self.file_data.get("L").values)
+                obs_T = np.array(self.file_data.get("T").values)
+                
+                import collections
+                grouped = collections.defaultdict(list)
+                for i in range(len(obs_val)):
+                    grouped[(obs_L[i], obs_T[i])].append(obs_val[i])
+                for k, v in grouped.items():
+                    self._w_rt_cache[k] = np.array(v)
+            except (ValueError, KeyError):
+                pass
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
         key = make_key(name, params)
@@ -103,20 +120,25 @@ class Calculator:
 
     @register("W_R_T")
     def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData:
-        try:
-            obs_val = self.file_data.get("W_temp").values 
-            obs_L   = self.file_data.get("L").values
-            obs_T   = self.file_data.get("T").values
-        except ValueError as e:
-            raise KeyError(f"Missing required columns (L, T, or W_temp) in file: {e}")
+        key = (R, T)
+        if hasattr(self, '_w_rt_cache') and key in self._w_rt_cache:
+            selected_values = self._w_rt_cache[key]
+        else:
+            try:
+                obs_val = self.file_data.get("W_temp").values 
+                obs_L   = self.file_data.get("L").values
+                obs_T   = self.file_data.get("T").values
+            except ValueError as e:
+                raise KeyError(f"Missing required columns (L, T, or W_temp) in file: {e}")
 
-        arr_val = np.array(obs_val)
-        arr_L   = np.array(obs_L)
-        arr_T   = np.array(obs_T)
+            arr_val = np.array(obs_val)
+            arr_L   = np.array(obs_L)
+            arr_T   = np.array(obs_T)
 
-        # 3. Create a Mask (Where L==R AND T==T)
-        mask = (arr_L == R) & (arr_T == T)
-        selected_values = arr_val[mask]
+            # 3. Create a Mask (Where L==R AND T==T)
+            mask = (arr_L == R) & (arr_T == T)
+            selected_values = arr_val[mask]
+
         n_samples = len(selected_values)
 
         if n_samples == 0:
@@ -226,22 +248,35 @@ class Calculator:
         bootstrap_Vs = []
 
         all_boots = np.array([v.bootstrap() for v in w_vars])
-        all_boots_T = all_boots.T 
+        all_boots_valid = all_boots[:valid_len, :]  # shape: (valid_len, n_boot)
         
+        # Identify valid bootstrap universes
+        invalid_mask = np.any(all_boots_valid <= 0, axis=0)
+        valid_boots = all_boots_valid[:, ~invalid_mask]
+        
+        # Calculate log of all valid bootstrap samples at once
+        ln_boots = np.log(valid_boots)  # shape: (valid_len, n_valid_boot)
+        
+        # Polyfit does not support 2D weights natively, so iterate over pre-calculated logs
+        valid_idx = 0
         for i in range(n_boot):
-            # FIX: Slice the bootstrap sample to match the truncated time array
-            ws_sample = all_boots_T[i][:valid_len] 
-            
-            # Skip this universe if it fluctuates into negative values within the window
-            if np.any(ws_sample <= 0):
+            if invalid_mask[i]:
                 bootstrap_Vs.append(np.nan)
-                continue
-            
-            # Fit using the SAME weights (ws_err) from the main fit
-            v_boot, _ = fit_potential(ts_fit, ws_sample, sigma=ws_err)
-            
-            # Append result (NaN or float)
-            bootstrap_Vs.append(v_boot)
+            else:
+                # Get pre-calculated log values
+                ln_ws_sample = ln_boots[:, valid_idx]
+                ws_sample = valid_boots[:, valid_idx]
+                valid_idx += 1
+                
+                w_weights = None
+                if ws_err is not None and np.all(ws_err > 0):
+                    w_weights = ws_sample / ws_err
+                
+                try:
+                    p = np.polyfit(ts_fit, ln_ws_sample, 1, w=w_weights)
+                    bootstrap_Vs.append(-p[0])
+                except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
+                    bootstrap_Vs.append(np.nan)
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, fit_C=C_main)
@@ -390,14 +425,22 @@ class Calculator:
         # Main Fit
         r0_val, fit_params = perform_fit(rs, vs, sigma)
         corn_params = {'A': fit_params[0], 'sigma': fit_params[1], 'B': fit_params[2]}
+        
         # Bootstrap Fits
         r0_bootstraps = []
         if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
             boot_data = np.array(bootstrap_matrix).T
-            for i in range(len(boot_data)):
-                val, _ = perform_fit(rs, boot_data[i], sigma)
-                if not np.isnan(val):
-                    r0_bootstraps.append(val)
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def fit_boot(sample_vs):
+                val, _ = perform_fit(rs, sample_vs, sigma)
+                return val
+                
+            with ThreadPoolExecutor() as executor:
+                results = executor.map(fit_boot, boot_data)
+                for val in results:
+                    if not np.isnan(val):
+                        r0_bootstraps.append(val)
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, r_min=r_min, cornell_params=corn_params)
@@ -552,15 +595,39 @@ class Calculator:
         def get_r0_from_force(r_vals, f_vals, f_errs=None):
             """
             Finds r0 by linearly interpolating/fitting r^2*F(r).
-            Finds the first crossover and can use a weighted fit in a window around it.
-            If no crossover is found, attempts a global weighted fit if use_weighted_fit is True.
+            Uses global spline interpolation if possible, fallback to local fits.
             """
             if len(r_vals) < 2: return np.nan
             
             r2_vals = r_vals**2
             r2f_vals = r2_vals * f_vals
 
-            # A. Try to find a local crossover first
+            # A. Global spline interpolation
+            if use_weighted_fit and f_errs is not None and len(f_errs) == len(r_vals):
+                from scipy.interpolate import UnivariateSpline
+                std_devs = r2_vals * f_errs
+                valid = std_devs > 0
+                if np.sum(valid) >= 4:
+                    r2_v = r2_vals[valid]
+                    y_v = r2f_vals[valid] - target_force
+                    w_v = 1.0 / std_devs[valid]
+                    
+                    # Ensure x is strictly increasing
+                    sort_idx = np.argsort(r2_v)
+                    r2_v = r2_v[sort_idx]
+                    y_v = y_v[sort_idx]
+                    w_v = w_v[sort_idx]
+                    
+                    try:
+                        spline = UnivariateSpline(r2_v, y_v, w=w_v, k=3)
+                        roots = spline.roots()
+                        positive_roots = [r for r in roots if r > 0]
+                        if positive_roots:
+                            return np.sqrt(positive_roots[0])
+                    except Exception:
+                        pass # Fallback to local fit
+
+            # B. Local crossover fallback
             for i in range(len(r_vals) - 1):
                 y1, y2 = r2f_vals[i], r2f_vals[i+1]
 
