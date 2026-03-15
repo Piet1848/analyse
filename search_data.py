@@ -164,7 +164,7 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
             matches.append(dirpath)
     return matches
 
-def process_row(paths: List[str], outputs: List[str], is_combined: bool) -> Tuple[str, List[Any]]:
+def process_row(paths: List[str], outputs: List[str], is_combined: bool, n_threads: int = 1) -> Tuple[str, List[Any]]:
     try:
         from pathlib import Path
         path = paths[0]
@@ -176,14 +176,14 @@ def process_row(paths: List[str], outputs: List[str], is_combined: bool) -> Tupl
 
         if needs_calc:
             if is_combined:
-                calc_data = run_evaluation.get_or_calculate(path)
+                calc_data = run_evaluation.get_or_calculate(path, n_threads=n_threads)
                 if calc_data and "aggregation" in calc_data:
                     n_combined = calc_data["aggregation"].get("n_runs_in_group", len(paths))
                     row_label = f"combined {n_combined}"
             else:
                 combined_w_temp, _ = run_evaluation._load_combined_w_temp([path])
                 if combined_w_temp:
-                    calc_data = run_evaluation.evaluate_run(combined_w_temp, Path(path))
+                    calc_data = run_evaluation.evaluate_run(combined_w_temp, Path(path), n_threads=n_threads)
                 else:
                     calc_data = {"error": "No W_temp data found"}
 
@@ -228,7 +228,11 @@ def main() -> None:
     parser.add_argument("root", help="Root data directory")
     parser.add_argument("tokens", nargs="*", help="Filters (NAME=VAL) and outputs (NAME)")
     parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers")
+    parser.add_argument("--threads", type=int, default=1, help="Number of internal threads for parallelizing calculations per dataset")
     args = parser.parse_args()
+
+    # If threading is used, force workers to 1 to avoid thread explosion
+    actual_workers = 1 if args.threads > 1 else args.workers
 
     if not args.tokens:
         print("Available Parameters:")
@@ -266,13 +270,19 @@ def main() -> None:
             tasks.append((paths, True))
 
     n_combined_groups = sum(1 for p in groups.values() if len(p) > 1)
-    print(f"Processing {len(tasks)} tasks ({len(matches)} individual runs, {n_combined_groups} combined groups) with {args.workers} workers...", file=sys.stderr)
+    print(f"Processing {len(tasks)} tasks ({len(matches)} individual runs, {n_combined_groups} combined groups) with {actual_workers} workers and {args.threads} internal threads...", file=sys.stderr)
 
     rows = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_row, paths, outputs, is_combined): paths for paths, is_combined in tasks}
-        for i, future in enumerate(concurrent.futures.as_completed(futures)):
-            row_label, vals = future.result()
+    if actual_workers > 1:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=actual_workers) as executor:
+            futures = {executor.submit(process_row, paths, outputs, is_combined, args.threads): paths for paths, is_combined in tasks}
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                row_label, vals = future.result()
+                rows.append((row_label, vals))
+                print(f"Processed {i+1}/{len(tasks)}", file=sys.stderr, end="\r")
+    else:
+        for i, (paths, is_combined) in enumerate(tasks):
+            row_label, vals = process_row(paths, outputs, is_combined, args.threads)
             rows.append((row_label, vals))
             print(f"Processed {i+1}/{len(tasks)}", file=sys.stderr, end="\r")
 

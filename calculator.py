@@ -47,7 +47,7 @@ class Calculator:
             if callable(attr) and hasattr(attr, "_calc_name"):
                 cls._registry[attr._calc_name] = attr
 
-    def __init__(self, file_data: data_organizer.FileData, n_bootstrap: int = 200, seed: int = 42, step_size: int = 1):
+    def __init__(self, file_data: data_organizer.FileData, n_bootstrap: int = 200, seed: int = 42, step_size: int = 1, n_threads: int = 1):
         # Trigger registration if it hasn't happened yet
         if not self._registry:
             self._populate_registry()
@@ -59,9 +59,18 @@ class Calculator:
         self.n_bootstrap = n_bootstrap
         self.seed = seed
         self.step_size = step_size
+        self.n_threads = n_threads
         
         # Cache for indices
         self._bootstrap_indices: np.ndarray | None = None
+
+    def _run_bootstraps(self, func, iterable):
+        if self.n_threads > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=self.n_threads) as executor:
+                return list(executor.map(func, iterable))
+        else:
+            return list(map(func, iterable))
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
         key = make_key(name, params)
@@ -228,20 +237,14 @@ class Calculator:
         all_boots = np.array([v.bootstrap() for v in w_vars])
         all_boots_T = all_boots.T 
         
-        for i in range(n_boot):
-            # FIX: Slice the bootstrap sample to match the truncated time array
-            ws_sample = all_boots_T[i][:valid_len] 
-            
-            # Skip this universe if it fluctuates into negative values within the window
+        def boot_task(ws_sample):
             if np.any(ws_sample <= 0):
-                bootstrap_Vs.append(np.nan)
-                continue
-            
-            # Fit using the SAME weights (ws_err) from the main fit
+                return np.nan
             v_boot, _ = fit_potential(ts_fit, ws_sample, sigma=ws_err)
-            
-            # Append result (NaN or float)
-            bootstrap_Vs.append(v_boot)
+            return v_boot
+
+        sliced_boots = [all_boots_T[i][:valid_len] for i in range(n_boot)]
+        bootstrap_Vs = self._run_bootstraps(boot_task, sliced_boots)
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, fit_C=C_main)
@@ -394,10 +397,12 @@ class Calculator:
         r0_bootstraps = []
         if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
             boot_data = np.array(bootstrap_matrix).T
-            for i in range(len(boot_data)):
-                val, _ = perform_fit(rs, boot_data[i], sigma)
-                if not np.isnan(val):
-                    r0_bootstraps.append(val)
+            def boot_task(sample_vs):
+                val, _ = perform_fit(rs, sample_vs, sigma)
+                return val
+            
+            res = self._run_bootstraps(boot_task, boot_data)
+            r0_bootstraps = [v for v in res if not np.isnan(v)]
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, r_min=r_min, cornell_params=corn_params)
@@ -460,9 +465,10 @@ class Calculator:
         if b_t1_r is None or b_t_r1 is None or b_tr is None or b_t1_r1 is None:
              raise ValueError(f"Bootstrap samples not available for one of the Wilson loops for chi({R},{T})")
 
-        for i in range(self.n_bootstrap):
-            boot_val = calculate_log_ratio(b_t1_r[i], b_t_r1[i], b_tr[i], b_t1_r1[i])
-            chi_boots.append(boot_val)
+        def boot_task(args):
+            return calculate_log_ratio(*args)
+            
+        chi_boots = self._run_bootstraps(boot_task, zip(b_t1_r, b_t_r1, b_tr, b_t1_r1))
         
         var_data = data_organizer.VariableData("chi")
         var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T)
@@ -643,11 +649,10 @@ class Calculator:
         r0_bootstraps = []
         if len(bootstrap_matrix) > 0 and len(bootstrap_matrix) == len(rs):
             boot_data = np.array(bootstrap_matrix).T
-            for sample_fs in boot_data:
-                # For bootstrap samples, we don't have individual errors,
-                # so we use the errors from the main data set as weights.
-                val = get_r0_from_force(rs, sample_fs, errs)
-                r0_bootstraps.append(val)
+            def boot_task(sample_fs):
+                return get_r0_from_force(rs, sample_fs, errs)
+                
+            r0_bootstraps = self._run_bootstraps(boot_task, boot_data)
         
         var_data = data_organizer.VariableData("r0_chi")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min)
@@ -704,9 +709,9 @@ class Calculator:
         
         # Ensure we have bootstraps for all components
         if b_large is not None and b_small is not None and b_rect is not None:
-            for i in range(self.n_bootstrap):
-                boot_val = calculate_P(b_large[i], b_small[i], b_rect[i])
-                P_boots.append(boot_val)
+            def boot_task(args):
+                return calculate_P(*args)
+            P_boots = self._run_bootstraps(boot_task, zip(b_large, b_small, b_rect))
         else:
             # If bootstraps are missing (e.g. from a fallback), fill with NaNs or empty
             P_boots = [np.nan] * self.n_bootstrap
@@ -750,8 +755,7 @@ class Calculator:
         p_boots = p_var.bootstrap()
         
         if p_boots is not None:
-            for p_b in p_boots:
-                a_boots.append(calculate_a(p_b))
+            a_boots = self._run_bootstraps(calculate_a, p_boots)
         else:
              a_boots = [np.nan] * self.n_bootstrap
              
@@ -784,8 +788,9 @@ class Calculator:
         r0_boots = r0_var.bootstrap()
         
         if r0_boots is not None:
-             for b in r0_boots:
-                 vol_boots.append(self._calculate_volume_value(L, b, r0_phys))
+             def boot_task(b):
+                 return self._calculate_volume_value(L, b, r0_phys)
+             vol_boots = self._run_bootstraps(boot_task, r0_boots)
         else:
              vol_boots = [np.nan] * self.n_bootstrap
              
@@ -823,9 +828,9 @@ class Calculator:
         b_t1 = w_t1.bootstrap()
 
         if b_t is not None and b_t1 is not None:
-            for i in range(self.n_bootstrap):
-                boot_val = calculate_m_eff(b_t[i], b_t1[i])
-                m_eff_boots.append(boot_val)
+            def boot_task(args):
+                return calculate_m_eff(*args)
+            m_eff_boots = self._run_bootstraps(boot_task, zip(b_t, b_t1))
         else:
              m_eff_boots = [np.nan] * self.n_bootstrap
 

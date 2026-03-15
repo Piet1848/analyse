@@ -149,7 +149,7 @@ def _load_combined_w_temp(run_paths: List[str]) -> Tuple[Optional[do.FileData], 
     return combined, metadata
 
 
-def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float = 1.65) -> Dict[str, Any]:
+def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float = 1.65, n_threads: int = 1) -> Dict[str, Any]:
     """
     Main analysis logic using Calculator.
     Expects preprocessed (thermalization-cut + combined) W_temp data.
@@ -158,7 +158,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
         return {"error": "No combined W_temp observables available"}
 
     # 1. Calculate Autocorrelation (Tau) first
-    calc_pre = Calculator(file_data)
+    calc_pre = Calculator(file_data, n_threads=n_threads)
     try:
         tau_var = calc_pre.get_variable("tau_int", obs_name="plaquette")
         tau = tau_var.get()
@@ -168,7 +168,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     block_size = max(1, int(np.ceil(2 * tau)))
 
     # 2. Main Calculation (with Blocking)
-    calc = Calculator(file_data, step_size=block_size)
+    calc = Calculator(file_data, step_size=block_size, n_threads=n_threads)
 
     # --- A. Explicitly Calculate V(R) for all available R ---
     potentials = {}
@@ -357,7 +357,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     }
 
 
-def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
+def get_or_calculate(path: str, force_recalc: bool = False, n_threads: int = 1) -> Dict[str, Any]:
     path = os.path.abspath(path)
     run_id = get_run_id(path)
 
@@ -380,7 +380,7 @@ def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
         if combined_w_temp is None:
             return {"error": "No W_temp data found in equivalent run group"}
 
-        result = evaluate_run(combined_w_temp, Path(path))
+        result = evaluate_run(combined_w_temp, Path(path), n_threads=n_threads)
         result["path"] = path
         result["run_id"] = run_id
         result["analysis_id"] = analysis_id
