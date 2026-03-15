@@ -164,11 +164,28 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
             matches.append(dirpath)
     return matches
 
-def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
+def process_row(paths: List[str], outputs: List[str], is_combined: bool) -> Tuple[str, List[Any]]:
     try:
+        from pathlib import Path
+        path = paths[0]
         metro, gauge = load_params(os.path.join(path, "input.yaml"))
         needs_calc = any(get_field_info(out)[0] == "calc" for out in outputs)
-        calc_data = run_evaluation.get_or_calculate(path) if needs_calc else None
+        
+        calc_data = None
+        row_label = f"combined {len(paths)}" if is_combined else path
+
+        if needs_calc:
+            if is_combined:
+                calc_data = run_evaluation.get_or_calculate(path)
+                if calc_data and "aggregation" in calc_data:
+                    n_combined = calc_data["aggregation"].get("n_runs_in_group", len(paths))
+                    row_label = f"combined {n_combined}"
+            else:
+                combined_w_temp, _ = run_evaluation._load_combined_w_temp([path])
+                if combined_w_temp:
+                    calc_data = run_evaluation.evaluate_run(combined_w_temp, Path(path))
+                else:
+                    calc_data = {"error": "No W_temp data found"}
 
         vals = []
         for name in outputs:
@@ -201,9 +218,10 @@ def process_row(path: str, outputs: List[str]) -> Tuple[str, List[Any]]:
             else:
                 obj = metro if block == "metro" else gauge
                 vals.append(getattr(obj, name))
-        return path, vals
+        return row_label, vals
     except Exception:
-        return path, [None] * len(outputs)
+        row_label = f"combined {len(paths)}" if is_combined else paths[0]
+        return row_label, [None] * len(outputs)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search data runs and calculate missing values.")
@@ -231,15 +249,32 @@ def main() -> None:
         print("No matching runs found.")
         return
 
-    print(f"Found {len(matches)} matching runs. Processing with {args.workers} workers...", file=sys.stderr)
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for path in matches:
+        group_key = run_evaluation._group_key_for_run(path)
+        if group_key is None:
+            groups[path].append(path)
+        else:
+            groups[group_key].append(path)
+
+    tasks = []
+    for gkey, paths in groups.items():
+        for path in paths:
+            tasks.append(([path], False))
+        if len(paths) > 1:
+            tasks.append((paths, True))
+
+    n_combined_groups = sum(1 for p in groups.values() if len(p) > 1)
+    print(f"Processing {len(tasks)} tasks ({len(matches)} individual runs, {n_combined_groups} combined groups) with {args.workers} workers...", file=sys.stderr)
 
     rows = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_row, path, outputs): path for path in matches}
+        futures = {executor.submit(process_row, paths, outputs, is_combined): paths for paths, is_combined in tasks}
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
-            path, vals = future.result()
-            rows.append((path, vals))
-            print(f"Processed {i+1}/{len(matches)}", file=sys.stderr, end="\r")
+            row_label, vals = future.result()
+            rows.append((row_label, vals))
+            print(f"Processed {i+1}/{len(tasks)}", file=sys.stderr, end="\r")
 
     print(" " * 60, file=sys.stderr, end="\r")
     
@@ -259,9 +294,9 @@ def main() -> None:
     rows.sort(key=sort_key)
 
     print("\t".join(["path"] + outputs))
-    for path, vals in rows:
+    for row_label, vals in rows:
         out_strs = [str(v) if v is not None else "N/A" for v in vals]
-        print("\t".join([path] + out_strs))
+        print("\t".join([row_label] + out_strs))
 
 if __name__ == "__main__":
     main()
