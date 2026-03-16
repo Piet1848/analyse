@@ -37,19 +37,28 @@ class VariableData:
 
 
 class ObservableData:
-    def __init__(self, name: str, values: List[float] = None):
+    def __init__(self, name: str, values=None):
         self.name = name
-        self.values = values or []
+        self.values = values if values is not None else []
 
     def append(self, value: float):
-        self.values.append(value)
+        if isinstance(self.values, np.ndarray):
+            self.values = np.append(self.values, value)
+        else:
+            self.values.append(value)
 
-    def extend(self, values: List[float]):
-        self.values.extend(values)
+    def extend(self, values):
+        if isinstance(self.values, np.ndarray):
+            self.values = np.concatenate((self.values, values))
+        else:
+            self.values.extend(values)
         
     def slice(self, indices: List[int]):
         """Keep only values at specific indices."""
-        self.values = [self.values[i] for i in indices]
+        if isinstance(self.values, np.ndarray):
+            self.values = self.values[indices]
+        else:
+            self.values = [self.values[i] for i in indices]
 
     def __repr__(self):
         sample = self.values[:5]
@@ -63,7 +72,7 @@ class ObservableData:
             return [ObservableData(self.name, []) for _ in range(n_bootstrap)]
             
         indices = rng.integers(0, len(arr), size=(n_bootstrap, len(arr)))
-        return [ObservableData(self.name, arr[idx].tolist()) for idx in indices]
+        return [ObservableData(self.name, arr[idx]) for idx in indices]
 
 
 class FileData:
@@ -83,7 +92,7 @@ class FileData:
 
         self.observables = []
         for name in data.dtype.names:
-            self.observables.append(ObservableData(name, data[name].tolist()))
+            self.observables.append(ObservableData(name, data[name]))
 
         return self
 

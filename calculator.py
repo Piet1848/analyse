@@ -71,12 +71,10 @@ class Calculator:
                 obs_L = np.array(self.file_data.get("L").values)
                 obs_T = np.array(self.file_data.get("T").values)
                 
-                import collections
-                grouped = collections.defaultdict(list)
-                for i in range(len(obs_val)):
-                    grouped[(obs_L[i], obs_T[i])].append(obs_val[i])
-                for k, v in grouped.items():
-                    self._w_rt_cache[k] = np.array(v)
+                unique_pairs = np.unique(np.column_stack((obs_L, obs_T)), axis=0)
+                for r, t in unique_pairs:
+                    mask = (obs_L == r) & (obs_T == t)
+                    self._w_rt_cache[(r, t)] = obs_val[mask]
             except (ValueError, KeyError):
                 pass
 
@@ -150,8 +148,11 @@ class Calculator:
 
         # 3. Bootstrap Calculation
         indices = self._get_bootstrap_indices(n_samples) # Shape: (n_boot, n_samples)
-        bootstrapped_rows = selected_values[indices] 
-        bootstrap_means = np.mean(bootstrapped_rows, axis=1)
+        bootstrap_means = np.zeros(self.n_bootstrap)
+
+        for i in range(self.n_bootstrap):
+            # Calculates one sample at a time, no giant memory allocation
+            bootstrap_means[i] = np.mean(selected_values[indices[i]])
 
         var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T)
         return var_data
