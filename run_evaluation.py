@@ -16,7 +16,7 @@ from calculator import Calculator
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.1"  # Bumped version: grouped run-combination before calculation
+CALC_VERSION = "4.2"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 _GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
@@ -119,96 +119,88 @@ def _discover_equivalent_runs(path: str) -> Tuple[str, List[str]]:
 
 
 def _load_combined_w_temp(run_paths: List[str]) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
-    w_temp_files: List[do.FileData] = []
+    w_temp_files: List[do.CompactWilsonData] = []
     runs_with_w_temp = 0
 
     for run_path in run_paths:
-        exp_data = do.ExperimentData(run_path)
-        files = exp_data.data.get("W_temp", [])
-        if files:
-            runs_with_w_temp += 1
-            w_temp_files.extend(files)
+        w_temp_path = Path(run_path) / "W_temp.out"
+        if not w_temp_path.exists():
+            continue
 
-    combined = do.combine_file_data(
+        compact = do.load_compact_wilson_file(str(w_temp_path), min_step=THERMALIZATION_STEPS)
+        if compact is None:
+            continue
+
+        runs_with_w_temp += 1
+        w_temp_files.append(compact)
+
+    combined = do.combine_compact_wilson_data(
         w_temp_files,
-        min_step=THERMALIZATION_STEPS,
         source_name="W_temp_combined",
     )
 
+    n_configurations_after_cut = 0
     combined_samples = 0
-    if combined is not None and combined.observables:
-        combined_samples = len(combined.observables[0].values)
+    if combined is not None:
+        n_configurations_after_cut = getattr(combined, "n_configurations", 0)
+        combined_samples = n_configurations_after_cut * len(getattr(combined, "pair_order", []))
 
     metadata = {
         "n_runs_in_group": len(run_paths),
         "n_runs_with_w_temp": runs_with_w_temp,
         "n_w_temp_files": len(w_temp_files),
         "n_samples_after_cut": combined_samples,
+        "n_configurations_after_cut": n_configurations_after_cut,
         "thermalization_steps": THERMALIZATION_STEPS,
     }
     return combined, metadata
 
 
 def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float = 1.65) -> Dict[str, Any]:
-    """
-    Main analysis logic using Calculator.
-    Expects preprocessed (thermalization-cut + combined) W_temp data.
-    """
-    if not file_data.observables:
+    if not file_data.observables and not getattr(file_data, "wilson_by_pair", None):
         return {"error": "No combined W_temp observables available"}
 
-    # 1. Calculate Autocorrelation (Tau) first
-    calc_pre = Calculator(file_data)
-    try:
-        tau_var = calc_pre.get_variable("tau_int", obs_name="plaquette")
-        tau = tau_var.get()
-    except KeyError:
-        tau = 0.5
+    tau = 0.5
+    if any(o.name in {"plaquette", "retrace"} for o in file_data.observables):
+        calc_pre = Calculator(file_data)
+        try:
+            tau_var = calc_pre.get_variable("tau_int", obs_name="plaquette")
+            tau = tau_var.get()
+        except KeyError:
+            tau = 0.5
 
     block_size = max(1, int(np.ceil(2 * tau)))
-
-    # 2. Main Calculation (with Blocking)
     calc = Calculator(file_data, step_size=block_size)
 
-    # --- A. Explicitly Calculate V(R) for all available R ---
+    unique_Rs = calc.get_unique_Rs()
+    available_pairs = calc.get_available_pairs()
+    unique_Ts = calc.get_unique_Ts()
+
     potentials = {}
     potential_errors = {}
-    try:
-        all_L = np.asarray(file_data.get("L").values)
-        unique_Rs = sorted(np.unique(all_L))
-        for r in unique_Rs:
-            try:
-                v_var = calc.get_variable("V_R", R=int(r))
-                val = v_var.get()
-                if val is not None and not np.isnan(val):
-                    potentials[str(int(r))] = float(val)
-                    potential_errors[str(int(r))] = float(v_var.err())
-            except Exception:
-                continue
-    except Exception:
-        pass
+    for r in unique_Rs:
+        try:
+            v_var = calc.get_variable("V_R", R=int(r))
+            val = v_var.get()
+            if val is not None and not np.isnan(val):
+                potentials[str(int(r))] = float(val)
+                potential_errors[str(int(r))] = float(v_var.err())
+        except Exception:
+            continue
 
-    # --- B. Collect W(R, T) for all available pairs ---
     all_w = {}
-    try:
-        all_T = np.array(file_data.get("T").values)
-        pairs = sorted(list(set(zip(all_L, all_T))))
-        for r_p, t_p in pairs:
-            try:
-                w_var = calc.get_variable("W_R_T", R=int(r_p), T=int(t_p))
-                w_val = w_var.get()
-                if w_val is not None:
-                    all_w[f"{int(r_p)},{int(t_p)}"] = float(w_val)
-            except Exception:
-                continue
-    except Exception:
-        pass
+    for r_p, t_p in available_pairs:
+        try:
+            w_var = calc.get_variable("W_R_T", R=int(r_p), T=int(t_p))
+            w_val = w_var.get()
+            if w_val is not None:
+                all_w[f"{int(r_p)},{int(t_p)}"] = float(w_val)
+        except Exception:
+            continue
 
-    # --- C. Attempt r0 Calculation ---
     r0 = None
     r0_err = None
     cornell_params = None
-
     try:
         r0_var = calc.get_variable("r0", target_force=sommer_target)
         r0 = r0_var.get()
@@ -226,7 +218,6 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
         lattice_spacing = 0.5 / r0
         a_err = (0.5 / (r0**2)) * r0_err if r0_err else 0.0
 
-    # --- D. Attempt Creutz Ratio (chi) analysis ---
     all_chi = {}
     all_f_chi = {}
     r0_chi = None
@@ -235,16 +226,13 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
 
     try:
         chi_pairs = []
-        if "all_L" in locals() and "all_T" in locals():
-            r_values = sorted(np.unique(all_L))
-            t_values = sorted(np.unique(all_T))
-            for r in r_values:
-                if r + 1 not in r_values:
+        for r in unique_Rs:
+            if r + 1 not in unique_Rs:
+                continue
+            for t in unique_Ts:
+                if t + 1 not in unique_Ts:
                     continue
-                for t in t_values:
-                    if t + 1 not in t_values:
-                        continue
-                    chi_pairs.append((r + 0.5, t + 0.5))
+                chi_pairs.append((r + 0.5, t + 0.5))
 
         for r_p, t_p in chi_pairs:
             try:
@@ -255,7 +243,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
             except Exception:
                 continue
 
-        r_for_force = sorted(list(set(p[0] for p in chi_pairs if p[1] == chi_t_large + 0.5)))
+        r_for_force = sorted({p[0] for p in chi_pairs if p[1] == chi_t_large + 0.5})
         for r_p in r_for_force:
             try:
                 f_var = calc.get_variable("F_chi", R=r_p, t_large=chi_t_large)
@@ -276,11 +264,9 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
             r0_chi = None
         else:
             r0_chi_err = r0_chi_var.err()
-
     except Exception:
         pass
 
-    # --- E. Volume Calculation ---
     volume_r0 = None
     volume_r0_err = None
     try:
@@ -296,34 +282,30 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     except Exception:
         pass
 
-    # --- F. Creutz P-Ratio and a_creutz ---
     all_creutz_P = {}
     all_creutz_P_err = {}
     all_a_creutz = {}
     all_a_creutz_err = {}
 
     try:
-        if "all_L" in locals():
-            unique_Rs = sorted(np.unique(all_L))
-            even_Rs = [r for r in unique_Rs if r % 2 == 0 and r > 0]
+        even_Rs = [r for r in unique_Rs if r % 2 == 0 and r > 0]
+        for r in even_Rs:
+            try:
+                p_var = calc.get_variable("creutz_P", R=int(r))
+                p_val = p_var.get()
+                if p_val is not None and not np.isnan(p_val):
+                    all_creutz_P[str(int(r))] = float(p_val)
+                    if p_var.err() is not None:
+                        all_creutz_P_err[str(int(r))] = float(p_var.err())
 
-            for r in even_Rs:
-                try:
-                    p_var = calc.get_variable("creutz_P", R=int(r))
-                    p_val = p_var.get()
-                    if p_val is not None and not np.isnan(p_val):
-                        all_creutz_P[str(int(r))] = float(p_val)
-                        if p_var.err() is not None:
-                            all_creutz_P_err[str(int(r))] = float(p_var.err())
-
-                    a_var = calc.get_variable("a_creutz", R=int(r))
-                    a_val = a_var.get()
-                    if a_val is not None and not np.isnan(a_val):
-                        all_a_creutz[str(int(r))] = float(a_val)
-                        if a_var.err() is not None:
-                            all_a_creutz_err[str(int(r))] = float(a_var.err())
-                except Exception:
-                    continue
+                a_var = calc.get_variable("a_creutz", R=int(r))
+                a_val = a_var.get()
+                if a_val is not None and not np.isnan(a_val):
+                    all_a_creutz[str(int(r))] = float(a_val)
+                    if a_var.err() is not None:
+                        all_a_creutz_err[str(int(r))] = float(a_var.err())
+            except Exception:
+                continue
     except Exception:
         pass
 

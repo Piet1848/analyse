@@ -55,28 +55,23 @@ class Calculator:
 
         self.file_data = file_data
         self.variables: dict[Key, data_organizer.VariableData] = {}
-        
+
         # Bootstrap configuration
         self.n_bootstrap = n_bootstrap
         self.seed = seed
         self.step_size = step_size
-        
-        # Pre-index W_temp data for O(1) lookup
-        self._w_rt_cache = collections.defaultdict(list)
-        if any(o.name == "W_temp" for o in self.file_data.observables):
-            try:
-                obs_val = np.asarray(self.file_data.get("W_temp").values)
-                obs_L = np.asarray(self.file_data.get("L").values)
-                obs_T = np.asarray(self.file_data.get("T").values)
-                
-                # It's faster to iterate over a zipped array once than to mask it 224 times
-                for l, t, val in zip(obs_L, obs_T, obs_val):
-                    self._w_rt_cache[(l, t)].append(val)
-                # Convert lists to numpy arrays
-                self._w_rt_cache = {k: np.array(v, dtype=np.float32) for k, v in self._w_rt_cache.items()}
-            except (ValueError, KeyError):
-                self._w_rt_cache = dict(self._w_rt_cache)
-                pass
+
+        # Wilson-loop lookup is built lazily. For compact combined data we can reuse
+        # the pre-grouped arrays directly and avoid rebuilding the cache.
+        self._w_rt_cache: dict[tuple[int, int], np.ndarray] | None = None
+        self._pair_order: list[tuple[int, int]] | None = None
+
+        compact_wilson = getattr(self.file_data, "wilson_by_pair", None)
+        if compact_wilson is not None:
+            self._w_rt_cache = dict(compact_wilson)
+            pair_order = getattr(self.file_data, "pair_order", None)
+            if pair_order is not None:
+                self._pair_order = [(int(r), int(t)) for r, t in pair_order]
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
         key = make_key(name, params)
@@ -99,7 +94,87 @@ class Calculator:
             if obs.name == obs_name:
                 return obs
         raise KeyError(f"Observable '{obs_name}' not found in file data.")
-    
+
+    def _infer_pair_order(self) -> list[tuple[int, int]]:
+        if self._pair_order is not None:
+            return self._pair_order
+
+        try:
+            obs_L = np.asarray(self.file_data.get("L").values)
+            obs_T = np.asarray(self.file_data.get("T").values)
+        except ValueError as e:
+            raise KeyError(f"Missing required columns (L or T) in file: {e}") from e
+
+        rows_per_cfg = 0
+        step_obs = next((o for o in self.file_data.observables if o.name in ["# step", "step"]), None)
+        if step_obs is not None:
+            steps = np.asarray(step_obs.values)
+            if len(steps) > 0:
+                change_idx = np.flatnonzero(steps != steps[0])
+                rows_per_cfg = int(change_idx[0]) if change_idx.size > 0 else int(len(steps))
+
+        if rows_per_cfg <= 0:
+            seen: set[tuple[int, int]] = set()
+            for i, (l_val, t_val) in enumerate(zip(obs_L, obs_T)):
+                pair = (int(l_val), int(t_val))
+                if pair in seen:
+                    rows_per_cfg = i
+                    break
+                seen.add(pair)
+            if rows_per_cfg <= 0:
+                rows_per_cfg = int(len(obs_L))
+
+        self._pair_order = [(int(l_val), int(t_val)) for l_val, t_val in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
+        return self._pair_order
+
+    def _ensure_w_rt_cache(self):
+        if self._w_rt_cache is not None:
+            return
+
+        try:
+            obs_val = np.asarray(self.file_data.get("W_temp").values, dtype=np.float32)
+        except ValueError as e:
+            raise KeyError(f"Missing required column W_temp in file: {e}") from e
+
+        pair_order = self._infer_pair_order()
+        rows_per_cfg = len(pair_order)
+        if rows_per_cfg > 0 and len(obs_val) % rows_per_cfg == 0:
+            w_matrix = obs_val.reshape(-1, rows_per_cfg)
+            self._w_rt_cache = {pair: w_matrix[:, idx] for idx, pair in enumerate(pair_order)}
+            return
+
+        try:
+            obs_L = np.asarray(self.file_data.get("L").values)
+            obs_T = np.asarray(self.file_data.get("T").values)
+        except ValueError as e:
+            raise KeyError(f"Missing required columns (L or T) in file: {e}") from e
+
+        cache = collections.defaultdict(list)
+        for l_val, t_val, val in zip(obs_L, obs_T, obs_val):
+            cache[(int(l_val), int(t_val))].append(val)
+        self._w_rt_cache = {k: np.asarray(v, dtype=np.float32) for k, v in cache.items()}
+        self._pair_order = sorted(self._w_rt_cache)
+
+    def get_available_pairs(self) -> list[tuple[int, int]]:
+        if self._pair_order is not None:
+            return list(self._pair_order)
+        if self._w_rt_cache is not None:
+            self._pair_order = sorted(self._w_rt_cache)
+            return list(self._pair_order)
+        return list(self._infer_pair_order())
+
+    def get_unique_Rs(self, r_min: int | None = None) -> list[int]:
+        rs = sorted({r for r, _ in self.get_available_pairs()})
+        if r_min is not None:
+            rs = [r for r in rs if r >= r_min]
+        return rs
+
+    def get_unique_Ts(self, R: int | None = None) -> list[int]:
+        pairs = self.get_available_pairs()
+        if R is None:
+            return sorted({t for _, t in pairs})
+        return sorted({t for r, t in pairs if r == R})
+
     def _get_bootstrap_indices_seq(self, n_samples: int):
         """
         Generates indices for one bootstrap sample at a time.
@@ -117,24 +192,12 @@ class Calculator:
 
     @register("W_R_T")
     def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData:
-        key = (R, T)
-        if hasattr(self, '_w_rt_cache') and key in self._w_rt_cache:
-            selected_values = self._w_rt_cache[key]
-        else:
-            try:
-                obs_val = self.file_data.get("W_temp").values 
-                obs_L   = self.file_data.get("L").values
-                obs_T   = self.file_data.get("T").values
-            except ValueError as e:
-                raise KeyError(f"Missing required columns (L, T, or W_temp) in file: {e}")
+        key = (int(R), int(T))
+        self._ensure_w_rt_cache()
+        selected_values = self._w_rt_cache.get(key) if self._w_rt_cache is not None else None
 
-            arr_val = np.asarray(obs_val)
-            arr_L   = np.asarray(obs_L)
-            arr_T   = np.asarray(obs_T)
-
-            # 3. Create a Mask (Where L==R AND T==T)
-            mask = (arr_L == R) & (arr_T == T)
-            selected_values = arr_val[mask]
+        if selected_values is None:
+            raise ValueError(f"No data found for R={R}, T={T}")
 
         n_samples = len(selected_values)
 
@@ -161,9 +224,7 @@ class Calculator:
         Calculates V(R) and its error by fitting W(R,T).
         Includes robust handling for negative signal and array shape mismatches.
         """
-        all_L = np.asarray(self.file_data.get("L").values)
-        all_T = np.asarray(self.file_data.get("T").values)
-        unique_ts = np.unique(all_T[all_L == R])
+        unique_ts = self.get_unique_Ts(R=R)
 
         # Filter T >= t_min and T <= t_max (if provided)
         if t_max is not None:
@@ -347,11 +408,9 @@ class Calculator:
         Replaces analyze_wilson.fit_sommer_parameter.
         """
         # 1. Identify available R values
-        # We assume R corresponds to 'L' in W_temp data
         try:
-            all_L = np.asarray(self.file_data.get("L").values)
-            unique_Rs = sorted([r for r in np.unique(all_L) if r >= r_min])
-        except ValueError:
+            unique_Rs = self.get_unique_Rs(r_min=r_min)
+        except KeyError:
              raise KeyError("Could not determine available R (L) values from file data.")
 
         # 2. Gather V(R) for all R
@@ -438,17 +497,10 @@ class Calculator:
         r0_bootstraps = []
         if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
             boot_data = np.array(bootstrap_matrix).T
-            from concurrent.futures import ThreadPoolExecutor
-            
-            def fit_boot(sample_vs):
+            for sample_vs in boot_data:
                 val, _ = perform_fit(rs, sample_vs, sigma)
-                return val
-                
-            with ThreadPoolExecutor() as executor:
-                results = executor.map(fit_boot, boot_data)
-                for val in results:
-                    if not np.isnan(val):
-                        r0_bootstraps.append(val)
+                if not np.isnan(val):
+                    r0_bootstraps.append(val)
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, t_max=t_max, r_min=r_min, cornell_params=corn_params)
@@ -556,11 +608,9 @@ class Calculator:
         """
         # 1. Identify available R values from data.
         try:
-            all_L = np.asarray(self.file_data.get("L").values)
-            unique_Ls = sorted(np.unique(all_L))
-            # Rs for chi are like 1.5, 2.5, ... from L=1,2,3...
-            unique_Rs = [float(L) + 0.5 for L in unique_Ls if L+1 in unique_Ls and L >= r_min]
-        except ValueError:
+            unique_Ls = self.get_unique_Rs(r_min=r_min)
+            unique_Rs = [float(L) + 0.5 for L in unique_Ls if L + 1 in unique_Ls]
+        except KeyError:
              raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
 
         # 2. Gather F_chi(R) for all available R at a fixed large T.
