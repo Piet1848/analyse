@@ -60,16 +60,13 @@ class Calculator:
         self.seed = seed
         self.step_size = step_size
         
-        # Cache for indices
-        self._bootstrap_indices: np.ndarray | None = None
-        
         # Pre-index W_temp data for O(1) lookup
         self._w_rt_cache = {}
         if any(o.name == "W_temp" for o in self.file_data.observables):
             try:
-                obs_val = np.array(self.file_data.get("W_temp").values)
-                obs_L = np.array(self.file_data.get("L").values)
-                obs_T = np.array(self.file_data.get("T").values)
+                obs_val = np.asarray(self.file_data.get("W_temp").values)
+                obs_L = np.asarray(self.file_data.get("L").values)
+                obs_T = np.asarray(self.file_data.get("T").values)
                 
                 unique_pairs = np.unique(np.column_stack((obs_L, obs_T)), axis=0)
                 for r, t in unique_pairs:
@@ -100,19 +97,18 @@ class Calculator:
                 return obs
         raise KeyError(f"Observable '{obs_name}' not found in file data.")
     
-    def _get_bootstrap_indices(self, n_samples: int) -> np.ndarray:
+    def _get_bootstrap_indices_seq(self, n_samples: int):
         """
-        Returns (n_bootstrap, n_effective) indices.
+        Generates indices for one bootstrap sample at a time.
         Reduces the sample pool by step_size to mitigate autocorrelation.
+        Yields an array of indices.
         """
         n_effective = n_samples // self.step_size
+        rng = np.random.default_rng(self.seed)
         
-        if self._bootstrap_indices is None or self._bootstrap_indices.shape[1] != n_effective:
-            rng = np.random.default_rng(self.seed)
-            reduced_indices = rng.integers(0, n_effective, size=(self.n_bootstrap, n_effective))
-            self._bootstrap_indices = reduced_indices * self.step_size
-        
-        return self._bootstrap_indices
+        for _ in range(self.n_bootstrap):
+            reduced_indices = rng.integers(0, n_effective, size=n_effective)
+            yield reduced_indices * self.step_size
     
     ### Variable implementations ###
 
@@ -129,9 +125,9 @@ class Calculator:
             except ValueError as e:
                 raise KeyError(f"Missing required columns (L, T, or W_temp) in file: {e}")
 
-            arr_val = np.array(obs_val)
-            arr_L   = np.array(obs_L)
-            arr_T   = np.array(obs_T)
+            arr_val = np.asarray(obs_val)
+            arr_L   = np.asarray(obs_L)
+            arr_T   = np.asarray(obs_T)
 
             # 3. Create a Mask (Where L==R AND T==T)
             mask = (arr_L == R) & (arr_T == T)
@@ -147,28 +143,30 @@ class Calculator:
         mean_val = np.mean(selected_values)
 
         # 3. Bootstrap Calculation
-        indices = self._get_bootstrap_indices(n_samples) # Shape: (n_boot, n_samples)
         bootstrap_means = np.zeros(self.n_bootstrap)
 
-        for i in range(self.n_bootstrap):
+        for i, indices in enumerate(self._get_bootstrap_indices_seq(n_samples)):
             # Calculates one sample at a time, no giant memory allocation
-            bootstrap_means[i] = np.mean(selected_values[indices[i]])
+            bootstrap_means[i] = np.mean(selected_values[indices])
 
         var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T)
         return var_data
     
     @register("V_R")
-    def _calc_V_R(self, R: int, t_min: int = 1) -> data_organizer.VariableData:
+    def _calc_V_R(self, R: int, t_min: int = 1, t_max: int = None) -> data_organizer.VariableData:
         """
         Calculates V(R) and its error by fitting W(R,T).
         Includes robust handling for negative signal and array shape mismatches.
         """
-        all_L = np.array(self.file_data.get("L").values)
-        all_T = np.array(self.file_data.get("T").values)
+        all_L = np.asarray(self.file_data.get("L").values)
+        all_T = np.asarray(self.file_data.get("T").values)
         unique_ts = np.unique(all_T[all_L == R])
 
-        # Filter T >= t_min
-        ts_to_fit = sorted([t for t in unique_ts if t >= t_min])
+        # Filter T >= t_min and T <= t_max (if provided)
+        if t_max is not None:
+            ts_to_fit = sorted([t for t in unique_ts if t_min <= t <= t_max])
+        else:
+            ts_to_fit = sorted([t for t in unique_ts if t >= t_min])
         
         # W_R_T Variables
         w_vars = [self.get_variable("W_R_T", R=R, T=t) for t in ts_to_fit]
@@ -280,7 +278,7 @@ class Calculator:
                     bootstrap_Vs.append(np.nan)
 
         var_data = data_organizer.VariableData("V_R")
-        var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, fit_C=C_main)
+        var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, t_max=t_max, fit_C=C_main)
         return var_data
     
     @register("tau_int")
@@ -300,7 +298,7 @@ class Calculator:
             if not found:
                  raise KeyError(f"Observable '{obs_name}' not found for tau_int calculation.")
 
-        series = np.array(obs.values)
+        series = np.asarray(obs.values)
         n = len(series)
         
         # Default fallback if series is too short
@@ -334,7 +332,7 @@ class Calculator:
         return var_data
 
     @register("r0")
-    def _calc_r0(self, t_min: int = 5, target_force: float = 1.65, r_min: int = 2) -> data_organizer.VariableData:
+    def _calc_r0(self, t_min: int = 5, t_max: int = None, target_force: float = 1.65, r_min: int = 2) -> data_organizer.VariableData:
         """
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
@@ -342,7 +340,7 @@ class Calculator:
         # 1. Identify available R values
         # We assume R corresponds to 'L' in W_temp data
         try:
-            all_L = np.array(self.file_data.get("L").values)
+            all_L = np.asarray(self.file_data.get("L").values)
             unique_Rs = sorted([r for r in np.unique(all_L) if r >= r_min])
         except ValueError:
              raise KeyError("Could not determine available R (L) values from file data.")
@@ -358,7 +356,7 @@ class Calculator:
         for r in unique_Rs:
             try:
                 # Reuse the existing V_R calculator
-                v_var = self.get_variable("V_R", R=int(r), t_min=t_min)
+                v_var = self.get_variable("V_R", R=int(r), t_min=t_min, t_max=t_max)
                 
                 val = v_var.get()
                 if np.isnan(val) or np.isinf(val): continue
@@ -444,7 +442,7 @@ class Calculator:
                         r0_bootstraps.append(val)
 
         var_data = data_organizer.VariableData("r0")
-        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, r_min=r_min, cornell_params=corn_params)
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, t_max=t_max, r_min=r_min, cornell_params=corn_params)
         return var_data
 
     # --- Implementation of Creutz Ratio Analysis ---
@@ -549,7 +547,7 @@ class Calculator:
         """
         # 1. Identify available R values from data.
         try:
-            all_L = np.array(self.file_data.get("L").values)
+            all_L = np.asarray(self.file_data.get("L").values)
             unique_Ls = sorted(np.unique(all_L))
             # Rs for chi are like 1.5, 2.5, ... from L=1,2,3...
             unique_Rs = [float(L) + 0.5 for L in unique_Ls if L+1 in unique_Ls and L >= r_min]
