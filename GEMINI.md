@@ -14,7 +14,7 @@ Explanation of Creutz method in pub045.pdf
 *   **Core Libraries:**
     *   `numpy`: Heavy numerical lifting (fitting, array manipulation).
     *   `scipy`: Curve fitting (`curve_fit`) and interpolation.
-    *   `matplotlib`: Plotting (in `plot_*.py` scripts).
+    *   `matplotlib`: Plotting (in interactive notebooks).
     *   `PyYAML`: Parsing simulation parameters (`input.yaml`).
     *   `concurrent.futures`: Parallel processing in `search_data.py`.
 
@@ -39,15 +39,9 @@ Explanation of Creutz method in pub045.pdf
 *   **`search_data.py`**: The primary tool for aggregating results.
     *   **Usage**: `python search_data.py [--workers N] <root_dir> [tokens ...]`
     *   Scans directories, matches parameters (e.g., `beta=2.1`), runs analysis in parallel, and prints a table.
-*   **`main.py`**: Example analysis script.
-    *   A clean script to load a single run's data, run calculations, and plot results.
-*   **`analyze_wilson.py`**: Another utility for extracting observables ($V(R)$, $F(r)$, and $r_0/a$) using standard curve fitting.
-*   **Interactive Notebooks** (`detailed_analysis.ipynb`, `visualize.ipynb`, etc.):
+*   **Interactive Notebooks** (`detailed_analysis.ipynb`, `calculator_visualization.ipynb`, `combined_calculator_visualization.ipynb`):
     *   Use `detailed_analysis.ipynb` to step through the analysis of a *single* problematic run.
-    *   Great for visualizing why a specific fit (like `r0_chi`) might be failing, using `calculator_visualization.ipynb`.
-
-### Plotting Scripts
-*   `plot_potential.py`, `plot_history.py`, `plot_search.py`: Generate visualizations from the analyzed data.
+    *   Great for visualizing why a specific fit (like `r0_chi`) might be failing, using `calculator_visualization.ipynb` or `combined_calculator_visualization.ipynb`.
 
 ## How to Run
 
@@ -62,15 +56,9 @@ python search_data.py ../data "beta=2.1" "L0=43" r0 r0_err r0_chi
 *   **Tokens** can be either filters (`KEY=VALUE`, e.g., `beta=2.1`) or output columns (e.g., `r0`, `chi`, `a`, `tau_int`).
 
 ### 2. Debugging a Specific Run
-1.  Open `detailed_analysis.ipynb` or edit `main.py` in VS Code.
+1.  Open `detailed_analysis.ipynb` in VS Code.
 2.  Set the `run_path` (or `FILE_PATH`) variable to the directory of the run you want to investigate.
-3.  Run the cells or script to see step-by-step extraction of Wilson loops, potentials, and forces.
-
-### 3. Plotting
-(Example inferred)
-```bash
-python plot_potential.py --run-path ../data/20251221/25
-```
+3.  Run the cells to see step-by-step extraction of Wilson loops, potentials, and forces.
 
 ## Important Logic Details
    

@@ -1,7 +1,7 @@
+IPython
+PyYAML
+ipywidgets
+jupyter
+matplotlib
 numpy
 scipy
-PyYAML
-matplotlib
-IPython
-jupyter
-ipywidgets
