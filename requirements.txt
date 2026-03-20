@@ -4,3 +4,4 @@ PyYAML
 matplotlib
 IPython
 jupyter
+ipywidgets
