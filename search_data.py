@@ -175,17 +175,10 @@ def process_row(paths: List[str], outputs: List[str], is_combined: bool) -> Tupl
         row_label = f"combined {len(paths)}" if is_combined else path
 
         if needs_calc:
-            if is_combined:
-                calc_data = run_evaluation.get_or_calculate(path)
-                if calc_data and "aggregation" in calc_data:
-                    n_combined = calc_data["aggregation"].get("n_runs_in_group", len(paths))
-                    row_label = f"combined {n_combined}"
-            else:
-                combined_w_temp, _ = run_evaluation._load_combined_w_temp([path])
-                if combined_w_temp:
-                    calc_data = run_evaluation.evaluate_run(combined_w_temp, Path(path))
-                else:
-                    calc_data = {"error": "No W_temp data found"}
+            calc_data = run_evaluation.get_or_calculate(path)
+            if is_combined and calc_data and "aggregation" in calc_data:
+                n_combined = calc_data["aggregation"].get("n_runs_in_group", len(paths))
+                row_label = f"combined {n_combined}"
 
         vals = []
         for name in outputs:
