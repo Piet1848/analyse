@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import collections
 from typing import Any, FrozenSet, Callable
 import data_organizer
 import numpy as np
@@ -61,18 +62,20 @@ class Calculator:
         self.step_size = step_size
         
         # Pre-index W_temp data for O(1) lookup
-        self._w_rt_cache = {}
+        self._w_rt_cache = collections.defaultdict(list)
         if any(o.name == "W_temp" for o in self.file_data.observables):
             try:
                 obs_val = np.asarray(self.file_data.get("W_temp").values)
                 obs_L = np.asarray(self.file_data.get("L").values)
                 obs_T = np.asarray(self.file_data.get("T").values)
                 
-                unique_pairs = np.unique(np.column_stack((obs_L, obs_T)), axis=0)
-                for r, t in unique_pairs:
-                    mask = (obs_L == r) & (obs_T == t)
-                    self._w_rt_cache[(r, t)] = obs_val[mask]
+                # It's faster to iterate over a zipped array once than to mask it 224 times
+                for l, t, val in zip(obs_L, obs_T, obs_val):
+                    self._w_rt_cache[(l, t)].append(val)
+                # Convert lists to numpy arrays
+                self._w_rt_cache = {k: np.array(v, dtype=np.float32) for k, v in self._w_rt_cache.items()}
             except (ValueError, KeyError):
+                self._w_rt_cache = dict(self._w_rt_cache)
                 pass
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
