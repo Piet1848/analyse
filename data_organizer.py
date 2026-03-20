@@ -39,40 +39,37 @@ class VariableData:
 class ObservableData:
     def __init__(self, name: str, values=None):
         self.name = name
-        self.values = values if values is not None else []
+        if values is not None:
+            self.values = np.asarray(values, dtype=np.float32)
+        else:
+            self.values = np.array([], dtype=np.float32)
 
     def append(self, value: float):
-        if isinstance(self.values, np.ndarray):
-            self.values = np.append(self.values, value)
-        else:
-            self.values.append(value)
+        self.values = np.append(self.values, np.float32(value))
 
     def extend(self, values):
-        if isinstance(self.values, np.ndarray):
-            self.values = np.concatenate((self.values, values))
-        else:
-            self.values.extend(values)
+        self.values = np.concatenate((self.values, np.asarray(values, dtype=np.float32)))
         
     def slice(self, indices: List[int]):
         """Keep only values at specific indices."""
-        if isinstance(self.values, np.ndarray):
-            self.values = self.values[indices]
-        else:
-            self.values = [self.values[i] for i in indices]
+        self.values = self.values[indices]
 
     def __repr__(self):
         sample = self.values[:5]
         return f"ObservableData(name={self.name}, values={sample}{'...' if len(self.values) > 5 else ''})"
     
-    def get_bootstrap_samples(self, n_bootstrap: int, seed: int) -> List[ObservableData]:
-        """Generate independent (IID) bootstrap samples."""
+    def get_bootstrap_samples(self, n_bootstrap: int, seed: int):
+        """Generate independent (IID) bootstrap samples sequentially."""
         rng = np.random.default_rng(seed)
         arr = np.array(self.values)
         if len(arr) == 0:
-            return [ObservableData(self.name, []) for _ in range(n_bootstrap)]
+            for _ in range(n_bootstrap):
+                yield ObservableData(self.name, [])
+            return
             
-        indices = rng.integers(0, len(arr), size=(n_bootstrap, len(arr)))
-        return [ObservableData(self.name, arr[idx]) for idx in indices]
+        for _ in range(n_bootstrap):
+            indices = rng.integers(0, len(arr), size=len(arr))
+            yield ObservableData(self.name, arr[indices])
 
 
 class FileData:
@@ -86,8 +83,14 @@ class FileData:
         if not self.path.exists():
             raise FileNotFoundError(f"{self.path} not found")
 
-        data = np.genfromtxt(self.path, delimiter=',', names=True, encoding='utf-8-sig', ndmin=1)
-        if data.dtype.names is None:
+        # Read as float32 to save RAM
+        try:
+            data = np.genfromtxt(self.path, delimiter=',', names=True, encoding='utf-8-sig', ndmin=1, dtype=np.float32)
+        except IndexError:
+            # np.genfromtxt raises IndexError if the file is completely empty
+            data = np.array([], dtype=np.float32)
+
+        if not hasattr(data, 'dtype') or data.dtype.names is None:
             return self
 
         self.observables = []
@@ -130,28 +133,28 @@ class FileData:
                 return obs
         raise ValueError(f"Observable '{name}' not found in {self.path}")
     
-    def get_bootstrap(self, n_bootstrap: int, seed: int) -> List[FileData]:
-        """Legacy IID bootstrap (row-based)."""
-        bootstrap_files: List[FileData] = []
+    def get_bootstrap(self, n_bootstrap: int, seed: int):
+        """Legacy IID bootstrap (row-based). Yields sequentially."""
         for i in range(n_bootstrap):
             bootstrap_file = FileData(self.path)
             bootstrap_file.observables = [
-                obs.get_bootstrap_samples(1, seed + i)[0] for obs in self.observables
+                next(iter(obs.get_bootstrap_samples(1, seed + i))) for obs in self.observables
             ]
-            bootstrap_files.append(bootstrap_file)
-        return bootstrap_files
+            yield bootstrap_file
 
-    def get_blocked_bootstrap(self, n_bootstrap: int, block_size: int, seed: int) -> List[FileData]:
+    def get_blocked_bootstrap(self, n_bootstrap: int, block_size: int, seed: int):
         """
         Generate bootstrap samples using BLOCKED resampling of STEPS.
         1. Identifies unique steps.
         2. Resamples steps in blocks of size `block_size` to preserve autocorrelation.
         3. Selects all data rows corresponding to the sampled steps.
+        Yields sequentially to save memory.
         """
         step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
         if step_obs is None or block_size <= 1:
             # Fallback to standard if no step info or block_size is 1
-            return self.get_bootstrap(n_bootstrap, seed)
+            yield from self.get_bootstrap(n_bootstrap, seed)
+            return
             
         steps = np.array(step_obs.values)
         unique_steps = np.unique(steps) # Sorted unique steps
@@ -164,7 +167,6 @@ class FileData:
             step_to_indices[s].append(idx)
             
         rng = np.random.default_rng(seed)
-        bootstrap_files = []
         
         for _ in range(n_bootstrap):
             # Block Bootstrap the unique steps
@@ -194,9 +196,7 @@ class FileData:
                 new_vals = arr[selected_row_indices].tolist()
                 new_fd.observables.append(ObservableData(obs.name, new_vals))
                 
-            bootstrap_files.append(new_fd)
-            
-        return bootstrap_files
+            yield new_fd
 
 
 class ExperimentData:
