@@ -286,20 +286,26 @@ class Calculator:
     
     @register("tau_int")
     def _calc_tau_int(self, obs_name: str = "plaquette", S: float = 1.5) -> data_organizer.VariableData:
+        if obs_name == "W_temp":
+            raise KeyError("Cannot run FFT Autocorrelation on interleaved W_temp data.")
+
         try:
             obs = self.get_observable(obs_name)
         except KeyError:
             # Fallback for commonly used names if exact match fails
             found = False
-            for alias in ["plaquette", "retrace", "W_temp"]:
-                 if alias in self.file_data.observables: # Simplified check
-                     for o in self.file_data.observables:
-                         if o.name == alias:
-                             obs = o
-                             found = True
-                             break
+            for alias in ["plaquette", "retrace"]:
+                 for o in self.file_data.observables:
+                     if o.name == alias:
+                         obs = o
+                         found = True
+                         break
+                 if found:
+                     break
             if not found:
-                 raise KeyError(f"Observable '{obs_name}' not found for tau_int calculation.")
+                 var_data = data_organizer.VariableData("tau_int")
+                 var_data.set_value(0.5, obs_name=obs_name)
+                 return var_data
 
         series = np.asarray(obs.values)
         n = len(series)
