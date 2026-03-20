@@ -12,8 +12,11 @@ import run_evaluation
 print("Setup complete. Modules imported.")
 
 
-run_path = "../data/20251221/45"  # Example path with N/A and nan values
-calculated_data = run_evaluation.get_or_calculate(run_path)
+run_path = "../data/20260205/14"  # Example path with N/A and nan values
+calculated_data = run_evaluation.get_or_calculate(run_path, force_recalc=True)
 
-print("--- Result of get_or_calculate ---")
-pprint.pprint(calculated_data)
+if 'error' in calculated_data:
+    print("Error:", calculated_data['error'])
+else:
+    print("--- Result of get_or_calculate ---")
+    pprint.pprint(calculated_data)
