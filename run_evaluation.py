@@ -16,8 +16,8 @@ from calculator import Calculator
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.0"  # Bumped version: grouped run-combination before calculation
-GROUP_IGNORE_METRO_FIELDS = {"seed"}
+CALC_VERSION = "4.1"  # Bumped version: grouped run-combination before calculation
+GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 _GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
 _GROUP_INDEX_ROOT: Path | None = None
@@ -174,7 +174,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     potentials = {}
     potential_errors = {}
     try:
-        all_L = np.array(file_data.get("L").values)
+        all_L = np.asarray(file_data.get("L").values)
         unique_Rs = sorted(np.unique(all_L))
         for r in unique_Rs:
             try:
