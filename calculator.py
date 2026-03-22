@@ -23,11 +23,15 @@ def exponential_ansatz(t, C, V):
 def cornell_potential_ansatz(r, A, sigma, B):
     return A + sigma * r - B / r
 
-def calculate_volume_from_r0(L: int, r0_on_a: float, r0_phys: float = 0.5) -> float:
+def calculate_volume_from_r0(
+    lattice_extent: int | float,
+    r0_on_a: float,
+    r0_phys: float = 0.5,
+) -> float:
     if r0_on_a is None or np.isnan(r0_on_a) or r0_on_a <= 0:
         return np.nan
     a = r0_phys / r0_on_a
-    return (L * a)**4
+    return lattice_extent * (a ** 4)
 
 def register(name: str):
     def decorator(method):
@@ -942,8 +946,18 @@ class Calculator:
         return var_data
     
     @register("volume_r0")
-    def _calc_volume(self, L: int, r0_phys: float = 0.5, **r0_kwargs) -> data_organizer.VariableData:
-        # Volume based on r0. Volume = (L*a)^4. a=r0 / (r0/a)
+    def _calc_volume(
+        self,
+        L: int | None = None,
+        L0: int | None = None,
+        L1: int | None = None,
+        L2: int | None = None,
+        L3: int | None = None,
+        r0_phys: float = 0.5,
+        **r0_kwargs,
+    ) -> data_organizer.VariableData:
+        # Physical 4D volume based on r0. For isotropic legacy calls this reduces to
+        # (L*a)^4; otherwise use (L0*L1*L2*L3)*a^4.
         
         try:
             r0_var = self.get_variable("r0", **r0_kwargs)
@@ -951,12 +965,18 @@ class Calculator:
              raise ValueError(f"Could not calculate r0 for volume: {e}")
 
         r0_on_a = r0_var.get()
-        
+
+        if all(val is not None for val in (L0, L1, L2, L3)):
+            lattice_extent = int(L0) * int(L1) * int(L2) * int(L3)
+        elif L is not None:
+            lattice_extent = int(L) ** 4
+        else:
+            raise ValueError("volume_r0 requires either L or all of L0, L1, L2, and L3")
+
         def calculate_volume(val_r0_on_a):
             if val_r0_on_a is None or np.isnan(val_r0_on_a) or val_r0_on_a <= 0:
                 return np.nan
-            a = r0_phys / val_r0_on_a
-            return (L * a)**4
+            return calculate_volume_from_r0(lattice_extent, val_r0_on_a, r0_phys)
 
         # Main Value
         vol_val = calculate_volume(r0_on_a)
@@ -967,16 +987,25 @@ class Calculator:
         
         if r0_boots is not None:
              for b in r0_boots:
-                 vol_boots.append(self._calculate_volume_value(L, b, r0_phys))
+                 vol_boots.append(self._calculate_volume_value(lattice_extent, b, r0_phys))
         else:
              vol_boots = [np.nan] * self.n_bootstrap
              
         var_data = data_organizer.VariableData("volume_r0")
-        var_data.set_value(vol_val, bootstrap_samples=vol_boots, L=L, r0_phys=r0_phys)
+        var_data.set_value(
+            vol_val,
+            bootstrap_samples=vol_boots,
+            L=L,
+            L0=L0,
+            L1=L1,
+            L2=L2,
+            L3=L3,
+            r0_phys=r0_phys,
+        )
         return var_data
 
-    def _calculate_volume_value(self, L, val_r0_on_a, r0_phys):
-        return calculate_volume_from_r0(L, val_r0_on_a, r0_phys)
+    def _calculate_volume_value(self, lattice_extent, val_r0_on_a, r0_phys):
+        return calculate_volume_from_r0(lattice_extent, val_r0_on_a, r0_phys)
     
     @register("effective_mass")
     def _calc_effective_mass(self, R: int, T: int = 1) -> data_organizer.VariableData:

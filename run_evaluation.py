@@ -603,12 +603,13 @@ def evaluate_run(
     try:
         yaml_path = input_dir / "input.yaml"
         metro, _ = load_params(str(yaml_path))
-        L_val = metro.L0
-
         if r0 is not None:
             vol_var = calc.get_variable(
                 "volume_r0",
-                L=L_val,
+                L0=metro.L0,
+                L1=metro.L1,
+                L2=metro.L2,
+                L3=metro.L3,
                 t_min=DEFAULT_R0_T_MIN,
                 t_max=DEFAULT_R0_T_MAX,
                 target_force=sommer_target,
