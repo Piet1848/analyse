@@ -312,34 +312,27 @@ class Calculator:
 
         all_boots = np.array([v.bootstrap() for v in w_vars])
         all_boots_valid = all_boots[:valid_len, :]  # shape: (valid_len, n_boot)
-        
-        # Identify valid bootstrap universes
-        invalid_mask = np.any(all_boots_valid <= 0, axis=0)
-        valid_boots = all_boots_valid[:, ~invalid_mask]
-        
-        # Calculate log of all valid bootstrap samples at once
-        ln_boots = np.log(valid_boots)  # shape: (valid_len, n_valid_boot)
-        
-        # Polyfit does not support 2D weights natively, so iterate over pre-calculated logs
-        valid_idx = 0
+
         for i in range(n_boot):
-            if invalid_mask[i]:
-                bootstrap_Vs.append(np.nan)
-            else:
-                # Get pre-calculated log values
-                ln_ws_sample = ln_boots[:, valid_idx]
-                ws_sample = valid_boots[:, valid_idx]
-                valid_idx += 1
-                
-                w_weights = None
-                if ws_err is not None and np.all(ws_err > 0):
-                    w_weights = ws_sample / ws_err
-                
-                try:
-                    p = np.polyfit(ts_fit, ln_ws_sample, 1, w=w_weights)
-                    bootstrap_Vs.append(-p[0])
-                except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
-                    bootstrap_Vs.append(np.nan)
+            ws_sample = np.array(all_boots_valid[:, i], dtype=float, copy=True)
+            invalid_points = ~np.isfinite(ws_sample) | (ws_sample <= 0)
+            if np.any(invalid_points):
+                ws_sample[invalid_points] = ws_main[invalid_points]
+
+            if np.any(ws_sample <= 0):
+                bootstrap_Vs.append(V_main)
+                continue
+
+            ln_ws_sample = np.log(ws_sample)
+            w_weights = None
+            if ws_err is not None and np.all(ws_err > 0):
+                w_weights = ws_sample / ws_err
+
+            try:
+                p = np.polyfit(ts_fit, ln_ws_sample, 1, w=w_weights)
+                bootstrap_Vs.append(-p[0])
+            except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
+                bootstrap_Vs.append(V_main)
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, t_max=t_max, fit_C=C_main)
@@ -407,6 +400,14 @@ class Calculator:
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
         """
+        def format_point_diagnostics(point_rows):
+            if not point_rows:
+                return "no V(R) candidates were collected"
+            return "; ".join(
+                f"R={row['R']}: V={row['V']}, err={row['err']}, boot_finite={row['boot_finite']}/{row['boot_total']} -> {row['status']}"
+                for row in point_rows
+            )
+
         # 1. Identify available R values
         try:
             unique_Rs = self.get_unique_Rs(r_min=r_min)
@@ -417,6 +418,7 @@ class Calculator:
         rs = []
         vs = []
         errs = []
+        point_diagnostics = []
         
         # We need a consistent set of bootstrap samples to propagate errors correctly
         # So we collect the bootstrap arrays from each V_R
@@ -427,21 +429,53 @@ class Calculator:
                 v_var = self.get_variable("V_R", R=int(r), t_min=t_min, t_max=t_max)
                 
                 val = v_var.get()
-                if np.isnan(val) or np.isinf(val): continue
+                boot_samples = v_var.bootstrap()
+                boot_arr = np.asarray(boot_samples, dtype=float) if boot_samples is not None else np.array([], dtype=float)
+                finite_boot_count = int(np.isfinite(boot_arr).sum())
+                err_val = v_var.err()
+                if np.isnan(val) or np.isinf(val):
+                    point_diagnostics.append({
+                        "R": int(r),
+                        "V": val,
+                        "err": err_val,
+                        "boot_finite": finite_boot_count,
+                        "boot_total": int(boot_arr.size),
+                        "status": "discarded (non-finite V)",
+                    })
+                    continue
 
                 rs.append(r)
                 vs.append(val)
-                errs.append(v_var.err() if v_var.err() is not None else 1.0)
+                errs.append(err_val if err_val is not None else 1.0)
+                point_diagnostics.append({
+                    "R": int(r),
+                    "V": val,
+                    "err": err_val,
+                    "boot_finite": finite_boot_count,
+                    "boot_total": int(boot_arr.size),
+                    "status": "candidate",
+                })
                 
                 # Collect bootstraps. Must ensure they align (same seed/length).
                 # The Calculator class ensures consistent seeding in __init__.
-                if v_var.bootstrap() is not None:
-                    bootstrap_matrix.append(v_var.bootstrap())
+                if boot_samples is not None:
+                    bootstrap_matrix.append(boot_samples)
                 
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError) as exc:
+                point_diagnostics.append({
+                    "R": int(r),
+                    "V": np.nan,
+                    "err": None,
+                    "boot_finite": 0,
+                    "boot_total": 0,
+                    "status": f"discarded ({type(exc).__name__}: {exc})",
+                })
                 continue
         if len(rs) < 3:
-            raise ValueError(f"Not enough valid V(R) points to fit r0 (found {len(rs)})")
+            raise ValueError(
+                f"Not enough valid V(R) points to fit r0 (found {len(rs)}). "
+                f"Diagnostics: {format_point_diagnostics(point_diagnostics)}"
+            )
 
         rs = np.array(rs)
         vs = np.array(vs)
@@ -453,7 +487,14 @@ class Calculator:
         # Filter out NaN/Inf values from sigma
         valid_mask = np.isfinite(sigma)
         if not np.all(valid_mask):
-            print(f"Warning: Disregarding {np.sum(~valid_mask)} points with non-finite sigma.")
+            bad_r_values = rs[~valid_mask].tolist()
+            print(
+                f"Warning: Disregarding {np.sum(~valid_mask)} points with non-finite sigma "
+                f"for R={bad_r_values}."
+            )
+            for idx, is_valid in enumerate(valid_mask):
+                if not is_valid and idx < len(point_diagnostics):
+                    point_diagnostics[idx]["status"] = "discarded (non-finite sigma)"
             rs = rs[valid_mask]
             vs = vs[valid_mask]
             sigma = sigma[valid_mask]
@@ -462,7 +503,10 @@ class Calculator:
                 bootstrap_matrix = [bootstrap_matrix[i] for i in range(len(valid_mask)) if valid_mask[i]]
 
             if len(rs) < 3:
-                raise ValueError(f"Not enough valid V(R) points after filtering NaNs to fit r0 (found {len(rs)})")
+                raise ValueError(
+                    f"Not enough valid V(R) points after filtering NaNs to fit r0 (found {len(rs)}). "
+                    f"Diagnostics: {format_point_diagnostics(point_diagnostics)}"
+                )
 
         if np.any(sigma <= 0):
             mean_err = np.mean(sigma[sigma > 0]) if np.any(sigma > 0) else 1.0
@@ -496,11 +540,17 @@ class Calculator:
         # Bootstrap Fits
         r0_bootstraps = []
         if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
-            boot_data = np.array(bootstrap_matrix).T
+            boot_data = np.array(bootstrap_matrix, dtype=float).T
             for sample_vs in boot_data:
-                val, _ = perform_fit(rs, sample_vs, sigma)
-                if not np.isnan(val):
-                    r0_bootstraps.append(val)
+                repaired_vs = np.array(sample_vs, dtype=float, copy=True)
+                invalid_points = ~np.isfinite(repaired_vs)
+                if np.any(invalid_points):
+                    repaired_vs[invalid_points] = vs[invalid_points]
+
+                val, _ = perform_fit(rs, repaired_vs, sigma)
+                r0_bootstraps.append(r0_val if np.isnan(val) else val)
+        elif np.isfinite(r0_val):
+            r0_bootstraps = [r0_val] * self.n_bootstrap
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, t_max=t_max, r_min=r_min, cornell_params=corn_params)
@@ -767,13 +817,20 @@ class Calculator:
         # Bootstrap
         r0_bootstraps = []
         if len(bootstrap_matrix) > 0 and len(bootstrap_matrix) == len(rs):
-            boot_data = np.array(bootstrap_matrix).T
+            boot_data = np.array(bootstrap_matrix, dtype=float).T
             for sample_fs in boot_data:
+                repaired_fs = np.array(sample_fs, dtype=float, copy=True)
+                invalid_points = ~np.isfinite(repaired_fs)
+                if np.any(invalid_points):
+                    repaired_fs[invalid_points] = fs[invalid_points]
+
                 # For bootstrap samples, we don't have individual errors,
                 # so we use the errors from the main data set as weights.
-                val = get_r0_from_force(rs, sample_fs, errs)
-                r0_bootstraps.append(val)
-        
+                val = get_r0_from_force(rs, repaired_fs, errs)
+                r0_bootstraps.append(r0_val if np.isnan(val) else val)
+        elif r0_val is not None and np.isfinite(r0_val):
+            r0_bootstraps = [r0_val] * self.n_bootstrap
+
         var_data = data_organizer.VariableData("r0_chi")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min)
         return var_data

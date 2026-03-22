@@ -1,6 +1,8 @@
 import json
 import hashlib
 import os
+import threading
+import concurrent.futures
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -10,13 +12,13 @@ import numpy as np
 from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
 
 import data_organizer as do
-from calculator import Calculator
+from calculator import Calculator, make_key
 
 # --- CONFIGURATION ---
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.2"
+CALC_VERSION = "4.3"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 _GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
@@ -118,48 +120,277 @@ def _discover_equivalent_runs(path: str) -> Tuple[str, List[str]]:
     return f"group_{group_key}", grouped_paths
 
 
-def _load_combined_w_temp(run_paths: List[str]) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
-    w_temp_files: List[do.CompactWilsonData] = []
+def _resolve_worker_count(requested: Optional[int], task_count: int, default: Optional[int] = None) -> int:
+    if task_count <= 1:
+        return 1
+
+    if requested is None:
+        requested = default if default is not None else (os.cpu_count() or 1)
+
+    return max(1, min(int(requested), task_count))
+
+
+def _load_single_compact_w_temp(run_path: str) -> Tuple[str, Optional[do.CompactWilsonData]]:
+    w_temp_path = Path(run_path) / "W_temp.out"
+    if not w_temp_path.exists():
+        return run_path, None
+
+    compact = do.load_compact_wilson_file(str(w_temp_path), min_step=THERMALIZATION_STEPS)
+    return run_path, compact
+
+
+def _iter_loaded_compact_w_temp(
+    run_paths: List[str],
+    load_workers: int,
+):
+    if load_workers <= 1:
+        for run_path in run_paths:
+            yield _load_single_compact_w_temp(run_path)
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=load_workers) as executor:
+        future_to_index: Dict[concurrent.futures.Future, int] = {}
+        ready_results: Dict[int, Tuple[str, Optional[do.CompactWilsonData]]] = {}
+        next_submit = 0
+        next_yield = 0
+
+        def submit_one(index: int):
+            future = executor.submit(_load_single_compact_w_temp, run_paths[index])
+            future_to_index[future] = index
+
+        initial = min(load_workers, len(run_paths))
+        for _ in range(initial):
+            submit_one(next_submit)
+            next_submit += 1
+
+        while next_yield < len(run_paths):
+            if next_yield in ready_results:
+                yield ready_results.pop(next_yield)
+                if next_submit < len(run_paths):
+                    submit_one(next_submit)
+                    next_submit += 1
+                next_yield += 1
+                continue
+
+            done, _ = concurrent.futures.wait(
+                tuple(future_to_index),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                index = future_to_index.pop(future)
+                ready_results[index] = future.result()
+
+
+def _calculate_w_rt_variables(
+    file_data: do.FileData,
+    block_size: int,
+    available_pairs: List[Tuple[int, int]],
+    calc_workers: Optional[int],
+    verbose: bool = False,
+    prefix: str = "",
+) -> Tuple[Dict[str, float], Dict[Any, do.VariableData]]:
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
+    pair_list = [(int(r), int(t)) for r, t in available_pairs]
+    worker_count = _resolve_worker_count(calc_workers, len(pair_list))
+    w_values: Dict[str, float] = {}
+    w_cache: Dict[Any, do.VariableData] = {}
+
+    if not pair_list:
+        return w_values, w_cache
+
+    vprint(f"Calculating {len(pair_list)} W(R,T) value(s) with {worker_count} worker(s)...")
+
+    thread_state = threading.local()
+
+    def get_calc() -> Calculator:
+        calc = getattr(thread_state, "calc", None)
+        if calc is None:
+            calc = Calculator(file_data, step_size=block_size)
+            thread_state.calc = calc
+        return calc
+
+    def task(pair: Tuple[int, int]) -> Tuple[Tuple[int, int], Optional[do.VariableData]]:
+        r_val, t_val = pair
+        try:
+            var = get_calc().get_variable("W_R_T", R=r_val, T=t_val)
+            return pair, var
+        except Exception:
+            return pair, None
+
+    if worker_count == 1:
+        iterator = map(task, pair_list)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            iterator = executor.map(task, pair_list)
+            for pair, var in iterator:
+                if var is None:
+                    continue
+                r_val, t_val = pair
+                w_cache[make_key("W_R_T", {"R": r_val, "T": t_val})] = var
+                w_val = var.get()
+                if w_val is not None:
+                    w_values[f"{r_val},{t_val}"] = float(w_val)
+            return w_values, w_cache
+
+    for pair, var in iterator:
+        if var is None:
+            continue
+        r_val, t_val = pair
+        w_cache[make_key("W_R_T", {"R": r_val, "T": t_val})] = var
+        w_val = var.get()
+        if w_val is not None:
+            w_values[f"{r_val},{t_val}"] = float(w_val)
+
+    return w_values, w_cache
+
+
+def _calculate_v_r_variables(
+    file_data: do.FileData,
+    block_size: int,
+    unique_Rs: List[int],
+    calc_workers: Optional[int],
+    seed_cache: Optional[Dict[Any, do.VariableData]] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
+    verbose: bool = False,
+    prefix: str = "",
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[Any, do.VariableData]]:
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
+    r_values = [int(r) for r in unique_Rs]
+    worker_count = _resolve_worker_count(calc_workers, len(r_values))
+    v_params = dict(extra_params or {})
+    shared_cache = dict(seed_cache or {})
+    potentials: Dict[str, float] = {}
+    potential_errors: Dict[str, float] = {}
+    v_cache: Dict[Any, do.VariableData] = {}
+
+    if not r_values:
+        return potentials, potential_errors, v_cache
+
+    vprint(f"Calculating {len(r_values)} V(R) value(s) with {worker_count} worker(s)...")
+
+    thread_state = threading.local()
+
+    def build_calc() -> Calculator:
+        calc = Calculator(file_data, step_size=block_size)
+        if shared_cache:
+            calc.variables.update(shared_cache)
+        return calc
+
+    def get_calc() -> Calculator:
+        calc = getattr(thread_state, "calc", None)
+        if calc is None:
+            calc = build_calc()
+            thread_state.calc = calc
+        return calc
+
+    def task(r_val: int) -> Tuple[int, Optional[do.VariableData]]:
+        try:
+            var = get_calc().get_variable("V_R", R=r_val, **v_params)
+            return r_val, var
+        except Exception:
+            return r_val, None
+
+    if worker_count == 1:
+        iterator = map(task, r_values)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            iterator = executor.map(task, r_values)
+            for r_val, var in iterator:
+                if var is None:
+                    continue
+                v_cache[make_key("V_R", {"R": r_val, **v_params})] = var
+                val = var.get()
+                if val is not None and not np.isnan(val):
+                    potentials[str(r_val)] = float(val)
+                    potential_errors[str(r_val)] = float(var.err())
+            return potentials, potential_errors, v_cache
+
+    for r_val, var in iterator:
+        if var is None:
+            continue
+        v_cache[make_key("V_R", {"R": r_val, **v_params})] = var
+        val = var.get()
+        if val is not None and not np.isnan(val):
+            potentials[str(r_val)] = float(val)
+            potential_errors[str(r_val)] = float(var.err())
+
+    return potentials, potential_errors, v_cache
+
+
+def _load_combined_w_temp(
+    run_paths: List[str],
+    verbose: bool = False,
+    prefix: str = "",
+    load_workers: int = 1,
+) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
+    worker_count = _resolve_worker_count(load_workers, len(run_paths), default=1)
     runs_with_w_temp = 0
 
-    for run_path in run_paths:
-        w_temp_path = Path(run_path) / "W_temp.out"
-        if not w_temp_path.exists():
-            continue
+    def iter_compact_files():
+        nonlocal runs_with_w_temp
+        for run_path, compact in _iter_loaded_compact_w_temp(run_paths, worker_count):
+            if compact is None:
+                continue
+            runs_with_w_temp += 1
+            vprint(f"Loaded data from {Path(run_path).name}...")
+            yield compact
 
-        compact = do.load_compact_wilson_file(str(w_temp_path), min_step=THERMALIZATION_STEPS)
-        if compact is None:
-            continue
-
-        runs_with_w_temp += 1
-        w_temp_files.append(compact)
-
+    if worker_count > 1:
+        vprint(f"Loading up to {worker_count} W_temp file(s) in parallel...")
+    vprint("Combining W_temp data incrementally...")
     combined = do.combine_compact_wilson_data(
-        w_temp_files,
+        iter_compact_files(),
         source_name="W_temp_combined",
     )
-
-    n_configurations_after_cut = 0
-    combined_samples = 0
-    if combined is not None:
-        n_configurations_after_cut = getattr(combined, "n_configurations", 0)
-        combined_samples = n_configurations_after_cut * len(getattr(combined, "pair_order", []))
 
     metadata = {
         "n_runs_in_group": len(run_paths),
         "n_runs_with_w_temp": runs_with_w_temp,
-        "n_w_temp_files": len(w_temp_files),
-        "n_samples_after_cut": combined_samples,
-        "n_configurations_after_cut": n_configurations_after_cut,
+        "n_w_temp_files": runs_with_w_temp,
+        "n_samples_after_cut": 0,
+        "n_configurations_after_cut": 0,
         "thermalization_steps": THERMALIZATION_STEPS,
+        "load_workers": worker_count,
     }
+
+    if combined is not None:
+        n_configurations_after_cut = getattr(combined, "n_configurations", 0)
+        metadata["n_configurations_after_cut"] = n_configurations_after_cut
+        metadata["n_samples_after_cut"] = n_configurations_after_cut * len(getattr(combined, "pair_order", []))
+
     return combined, metadata
 
 
-def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float = 1.65) -> Dict[str, Any]:
+def evaluate_run(
+    file_data: do.FileData,
+    input_dir: Path,
+    sommer_target: float = 1.65,
+    verbose: bool = False,
+    prefix: str = "",
+    calc_workers: Optional[int] = None,
+) -> Dict[str, Any]:
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
     if not file_data.observables and not getattr(file_data, "wilson_by_pair", None):
         return {"error": "No combined W_temp observables available"}
 
+    vprint("Calculating tau_int...")
     tau = 0.5
     if any(o.name in {"plaquette", "retrace"} for o in file_data.observables):
         calc_pre = Calculator(file_data)
@@ -169,39 +400,53 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
         except KeyError:
             tau = 0.5
 
+    vprint(f"Setting up Calculator with block_size={max(1, int(np.ceil(2 * tau)))}...")
     block_size = max(1, int(np.ceil(2 * tau)))
     calc = Calculator(file_data, step_size=block_size)
 
+    vprint("Extracting unique R and T...")
     unique_Rs = calc.get_unique_Rs()
     available_pairs = calc.get_available_pairs()
     unique_Ts = calc.get_unique_Ts()
 
-    potentials = {}
-    potential_errors = {}
-    for r in unique_Rs:
-        try:
-            v_var = calc.get_variable("V_R", R=int(r))
-            val = v_var.get()
-            if val is not None and not np.isnan(val):
-                potentials[str(int(r))] = float(val)
-                potential_errors[str(int(r))] = float(v_var.err())
-        except Exception:
-            continue
+    all_w, w_cache = _calculate_w_rt_variables(
+        file_data,
+        block_size,
+        available_pairs,
+        calc_workers,
+        verbose=verbose,
+        prefix=prefix,
+    )
+    calc.variables.update(w_cache)
 
-    all_w = {}
-    for r_p, t_p in available_pairs:
-        try:
-            w_var = calc.get_variable("W_R_T", R=int(r_p), T=int(t_p))
-            w_val = w_var.get()
-            if w_val is not None:
-                all_w[f"{int(r_p)},{int(t_p)}"] = float(w_val)
-        except Exception:
-            continue
+    potentials, potential_errors, potential_cache = _calculate_v_r_variables(
+        file_data,
+        block_size,
+        unique_Rs,
+        calc_workers,
+        seed_cache=dict(calc.variables),
+        verbose=verbose,
+        prefix=prefix,
+    )
+    calc.variables.update(potential_cache)
 
+    vprint("Calculating r0...")
     r0 = None
     r0_err = None
     cornell_params = None
     try:
+        r0_fit_Rs = [int(r) for r in unique_Rs if int(r) >= 2]
+        _, _, r0_fit_cache = _calculate_v_r_variables(
+            file_data,
+            block_size,
+            r0_fit_Rs,
+            calc_workers,
+            seed_cache=dict(calc.variables),
+            extra_params={"t_min": 5, "t_max": None},
+            verbose=verbose,
+            prefix=prefix,
+        )
+        calc.variables.update(r0_fit_cache)
         r0_var = calc.get_variable("r0", target_force=sommer_target)
         r0 = r0_var.get()
         if np.isnan(r0):
@@ -218,6 +463,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
         lattice_spacing = 0.5 / r0
         a_err = (0.5 / (r0**2)) * r0_err if r0_err else 0.0
 
+    vprint("Calculating chi and F_chi...")
     all_chi = {}
     all_f_chi = {}
     r0_chi = None
@@ -267,6 +513,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     except Exception:
         pass
 
+    vprint("Calculating volume_r0...")
     volume_r0 = None
     volume_r0_err = None
     try:
@@ -282,6 +529,7 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     except Exception:
         pass
 
+    vprint("Calculating creutz_P and a_creutz...")
     all_creutz_P = {}
     all_creutz_P_err = {}
     all_a_creutz = {}
@@ -339,18 +587,36 @@ def evaluate_run(file_data: do.FileData, input_dir: Path, sommer_target: float =
     }
 
 
-def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
+def get_or_calculate(
+    path: str,
+    force_recalc: bool = False,
+    verbose: bool = True,
+    calc_workers: Optional[int] = None,
+    load_workers: int = 1,
+    combine_equivalent_runs: bool = True,
+) -> Dict[str, Any]:
     path = os.path.abspath(path)
     run_id = get_run_id(path)
+
+    prefix = f"[{os.path.basename(path)}]"
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
 
     if not os.path.isdir(path):
         return {"error": "Directory not found"}
 
-    analysis_id, grouped_paths = _discover_equivalent_runs(path)
+    if combine_equivalent_runs:
+        analysis_id, grouped_paths = _discover_equivalent_runs(path)
+    else:
+        analysis_id = f"run_{run_id}"
+        grouped_paths = [path]
 
     if not force_recalc:
         cached = load_cached_result(analysis_id)
         if cached:
+            vprint("Loading data from cache...")
             result = dict(cached)
             result["path"] = path
             result["run_id"] = run_id
@@ -358,11 +624,22 @@ def get_or_calculate(path: str, force_recalc: bool = False) -> Dict[str, Any]:
             return result
 
     try:
-        combined_w_temp, aggregation = _load_combined_w_temp(grouped_paths)
+        combined_w_temp, aggregation = _load_combined_w_temp(
+            grouped_paths,
+            verbose=verbose,
+            prefix=prefix,
+            load_workers=load_workers,
+        )
         if combined_w_temp is None:
             return {"error": "No W_temp data found in equivalent run group"}
 
-        result = evaluate_run(combined_w_temp, Path(path))
+        result = evaluate_run(
+            combined_w_temp,
+            Path(path),
+            verbose=verbose,
+            prefix=prefix,
+            calc_workers=calc_workers,
+        )
         result["path"] = path
         result["run_id"] = run_id
         result["analysis_id"] = analysis_id

@@ -16,8 +16,37 @@ class VariableData:
     def set_value(self, value: Any, bootstrap_samples: List[Any] = None, **params):
         self.value = value
         if bootstrap_samples is not None:
-            self.bootstrap_samples = bootstrap_samples
-            self.error = np.std(bootstrap_samples)
+            boot_arr = np.asarray(bootstrap_samples, dtype=float)
+            if boot_arr.ndim == 0:
+                boot_arr = boot_arr.reshape(1)
+
+            finite_boots = boot_arr[np.isfinite(boot_arr)]
+            repaired_boots = boot_arr.copy()
+
+            # Treat isolated failed bootstrap replicas as missing values and
+            # replace them with the central estimate so downstream error
+            # propagation stays usable.
+            if repaired_boots.size > 0 and finite_boots.size != repaired_boots.size:
+                replacement = None
+                try:
+                    value_float = float(value)
+                except (TypeError, ValueError):
+                    value_float = np.nan
+
+                if np.isfinite(value_float):
+                    replacement = value_float
+                elif finite_boots.size > 0:
+                    replacement = float(np.mean(finite_boots))
+
+                if replacement is not None and np.isfinite(replacement):
+                    repaired_boots[~np.isfinite(repaired_boots)] = replacement
+
+            self.bootstrap_samples = repaired_boots.tolist()
+            repaired_finite = repaired_boots[np.isfinite(repaired_boots)]
+            if repaired_finite.size > 0:
+                self.error = float(np.std(repaired_finite))
+            else:
+                self.error = None
         else:
             self.error = None
         self.parameters.update(params)
@@ -306,10 +335,15 @@ def combine_compact_wilson_data(
             pair_order = current_pairs
             common_pairs = set(current_pairs)
         else:
+            previous_common = set(common_pairs)
             common_pairs &= current_set
+            for pair in previous_common - common_pairs:
+                chunks_by_pair.pop(pair, None)
 
+        active_pairs = common_pairs if common_pairs is not None else current_set
         for pair in current_pairs:
-            chunks_by_pair[pair].append(fd.wilson_by_pair[pair])
+            if pair in active_pairs:
+                chunks_by_pair[pair].append(fd.wilson_by_pair[pair])
 
     if not pair_order or not common_pairs:
         return None

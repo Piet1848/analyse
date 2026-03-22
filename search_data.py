@@ -200,7 +200,7 @@ def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
 class RowSpec:
     row_label: str
     params_path: str
-    calc_path: Optional[str]
+    calc_key: Optional[str]
     is_combined: bool
     n_paths: int = 1
 
@@ -267,15 +267,52 @@ def _build_row(
         return row_label, [None] * len(outputs)
 
 
-def _calculate_task(path: str) -> Tuple[str, Dict[str, Any]]:
-    return path, run_evaluation.get_or_calculate(path)
+def _calculate_task(
+    calc_key: str,
+    path: str,
+    combine_equivalent_runs: bool,
+    calc_workers: Optional[int],
+    load_workers: int,
+    force_calculate: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
+    return calc_key, run_evaluation.get_or_calculate(
+        path,
+        force_recalc=force_calculate,
+        calc_workers=calc_workers,
+        load_workers=load_workers,
+        combine_equivalent_runs=combine_equivalent_runs,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search data runs and calculate missing values.")
     parser.add_argument("root", help="Root data directory")
     parser.add_argument("tokens", nargs="*", help="Filters (NAME=VAL) and outputs (NAME)")
-    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of runs to calculate in parallel (higher values use more RAM)",
+    )
+    parser.add_argument(
+        "--calc-workers",
+        type=int,
+        default=None,
+        help="Threads per run for W(R,T) and V(R) calculations",
+    )
+    parser.add_argument(
+        "--load-workers",
+        type=int,
+        default=1,
+        help="Files to load in parallel while combining equivalent runs",
+    )
+    parser.add_argument(
+        "--force-calculate",
+        "--force_calculate",
+        dest="force_calculate",
+        action="store_true",
+        help="Recalculate results instead of loading cached analysis data",
+    )
     parser.add_argument(
         "--scope",
         choices=["both", "single", "combined"],
@@ -285,6 +322,20 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.tokens:
+        print("Usage:")
+        print("  python search_data.py ROOT [TOKENS ...] [--workers N] [--calc-workers N] [--load-workers N]")
+        print()
+        print("Examples:")
+        print("  python search_data.py ../data beta=2.4 lattice_size")
+        print("  python search_data.py ../data W_R_T --workers 4 --calc-workers 2 --load-workers 4")
+        print()
+        print("Options:")
+        print("  --workers N         Number of runs to calculate in parallel (default: 1)")
+        print("  --calc-workers N    Threads per run for W(R,T) and V(R) calculations (default: auto)")
+        print("  --load-workers N    Files to load in parallel while combining equivalent runs (default: 1)")
+        print("  --force-calculate   Recalculate results instead of loading cached analysis data")
+        print("  --scope {both,single,combined}  Which rows to emit (default: both)")
+        print()
         print("Available Parameters:")
         for k, v in FIELD_MAP.items():
             if v[0] != "calc":
@@ -316,7 +367,7 @@ def main() -> None:
             groups[group_key].append(path)
 
     row_specs: List[RowSpec] = []
-    calc_targets: Dict[str, str] = {}
+    calc_targets: Dict[str, Tuple[str, bool]] = {}
     for group_key, paths in groups.items():
         representative_path = paths[0]
         include_single = args.scope in ("both", "single")
@@ -324,51 +375,78 @@ def main() -> None:
 
         if include_single:
             for path in paths:
+                calc_key = f"single:{path}"
                 row_specs.append(
                     RowSpec(
                         row_label=path,
                         params_path=path,
-                        calc_path=representative_path,
+                        calc_key=calc_key,
                         is_combined=False,
                     )
                 )
-            calc_targets[representative_path] = representative_path
+                calc_targets[calc_key] = (path, False)
 
         if include_combined:
+            calc_key = f"combined:{representative_path}"
             row_specs.append(
                 RowSpec(
                     row_label=f"combined {len(paths)}",
                     params_path=representative_path,
-                    calc_path=representative_path,
+                    calc_key=calc_key,
                     is_combined=True,
                     n_paths=len(paths),
                 )
             )
-            calc_targets[representative_path] = representative_path
+            calc_targets[calc_key] = (representative_path, True)
 
     if not row_specs:
         print(f"No rows found for scope '{args.scope}'.")
         return
 
     n_combined_groups = sum(1 for p in groups.values() if len(p) > 1)
-    needs_calc = any(get_field_info(out)[0] == "calc" for out in outputs)
+    needs_calc = args.force_calculate or any(get_field_info(out)[0] == "calc" for out in outputs)
     calc_results: Dict[str, Dict[str, Any]] = {}
 
     if needs_calc:
         print(
             f"Processing {len(row_specs)} rows ({len(matches)} individual runs, {n_combined_groups} combined groups) "
-            f"with {len(calc_targets)} unique calculation task(s) and {args.workers} workers...",
+            f"with {len(calc_targets)} unique calculation task(s), "
+            f"{args.workers} run worker(s), "
+            f"{args.calc_workers if args.calc_workers is not None else 'auto'} calc worker(s) per run, "
+            f"and {args.load_workers} load worker(s)"
+            f"{' with cache reuse disabled' if args.force_calculate else ''}...",
             file=sys.stderr,
         )
-        with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {
-                executor.submit(_calculate_task, path): path
-                for path in calc_targets.values()
-            }
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                calc_path, calc_data = future.result()
-                calc_results[calc_path] = calc_data
-                print(f"Calculated {i+1}/{len(calc_targets)}", file=sys.stderr, end="\r")
+        if args.workers <= 1:
+            for i, (calc_key, (path, combine_equivalent_runs)) in enumerate(calc_targets.items(), start=1):
+                result_key, calc_data = _calculate_task(
+                    calc_key,
+                    path,
+                    combine_equivalent_runs,
+                    args.calc_workers,
+                    args.load_workers,
+                    args.force_calculate,
+                )
+                calc_results[result_key] = calc_data
+                print(f"Calculated {i}/{len(calc_targets)}", file=sys.stderr, end="\r")
+        else:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = {
+                    executor.submit(
+                        _calculate_task,
+                        calc_key,
+                        path,
+                        combine_equivalent_runs,
+                        args.calc_workers,
+                        args.load_workers,
+                        args.force_calculate,
+                    ): calc_key
+                    for calc_key, (path, combine_equivalent_runs) in calc_targets.items()
+                }
+                for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                    result_key, calc_data = future.result()
+                    calc_results[result_key] = calc_data
+                    print(f"Calculated {i}/{len(calc_targets)}", file=sys.stderr, end="\r")
         print(" " * 60, file=sys.stderr, end="\r")
     else:
         print(
@@ -379,7 +457,7 @@ def main() -> None:
 
     rows = []
     for row_spec in row_specs:
-        calc_data = calc_results.get(row_spec.calc_path) if row_spec.calc_path else None
+        calc_data = calc_results.get(row_spec.calc_key) if row_spec.calc_key else None
         rows.append(_build_row(row_spec, outputs, calc_data))
 
     def sort_key(row):
