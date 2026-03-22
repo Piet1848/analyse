@@ -4,13 +4,13 @@ Search lattice runs by YAML parameters AND calculated results.
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, List, Optional, get_type_hints, get_origin
 import concurrent.futures
 
-import run_evaluation
 from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
 import re
 
@@ -28,6 +28,7 @@ CALCULATED_FIELDS = {
     "volume_r0_err": float,
     "tau_int": float,
     "block_size": int,
+    "analysis_settings": dict,
     "sommer": str,
     "r0_chi": float,
     "r0_chi_err": float,
@@ -54,6 +55,11 @@ def build_field_map() -> Dict[str, Tuple[str, Any]]:
 
 
 FIELD_MAP = build_field_map()
+
+
+def _get_run_evaluation():
+    import run_evaluation
+    return run_evaluation
 
 
 def parse_bool(s: str) -> bool:
@@ -275,6 +281,7 @@ def _calculate_task(
     load_workers: int,
     force_calculate: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
+    run_evaluation = _get_run_evaluation()
     return calc_key, run_evaluation.get_or_calculate(
         path,
         force_recalc=force_calculate,
@@ -282,6 +289,26 @@ def _calculate_task(
         load_workers=load_workers,
         combine_equivalent_runs=combine_equivalent_runs,
     )
+
+
+def _print_analysis_settings(
+    row_specs: List[RowSpec],
+    calc_results: Dict[str, Dict[str, Any]],
+) -> None:
+    for i, row_spec in enumerate(row_specs):
+        calc_data = calc_results.get(row_spec.calc_key) if row_spec.calc_key else None
+        row_label = row_spec.row_label
+        if row_spec.is_combined:
+            row_label = _get_combined_label(calc_data, row_spec.n_paths)
+
+        print(row_label)
+        settings = _extract_calculated_value("analysis_settings", calc_data)
+        if settings is None:
+            print(json.dumps({"error": "analysis settings unavailable"}, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(settings, indent=2, sort_keys=True))
+        if i != len(row_specs) - 1:
+            print()
 
 
 def main() -> None:
@@ -319,15 +346,22 @@ def main() -> None:
         default="both",
         help="Which rows to emit: individual runs, combined groups, or both",
     )
+    parser.add_argument(
+        "--show-analysis-settings",
+        action="store_true",
+        help="Print the key analysis settings used for each matching row",
+    )
     args = parser.parse_args()
 
-    if not args.tokens:
+    if not args.tokens and not args.show_analysis_settings:
         print("Usage:")
         print("  python search_data.py ROOT [TOKENS ...] [--workers N] [--calc-workers N] [--load-workers N]")
+        print("  python search_data.py ROOT --show-analysis-settings")
         print()
         print("Examples:")
         print("  python search_data.py ../data beta=2.4 lattice_size")
         print("  python search_data.py ../data W_R_T --workers 4 --calc-workers 2 --load-workers 4")
+        print("  python search_data.py ../data beta=2.4 --show-analysis-settings")
         print()
         print("Options:")
         print("  --workers N         Number of runs to calculate in parallel (default: 1)")
@@ -335,6 +369,7 @@ def main() -> None:
         print("  --load-workers N    Files to load in parallel while combining equivalent runs (default: 1)")
         print("  --force-calculate   Recalculate results instead of loading cached analysis data")
         print("  --scope {both,single,combined}  Which rows to emit (default: both)")
+        print("  --show-analysis-settings  Print the key analysis settings JSON per row")
         print()
         print("Available Parameters:")
         for k, v in FIELD_MAP.items():
@@ -351,6 +386,9 @@ def main() -> None:
     except Exception as e:
         sys.exit(f"Error: {e}")
 
+    if args.show_analysis_settings and "analysis_settings" not in outputs:
+        outputs.append("analysis_settings")
+
     matches = find_matching_runs(args.root, criteria)
     if not matches:
         print("No matching runs found.")
@@ -359,6 +397,7 @@ def main() -> None:
     from collections import defaultdict
 
     groups = defaultdict(list)
+    run_evaluation = _get_run_evaluation()
     for path in matches:
         group_key = run_evaluation._group_key_for_run(path)
         if group_key is None:
@@ -454,6 +493,10 @@ def main() -> None:
             f"without calculated fields...",
             file=sys.stderr,
         )
+
+    if outputs == ["analysis_settings"]:
+        _print_analysis_settings(row_specs, calc_results)
+        return
 
     rows = []
     for row_spec in row_specs:

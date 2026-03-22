@@ -18,11 +18,78 @@ from calculator import Calculator, make_key
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.3"
+CALC_VERSION = "4.4"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
+
+DEFAULT_N_BOOTSTRAP = 200
+DEFAULT_SOMMER_TARGET = 1.65
+DEFAULT_V_R_T_MIN = 1
+DEFAULT_V_R_T_MAX = None
+DEFAULT_R0_T_MIN = 5
+DEFAULT_R0_T_MAX = None
+DEFAULT_R0_R_MIN = 2
+DEFAULT_R0_CHI_T_LARGE = 4
+DEFAULT_R0_CHI_MAX_REL_ERR = 0.5
+DEFAULT_R0_CHI_USE_WEIGHTED_FIT = True
+DEFAULT_R0_CHI_FIT_WINDOW = 2
+DEFAULT_R0_CHI_DISCARD_NEGATIVE = True
+DEFAULT_R0_CHI_R_MIN = 1
 
 _GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
 _GROUP_INDEX_ROOT: Path | None = None
+
+
+def _range_summary(values: List[float | int]) -> Dict[str, Any]:
+    if not values:
+        return {"min": None, "max": None, "count": 0}
+    return {
+        "min": float(values[0]) if isinstance(values[0], float) else int(values[0]),
+        "max": float(values[-1]) if isinstance(values[-1], float) else int(values[-1]),
+        "count": len(values),
+    }
+
+
+def _build_analysis_settings(
+    unique_Rs: List[int],
+    unique_Ts: List[int],
+    tau: float,
+    block_size: int,
+    sommer_target: float,
+) -> Dict[str, Any]:
+    unique_R_set = set(unique_Rs)
+    r0_fit_Rs = [int(r) for r in unique_Rs if int(r) >= DEFAULT_R0_R_MIN]
+    r0_chi_fit_Rs = [r + 0.5 for r in unique_Rs if (r + 1) in unique_R_set]
+
+    return {
+        "thermalization_steps": THERMALIZATION_STEPS,
+        "sommer_target": float(sommer_target),
+        "n_bootstrap": DEFAULT_N_BOOTSTRAP,
+        "tau_int": float(tau),
+        "bootstrap_block_size": int(block_size),
+        "available_R": _range_summary(unique_Rs),
+        "available_T": _range_summary(unique_Ts),
+        "V_R": {
+            "t_min": DEFAULT_V_R_T_MIN,
+            "t_max": DEFAULT_V_R_T_MAX,
+            "r_min": min(unique_Rs) if unique_Rs else None,
+            "r_max": max(unique_Rs) if unique_Rs else None,
+        },
+        "r0": {
+            "t_min": DEFAULT_R0_T_MIN,
+            "t_max": DEFAULT_R0_T_MAX,
+            "r_min": DEFAULT_R0_R_MIN,
+            "r_max": max(r0_fit_Rs) if r0_fit_Rs else None,
+        },
+        "r0_chi": {
+            "t_large": DEFAULT_R0_CHI_T_LARGE,
+            "r_min": min(r0_chi_fit_Rs) if r0_chi_fit_Rs else None,
+            "r_max": max(r0_chi_fit_Rs) if r0_chi_fit_Rs else None,
+            "max_rel_err": DEFAULT_R0_CHI_MAX_REL_ERR,
+            "use_weighted_fit": DEFAULT_R0_CHI_USE_WEIGHTED_FIT,
+            "fit_window": DEFAULT_R0_CHI_FIT_WINDOW,
+            "discard_negative": DEFAULT_R0_CHI_DISCARD_NEGATIVE,
+        },
+    }
 
 
 def get_run_id(path: str) -> str:
@@ -209,7 +276,7 @@ def _calculate_w_rt_variables(
     def get_calc() -> Calculator:
         calc = getattr(thread_state, "calc", None)
         if calc is None:
-            calc = Calculator(file_data, step_size=block_size)
+            calc = Calculator(file_data, n_bootstrap=DEFAULT_N_BOOTSTRAP, step_size=block_size)
             thread_state.calc = calc
         return calc
 
@@ -279,7 +346,7 @@ def _calculate_v_r_variables(
     thread_state = threading.local()
 
     def build_calc() -> Calculator:
-        calc = Calculator(file_data, step_size=block_size)
+        calc = Calculator(file_data, n_bootstrap=DEFAULT_N_BOOTSTRAP, step_size=block_size)
         if shared_cache:
             calc.variables.update(shared_cache)
         return calc
@@ -377,7 +444,7 @@ def _load_combined_w_temp(
 def evaluate_run(
     file_data: do.FileData,
     input_dir: Path,
-    sommer_target: float = 1.65,
+    sommer_target: float = DEFAULT_SOMMER_TARGET,
     verbose: bool = False,
     prefix: str = "",
     calc_workers: Optional[int] = None,
@@ -393,7 +460,7 @@ def evaluate_run(
     vprint("Calculating tau_int...")
     tau = 0.5
     if any(o.name in {"plaquette", "retrace"} for o in file_data.observables):
-        calc_pre = Calculator(file_data)
+        calc_pre = Calculator(file_data, n_bootstrap=DEFAULT_N_BOOTSTRAP)
         try:
             tau_var = calc_pre.get_variable("tau_int", obs_name="plaquette")
             tau = tau_var.get()
@@ -402,12 +469,19 @@ def evaluate_run(
 
     vprint(f"Setting up Calculator with block_size={max(1, int(np.ceil(2 * tau)))}...")
     block_size = max(1, int(np.ceil(2 * tau)))
-    calc = Calculator(file_data, step_size=block_size)
+    calc = Calculator(file_data, n_bootstrap=DEFAULT_N_BOOTSTRAP, step_size=block_size)
 
     vprint("Extracting unique R and T...")
     unique_Rs = calc.get_unique_Rs()
     available_pairs = calc.get_available_pairs()
     unique_Ts = calc.get_unique_Ts()
+    analysis_settings = _build_analysis_settings(
+        unique_Rs=unique_Rs,
+        unique_Ts=unique_Ts,
+        tau=tau,
+        block_size=block_size,
+        sommer_target=sommer_target,
+    )
 
     all_w, w_cache = _calculate_w_rt_variables(
         file_data,
@@ -442,12 +516,18 @@ def evaluate_run(
             r0_fit_Rs,
             calc_workers,
             seed_cache=dict(calc.variables),
-            extra_params={"t_min": 5, "t_max": None},
+            extra_params={"t_min": DEFAULT_R0_T_MIN, "t_max": DEFAULT_R0_T_MAX},
             verbose=verbose,
             prefix=prefix,
         )
         calc.variables.update(r0_fit_cache)
-        r0_var = calc.get_variable("r0", target_force=sommer_target)
+        r0_var = calc.get_variable(
+            "r0",
+            t_min=DEFAULT_R0_T_MIN,
+            t_max=DEFAULT_R0_T_MAX,
+            target_force=sommer_target,
+            r_min=DEFAULT_R0_R_MIN,
+        )
         r0 = r0_var.get()
         if np.isnan(r0):
             r0 = None
@@ -468,7 +548,7 @@ def evaluate_run(
     all_f_chi = {}
     r0_chi = None
     r0_chi_err = None
-    chi_t_large = 4
+    chi_t_large = DEFAULT_R0_CHI_T_LARGE
 
     try:
         chi_pairs = []
@@ -503,7 +583,11 @@ def evaluate_run(
             "r0_chi",
             t_large=chi_t_large,
             target_force=sommer_target,
-            discard_negative=True,
+            max_rel_err=DEFAULT_R0_CHI_MAX_REL_ERR,
+            use_weighted_fit=DEFAULT_R0_CHI_USE_WEIGHTED_FIT,
+            fit_window=DEFAULT_R0_CHI_FIT_WINDOW,
+            discard_negative=DEFAULT_R0_CHI_DISCARD_NEGATIVE,
+            r_min=DEFAULT_R0_CHI_R_MIN,
         )
         r0_chi = r0_chi_var.get()
         if np.isnan(r0_chi):
@@ -522,7 +606,14 @@ def evaluate_run(
         L_val = metro.L0
 
         if r0 is not None:
-            vol_var = calc.get_variable("volume_r0", L=L_val, target_force=sommer_target)
+            vol_var = calc.get_variable(
+                "volume_r0",
+                L=L_val,
+                t_min=DEFAULT_R0_T_MIN,
+                t_max=DEFAULT_R0_T_MAX,
+                target_force=sommer_target,
+                r_min=DEFAULT_R0_R_MIN,
+            )
             if vol_var.get() is not None and not np.isnan(vol_var.get()):
                 volume_r0 = vol_var.get()
                 volume_r0_err = vol_var.err()
@@ -566,6 +657,7 @@ def evaluate_run(
         "a_err": float(a_err) if a_err is not None else None,
         "tau_int": float(tau),
         "block_size": int(block_size),
+        "analysis_settings": analysis_settings,
         "V_R": potentials,
         "V_R_err": potential_errors,
         "W_R_T": all_w,
