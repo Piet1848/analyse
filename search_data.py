@@ -81,16 +81,16 @@ def parse_dynamic_token(tok: str):
         return ("V_R_err" if is_err else "V_R"), {"R": int(m.group(1))}
 
     m = re.fullmatch(r"W_R(\d+)_T(\d+)", check_tok)
-    if m and not is_err:
-        return "W_R_T", {"R": int(m.group(1)), "T": int(m.group(2))}
+    if m:
+        return ("W_R_T_err" if is_err else "W_R_T"), {"R": int(m.group(1)), "T": int(m.group(2))}
 
     m = re.fullmatch(r"W_R(\d+)_T", check_tok)
-    if m and not is_err:
-        return "W_R_T", {"R": int(m.group(1))}
+    if m:
+        return ("W_R_T_err" if is_err else "W_R_T"), {"R": int(m.group(1))}
 
     m = re.fullmatch(r"W_R_T(\d+)", check_tok)
-    if m and not is_err:
-        return "W_R_T", {"T": int(m.group(1))}
+    if m:
+        return ("W_R_T_err" if is_err else "W_R_T"), {"T": int(m.group(1))}
 
     m = re.fullmatch(r"creutz_P(\d+)", check_tok)
     if m:
@@ -232,7 +232,7 @@ def _extract_calculated_value(name: str, calc_data: Optional[Dict[str, Any]]) ->
         return calc_data.get(base, {}).get(str(params["R"]))
 
     if base.startswith("W_R_T"):
-        w_dict = calc_data.get("W_R_T", {})
+        w_dict = calc_data.get(base, {})
         r, t = params.get("R"), params.get("T")
         if r is not None and t is not None:
             return w_dict.get(f"{r},{t}")

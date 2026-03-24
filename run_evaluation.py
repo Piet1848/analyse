@@ -255,7 +255,7 @@ def _calculate_w_rt_variables(
     calc_workers: Optional[int],
     verbose: bool = False,
     prefix: str = "",
-) -> Tuple[Dict[str, float], Dict[Any, do.VariableData]]:
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[Any, do.VariableData]]:
     def vprint(msg: str):
         if verbose:
             import sys
@@ -264,10 +264,11 @@ def _calculate_w_rt_variables(
     pair_list = [(int(r), int(t)) for r, t in available_pairs]
     worker_count = _resolve_worker_count(calc_workers, len(pair_list))
     w_values: Dict[str, float] = {}
+    w_errors: Dict[str, float] = {}
     w_cache: Dict[Any, do.VariableData] = {}
 
     if not pair_list:
-        return w_values, w_cache
+        return w_values, w_errors, w_cache
 
     vprint(f"Calculating {len(pair_list)} W(R,T) value(s) with {worker_count} worker(s)...")
 
@@ -301,7 +302,9 @@ def _calculate_w_rt_variables(
                 w_val = var.get()
                 if w_val is not None:
                     w_values[f"{r_val},{t_val}"] = float(w_val)
-            return w_values, w_cache
+                    if var.err() is not None:
+                        w_errors[f"{r_val},{t_val}"] = float(var.err())
+            return w_values, w_errors, w_cache
 
     for pair, var in iterator:
         if var is None:
@@ -311,8 +314,10 @@ def _calculate_w_rt_variables(
         w_val = var.get()
         if w_val is not None:
             w_values[f"{r_val},{t_val}"] = float(w_val)
+            if var.err() is not None:
+                w_errors[f"{r_val},{t_val}"] = float(var.err())
 
-    return w_values, w_cache
+    return w_values, w_errors, w_cache
 
 
 def _calculate_v_r_variables(
@@ -483,7 +488,7 @@ def evaluate_run(
         sommer_target=sommer_target,
     )
 
-    all_w, w_cache = _calculate_w_rt_variables(
+    all_w, all_w_err, w_cache = _calculate_w_rt_variables(
         file_data,
         block_size,
         available_pairs,
@@ -662,6 +667,7 @@ def evaluate_run(
         "V_R": potentials,
         "V_R_err": potential_errors,
         "W_R_T": all_w,
+        "W_R_T_err": all_w_err,
         "r0_chi": float(r0_chi) if r0_chi is not None else None,
         "r0_chi_err": float(r0_chi_err) if r0_chi_err is not None else None,
         "chi": all_chi,
