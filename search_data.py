@@ -518,10 +518,22 @@ def main() -> None:
 
     rows.sort(key=sort_key)
 
-    print("	".join(["path"] + outputs))
+    headers = ["path"] + outputs
+    all_rows = []
     for row_label, vals in rows:
         out_strs = [str(v) if v is not None else "N/A" for v in vals]
-        print("	".join([row_label] + out_strs))
+        all_rows.append([row_label] + out_strs)
+
+    col_widths = [len(h) for h in headers]
+    for row in all_rows:
+        for i, val in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(val))
+
+    fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
+
+    print(fmt.format(*headers))
+    for row in all_rows:
+        print(fmt.format(*row))
 
 
 if __name__ == "__main__":
