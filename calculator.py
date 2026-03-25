@@ -4,7 +4,6 @@ from typing import Any, FrozenSet, Callable
 import data_organizer
 import numpy as np
 from scipy.optimize import curve_fit
-from scipy.interpolate import interp1d
 
 Key = tuple[str, FrozenSet[tuple[str, Any]]]
 
@@ -186,11 +185,119 @@ class Calculator:
         Yields an array of indices.
         """
         n_effective = n_samples // self.step_size
+        if n_effective <= 0:
+            raise ValueError(
+                f"step_size={self.step_size} leaves no effective samples for n_samples={n_samples}"
+            )
         rng = np.random.default_rng(self.seed)
         
         for _ in range(self.n_bootstrap):
             reduced_indices = rng.integers(0, n_effective, size=n_effective)
             yield reduced_indices * self.step_size
+
+    def _nan_bootstrap_array(self) -> np.ndarray:
+        return np.full(self.n_bootstrap, np.nan, dtype=float)
+
+    def _build_compact_reduced_matrix(
+        self,
+        pairs: list[tuple[int, int]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self._ensure_w_rt_cache()
+        if self._w_rt_cache is None:
+            raise ValueError("Compact Wilson cache is unavailable.")
+        if not pairs:
+            return np.array([], dtype=float), np.empty((0, 0), dtype=np.float32)
+
+        first_pair = pairs[0]
+        first_values = np.asarray(self._w_rt_cache[first_pair], dtype=np.float32)
+        n_samples = int(len(first_values))
+        if n_samples <= 0:
+            raise ValueError("No Wilson-loop samples available for bootstrap priming.")
+
+        n_effective = n_samples // self.step_size
+        if n_effective <= 0:
+            raise ValueError(
+                f"step_size={self.step_size} leaves no effective samples for n_samples={n_samples}"
+            )
+
+        stop = n_effective * self.step_size
+        reduced_matrix = np.empty((n_effective, len(pairs)), dtype=np.float32)
+        mean_values = np.empty(len(pairs), dtype=float)
+
+        for idx, pair in enumerate(pairs):
+            series = self._w_rt_cache.get(pair)
+            if series is None:
+                raise ValueError(f"No data found for R={pair[0]}, T={pair[1]}")
+            series_arr = np.asarray(series, dtype=np.float32)
+            if len(series_arr) != n_samples:
+                raise ValueError("Compact Wilson data must have a consistent number of samples per pair.")
+            mean_values[idx] = float(np.mean(series_arr))
+            reduced_matrix[:, idx] = series_arr[:stop:self.step_size]
+
+        return mean_values, reduced_matrix
+
+    def prime_w_rt_cache(
+        self,
+        pairs: list[tuple[int, int]] | None = None,
+        bootstrap_chunk_size: int = 32,
+    ) -> None:
+        compact_wilson = getattr(self.file_data, "wilson_by_pair", None)
+        if compact_wilson is None:
+            return
+
+        if bootstrap_chunk_size < 1:
+            raise ValueError("bootstrap_chunk_size must be at least 1")
+
+        available_pairs = self.get_available_pairs()
+        if pairs is None:
+            target_pairs = available_pairs
+        else:
+            deduped_pairs: list[tuple[int, int]] = []
+            seen: set[tuple[int, int]] = set()
+            for r_val, t_val in pairs:
+                pair = (int(r_val), int(t_val))
+                if pair in seen:
+                    continue
+                deduped_pairs.append(pair)
+                seen.add(pair)
+            target_pairs = deduped_pairs
+
+        pending_pairs: list[tuple[int, int]] = []
+        for pair in target_pairs:
+            if pair not in compact_wilson:
+                raise ValueError(f"No data found for R={pair[0]}, T={pair[1]}")
+            cache_key = make_key("W_R_T", {"R": pair[0], "T": pair[1]})
+            if cache_key not in self.variables:
+                pending_pairs.append(pair)
+
+        if not pending_pairs:
+            return
+
+        mean_values, reduced_matrix = self._build_compact_reduced_matrix(pending_pairs)
+        n_effective = reduced_matrix.shape[0]
+        bootstrap_matrix = np.empty((self.n_bootstrap, len(pending_pairs)), dtype=np.float32)
+        rng = np.random.default_rng(self.seed)
+
+        for start in range(0, self.n_bootstrap, bootstrap_chunk_size):
+            current_size = min(bootstrap_chunk_size, self.n_bootstrap - start)
+            reduced_indices = np.empty((current_size, n_effective), dtype=np.int64)
+            for row in range(current_size):
+                reduced_indices[row] = rng.integers(0, n_effective, size=n_effective)
+
+            counts = np.zeros((current_size, n_effective), dtype=np.float32)
+            np.add.at(counts, (np.arange(current_size)[:, None], reduced_indices), np.float32(1.0))
+            bootstrap_matrix[start:start + current_size] = (counts @ reduced_matrix) / np.float32(n_effective)
+
+        for idx, pair in enumerate(pending_pairs):
+            cache_key = make_key("W_R_T", {"R": pair[0], "T": pair[1]})
+            var_data = data_organizer.VariableData("W_R_T")
+            var_data.set_value(
+                mean_values[idx],
+                bootstrap_samples=bootstrap_matrix[:, idx],
+                R=pair[0],
+                T=pair[1],
+            )
+            self.variables[cache_key] = var_data
     
     ### Variable implementations ###
 
@@ -203,6 +310,7 @@ class Calculator:
         if selected_values is None:
             raise ValueError(f"No data found for R={R}, T={T}")
 
+        selected_values = np.asarray(selected_values, dtype=np.float32)
         n_samples = len(selected_values)
 
         if n_samples == 0:
@@ -213,7 +321,7 @@ class Calculator:
         mean_val = np.mean(selected_values)
 
         # 3. Bootstrap Calculation
-        bootstrap_means = np.zeros(self.n_bootstrap)
+        bootstrap_means = np.empty(self.n_bootstrap, dtype=float)
 
         for i, indices in enumerate(self._get_bootstrap_indices_seq(n_samples)):
             # Calculates one sample at a time, no giant memory allocation
@@ -239,9 +347,9 @@ class Calculator:
         # W_R_T Variables
         w_vars = [self.get_variable("W_R_T", R=R, T=t) for t in ts_to_fit]
         
-        ws_main = np.array([v.get() for v in w_vars])
-        ts_fit  = np.array(ts_to_fit)
-        ws_err  = np.array([v.err() for v in w_vars])
+        ws_main = np.asarray([v.get() for v in w_vars], dtype=float)
+        ts_fit  = np.asarray(ts_to_fit, dtype=float)
+        ws_err  = np.asarray([v.err() for v in w_vars], dtype=float)
 
         # --- Positivity Cut ---
         # Find the first index where data becomes non-positive
@@ -257,7 +365,7 @@ class Calculator:
         if len(ts_fit) < 3:
             # Signal lost (values became negative) too early.
             var_data = data_organizer.VariableData("V_R")
-            var_data.set_value(np.nan, bootstrap_samples=[np.nan]*self.n_bootstrap, R=R)
+            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R)
             return var_data
 
         # Store the valid length to slice bootstrap samples later
@@ -307,36 +415,38 @@ class Calculator:
         if np.isnan(V_main):
             # If the main fit fails, return NaN immediately
             var_data = data_organizer.VariableData("V_R")
-            var_data.set_value(np.nan, bootstrap_samples=[np.nan]*self.n_bootstrap, R=R)
+            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R)
             return var_data
 
         # Bootstrap Fits
         n_boot = self.n_bootstrap
-        bootstrap_Vs = []
+        bootstrap_Vs = np.empty(n_boot, dtype=float)
 
-        all_boots = np.array([v.bootstrap() for v in w_vars])
+        boot_arrays = [v.bootstrap() for v in w_vars]
+        if any(boot is None for boot in boot_arrays):
+            raise ValueError(f"Bootstrap samples not available for V_R at R={R}")
+        all_boots = np.stack([np.asarray(boot, dtype=float) for boot in boot_arrays], axis=0)
         all_boots_valid = all_boots[:valid_len, :]  # shape: (valid_len, n_boot)
+        use_weights = ws_err is not None and np.all(ws_err > 0)
 
         for i in range(n_boot):
-            ws_sample = np.array(all_boots_valid[:, i], dtype=float, copy=True)
+            ws_sample = np.array(all_boots_valid[:, i], copy=True)
             invalid_points = ~np.isfinite(ws_sample) | (ws_sample <= 0)
             if np.any(invalid_points):
                 ws_sample[invalid_points] = ws_main[invalid_points]
 
             if np.any(ws_sample <= 0):
-                bootstrap_Vs.append(V_main)
+                bootstrap_Vs[i] = V_main
                 continue
 
             ln_ws_sample = np.log(ws_sample)
-            w_weights = None
-            if ws_err is not None and np.all(ws_err > 0):
-                w_weights = ws_sample / ws_err
+            w_weights = (ws_sample / ws_err) if use_weights else None
 
             try:
                 p = np.polyfit(ts_fit, ln_ws_sample, 1, w=w_weights)
-                bootstrap_Vs.append(-p[0])
+                bootstrap_Vs[i] = -p[0]
             except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
-                bootstrap_Vs.append(V_main)
+                bootstrap_Vs[i] = V_main
 
         var_data = data_organizer.VariableData("V_R")
         var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, t_max=t_max, fit_C=C_main)
@@ -426,7 +536,7 @@ class Calculator:
         
         # We need a consistent set of bootstrap samples to propagate errors correctly
         # So we collect the bootstrap arrays from each V_R
-        bootstrap_matrix = []
+        bootstrap_rows: list[np.ndarray] = []
         for r in unique_Rs:
             try:
                 # Reuse the existing V_R calculator
@@ -463,7 +573,7 @@ class Calculator:
                 # Collect bootstraps. Must ensure they align (same seed/length).
                 # The Calculator class ensures consistent seeding in __init__.
                 if boot_samples is not None:
-                    bootstrap_matrix.append(boot_samples)
+                    bootstrap_rows.append(boot_arr)
                 
             except (ValueError, RuntimeError) as exc:
                 point_diagnostics.append({
@@ -481,9 +591,9 @@ class Calculator:
                 f"Diagnostics: {format_point_diagnostics(point_diagnostics)}"
             )
 
-        rs = np.array(rs)
-        vs = np.array(vs)
-        errs = np.array(errs)
+        rs = np.asarray(rs, dtype=float)
+        vs = np.asarray(vs, dtype=float)
+        errs = np.asarray(errs, dtype=float)
         
         # Handle zero errors for fitting
         sigma = errs.copy()
@@ -502,9 +612,9 @@ class Calculator:
             rs = rs[valid_mask]
             vs = vs[valid_mask]
             sigma = sigma[valid_mask]
-            # Also filter bootstrap_matrix if it matches
-            if len(bootstrap_matrix) == len(valid_mask):
-                bootstrap_matrix = [bootstrap_matrix[i] for i in range(len(valid_mask)) if valid_mask[i]]
+            # Also filter bootstrap rows if they match
+            if len(bootstrap_rows) == len(valid_mask):
+                bootstrap_rows = [bootstrap_rows[i] for i in range(len(valid_mask)) if valid_mask[i]]
 
             if len(rs) < 3:
                 raise ValueError(
@@ -542,19 +652,21 @@ class Calculator:
         corn_params = {'A': fit_params[0], 'sigma': fit_params[1], 'B': fit_params[2]}
         
         # Bootstrap Fits
-        r0_bootstraps = []
-        if len(bootstrap_matrix) == len(rs) and len(bootstrap_matrix) > 0:
-            boot_data = np.array(bootstrap_matrix, dtype=float).T
-            for sample_vs in boot_data:
-                repaired_vs = np.array(sample_vs, dtype=float, copy=True)
+        fill_value = float(r0_val) if np.isfinite(r0_val) else np.nan
+        r0_bootstraps = self._nan_bootstrap_array()
+        if len(bootstrap_rows) == len(rs) and len(bootstrap_rows) > 0:
+            boot_data = np.stack(bootstrap_rows, axis=0).T
+            r0_bootstraps.fill(fill_value)
+            for i, sample_vs in enumerate(boot_data):
+                repaired_vs = np.array(sample_vs, copy=True)
                 invalid_points = ~np.isfinite(repaired_vs)
                 if np.any(invalid_points):
                     repaired_vs[invalid_points] = vs[invalid_points]
 
                 val, _ = perform_fit(rs, repaired_vs, sigma)
-                r0_bootstraps.append(r0_val if np.isnan(val) else val)
+                r0_bootstraps[i] = fill_value if np.isnan(val) else val
         elif np.isfinite(r0_val):
-            r0_bootstraps = [r0_val] * self.n_bootstrap
+            r0_bootstraps = np.full(self.n_bootstrap, r0_val, dtype=float)
 
         var_data = data_organizer.VariableData("r0")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, t_max=t_max, r_min=r_min, cornell_params=corn_params)
@@ -602,11 +714,22 @@ class Calculator:
                 return np.log(num / den)
             return np.nan
 
+        def calculate_log_ratio_array(w1, w2, w3, w4):
+            w1_arr = np.asarray(w1, dtype=float)
+            w2_arr = np.asarray(w2, dtype=float)
+            w3_arr = np.asarray(w3, dtype=float)
+            w4_arr = np.asarray(w4, dtype=float)
+            numer = w1_arr * w2_arr
+            denom = w3_arr * w4_arr
+            result = np.full(numer.shape, np.nan, dtype=float)
+            valid = np.isfinite(numer) & np.isfinite(denom) & (numer > 0) & (denom > 0)
+            result[valid] = np.log(numer[valid] / denom[valid])
+            return result
+
         # Main value
         chi_val = calculate_log_ratio(w_t1_r.get(), w_t_r1.get(), w_tr.get(), w_t1_r1.get())
         
         # Bootstrap values
-        chi_boots = []
         # Get bootstrap samples for all 4 loops
         b_t1_r = w_t1_r.bootstrap()
         b_t_r1 = w_t_r1.bootstrap()
@@ -617,9 +740,7 @@ class Calculator:
         if b_t1_r is None or b_t_r1 is None or b_tr is None or b_t1_r1 is None:
              raise ValueError(f"Bootstrap samples not available for one of the Wilson loops for chi({R},{T})")
 
-        for i in range(self.n_bootstrap):
-            boot_val = calculate_log_ratio(b_t1_r[i], b_t_r1[i], b_tr[i], b_t1_r1[i])
-            chi_boots.append(boot_val)
+        chi_boots = calculate_log_ratio_array(b_t1_r, b_t_r1, b_tr, b_t1_r1)
         
         var_data = data_organizer.VariableData("chi")
         var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T)
@@ -668,7 +789,7 @@ class Calculator:
              raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
 
         # 2. Gather F_chi(R) for all available R at a fixed large T.
-        rs, fs, errs, bootstrap_matrix = [], [], [], []
+        rs, fs, errs, bootstrap_rows = [], [], [], []
         
         for r_val in unique_Rs:
             try:
@@ -690,7 +811,7 @@ class Calculator:
                 fs.append(val)
                 errs.append(err)
                 if f_var.bootstrap() is not None:
-                    bootstrap_matrix.append(f_var.bootstrap())
+                    bootstrap_rows.append(np.asarray(f_var.bootstrap(), dtype=float))
             except (ValueError, KeyError):
                 continue
 
@@ -702,7 +823,9 @@ class Calculator:
             var_data.set_value(None, t_large=t_large)
             return var_data
         
-        rs, fs, errs = np.array(rs), np.array(fs), np.array(errs)
+        rs = np.asarray(rs, dtype=float)
+        fs = np.asarray(fs, dtype=float)
+        errs = np.asarray(errs, dtype=float)
 
         def get_r0_from_force(r_vals, f_vals, f_errs=None):
             """
@@ -819,11 +942,13 @@ class Calculator:
         r0_val = get_r0_from_force(rs, fs, errs)
 
         # Bootstrap
-        r0_bootstraps = []
-        if len(bootstrap_matrix) > 0 and len(bootstrap_matrix) == len(rs):
-            boot_data = np.array(bootstrap_matrix, dtype=float).T
-            for sample_fs in boot_data:
-                repaired_fs = np.array(sample_fs, dtype=float, copy=True)
+        fill_value = float(r0_val) if r0_val is not None and np.isfinite(r0_val) else np.nan
+        r0_bootstraps = self._nan_bootstrap_array()
+        if len(bootstrap_rows) > 0 and len(bootstrap_rows) == len(rs):
+            boot_data = np.stack(bootstrap_rows, axis=0).T
+            r0_bootstraps.fill(fill_value)
+            for i, sample_fs in enumerate(boot_data):
+                repaired_fs = np.array(sample_fs, copy=True)
                 invalid_points = ~np.isfinite(repaired_fs)
                 if np.any(invalid_points):
                     repaired_fs[invalid_points] = fs[invalid_points]
@@ -831,9 +956,9 @@ class Calculator:
                 # For bootstrap samples, we don't have individual errors,
                 # so we use the errors from the main data set as weights.
                 val = get_r0_from_force(rs, repaired_fs, errs)
-                r0_bootstraps.append(r0_val if np.isnan(val) else val)
+                r0_bootstraps[i] = fill_value if np.isnan(val) else val
         elif r0_val is not None and np.isfinite(r0_val):
-            r0_bootstraps = [r0_val] * self.n_bootstrap
+            r0_bootstraps = np.full(self.n_bootstrap, r0_val, dtype=float)
 
         var_data = data_organizer.VariableData("r0_chi")
         var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min)
@@ -879,23 +1004,31 @@ class Calculator:
             # P = 1 - (W(R,R)W(R/2,R/2)) / W(R,R/2)^2
             return 1.0 - (numerator / denominator)  # Attention: Is 1- necesssary?
 
+        def calculate_P_array(w_LL, w_ss, w_Ls):
+            w_ll_arr = np.asarray(w_LL, dtype=float)
+            w_ss_arr = np.asarray(w_ss, dtype=float)
+            w_ls_arr = np.asarray(w_Ls, dtype=float)
+            numerator = w_ll_arr * w_ss_arr
+            denominator = w_ls_arr ** 2
+            result = np.full(numerator.shape, np.nan, dtype=float)
+            valid = np.isfinite(numerator) & np.isfinite(denominator) & (w_ls_arr != 0)
+            result[valid] = 1.0 - (numerator[valid] / denominator[valid])
+            return result
+
         # 1. Calculate Main Value
         val_P = calculate_P(w_large.get(), w_small.get(), w_rect.get())
         
         # 2. Calculate Bootstrap Values
-        P_boots = []
         b_large = w_large.bootstrap()
         b_small = w_small.bootstrap()
         b_rect  = w_rect.bootstrap()
         
         # Ensure we have bootstraps for all components
         if b_large is not None and b_small is not None and b_rect is not None:
-            for i in range(self.n_bootstrap):
-                boot_val = calculate_P(b_large[i], b_small[i], b_rect[i])
-                P_boots.append(boot_val)
+            P_boots = calculate_P_array(b_large, b_small, b_rect)
         else:
             # If bootstraps are missing (e.g. from a fallback), fill with NaNs or empty
-            P_boots = [np.nan] * self.n_bootstrap
+            P_boots = self._nan_bootstrap_array()
 
         var_data = data_organizer.VariableData("creutz_P")
         var_data.set_value(val_P, bootstrap_samples=P_boots, R=R)
@@ -928,18 +1061,23 @@ class Calculator:
             a_fm = (hc / sigma_sqrt_MeV) * (2.0 / R) * term
             return a_fm
 
+        def calculate_a_array(p_vals):
+            p_arr = np.asarray(p_vals, dtype=float)
+            result = np.full(p_arr.shape, np.nan, dtype=float)
+            valid = np.isfinite(p_arr) & (p_arr < 1.0) & (p_arr > 0.0)
+            result[valid] = (hc / sigma_sqrt_MeV) * (2.0 / R) * np.sqrt(-np.log(1.0 - p_arr[valid]))
+            return result
+
         # Main value
         val_a = calculate_a(p_var.get())
         
         # Bootstrap
-        a_boots = []
         p_boots = p_var.bootstrap()
         
         if p_boots is not None:
-            for p_b in p_boots:
-                a_boots.append(calculate_a(p_b))
+            a_boots = calculate_a_array(p_boots)
         else:
-             a_boots = [np.nan] * self.n_bootstrap
+             a_boots = self._nan_bootstrap_array()
              
         var_data = data_organizer.VariableData("a_creutz")
         var_data.set_value(val_a, bootstrap_samples=a_boots, R=R, sigma_sqrt=sigma_sqrt_MeV)
@@ -978,18 +1116,23 @@ class Calculator:
                 return np.nan
             return calculate_volume_from_r0(lattice_extent, val_r0_on_a, r0_phys)
 
+        def calculate_volume_array(values):
+            arr = np.asarray(values, dtype=float)
+            result = np.full(arr.shape, np.nan, dtype=float)
+            valid = np.isfinite(arr) & (arr > 0)
+            result[valid] = lattice_extent * ((r0_phys / arr[valid]) ** 4)
+            return result
+
         # Main Value
         vol_val = calculate_volume(r0_on_a)
         
         # Bootstrap
-        vol_boots = []
         r0_boots = r0_var.bootstrap()
         
         if r0_boots is not None:
-             for b in r0_boots:
-                 vol_boots.append(self._calculate_volume_value(lattice_extent, b, r0_phys))
+             vol_boots = calculate_volume_array(r0_boots)
         else:
-             vol_boots = [np.nan] * self.n_bootstrap
+             vol_boots = self._nan_bootstrap_array()
              
         var_data = data_organizer.VariableData("volume_r0")
         var_data.set_value(
@@ -1025,20 +1168,25 @@ class Calculator:
                 return np.nan
             return np.log(w_T / w_T1)
 
+        def calculate_m_eff_array(w_T, w_T1):
+            w_t_arr = np.asarray(w_T, dtype=float)
+            w_t1_arr = np.asarray(w_T1, dtype=float)
+            result = np.full(w_t_arr.shape, np.nan, dtype=float)
+            valid = np.isfinite(w_t_arr) & np.isfinite(w_t1_arr) & (w_t_arr > 0) & (w_t1_arr > 0)
+            result[valid] = np.log(w_t_arr[valid] / w_t1_arr[valid])
+            return result
+
         # Main value
         m_eff_val = calculate_m_eff(w_t.get(), w_t1.get())
         
         # Bootstrap values
-        m_eff_boots = []
         b_t = w_t.bootstrap()
         b_t1 = w_t1.bootstrap()
 
         if b_t is not None and b_t1 is not None:
-            for i in range(self.n_bootstrap):
-                boot_val = calculate_m_eff(b_t[i], b_t1[i])
-                m_eff_boots.append(boot_val)
+            m_eff_boots = calculate_m_eff_array(b_t, b_t1)
         else:
-             m_eff_boots = [np.nan] * self.n_bootstrap
+             m_eff_boots = self._nan_bootstrap_array()
 
         var_data = data_organizer.VariableData("effective_mass")
         var_data.set_value(m_eff_val, bootstrap_samples=m_eff_boots, R=R, T=T)

@@ -10,10 +10,10 @@ class VariableData:
         self.name = name
         self.value = None
         self.error = None
-        self.bootstrap_samples = None
+        self.bootstrap_samples: np.ndarray | None = None
         self.parameters: Dict[str, Any] = {}
 
-    def set_value(self, value: Any, bootstrap_samples: List[Any] = None, **params):
+    def set_value(self, value: Any, bootstrap_samples: Any = None, **params):
         self.value = value
         if bootstrap_samples is not None:
             boot_arr = np.asarray(bootstrap_samples, dtype=float)
@@ -21,12 +21,13 @@ class VariableData:
                 boot_arr = boot_arr.reshape(1)
 
             finite_boots = boot_arr[np.isfinite(boot_arr)]
-            repaired_boots = boot_arr.copy()
+            repaired_boots = boot_arr
 
             # Treat isolated failed bootstrap replicas as missing values and
             # replace them with the central estimate so downstream error
             # propagation stays usable.
-            if repaired_boots.size > 0 and finite_boots.size != repaired_boots.size:
+            invalid_mask = ~np.isfinite(repaired_boots)
+            if repaired_boots.size > 0 and np.any(invalid_mask):
                 replacement = None
                 try:
                     value_float = float(value)
@@ -39,15 +40,17 @@ class VariableData:
                     replacement = float(np.mean(finite_boots))
 
                 if replacement is not None and np.isfinite(replacement):
-                    repaired_boots[~np.isfinite(repaired_boots)] = replacement
+                    repaired_boots = repaired_boots.copy()
+                    repaired_boots[invalid_mask] = replacement
 
-            self.bootstrap_samples = repaired_boots.tolist()
+            self.bootstrap_samples = repaired_boots
             repaired_finite = repaired_boots[np.isfinite(repaired_boots)]
             if repaired_finite.size > 0:
                 self.error = float(np.std(repaired_finite))
             else:
                 self.error = None
         else:
+            self.bootstrap_samples = None
             self.error = None
         self.parameters.update(params)
 
@@ -57,7 +60,7 @@ class VariableData:
     def err(self) -> Any:
         return self.error
 
-    def bootstrap(self) -> List[Any]:
+    def bootstrap(self) -> np.ndarray | None:
         return self.bootstrap_samples
 
     def __repr__(self):

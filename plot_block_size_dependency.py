@@ -242,31 +242,118 @@ def to_float(value: Any) -> float:
         raise TypeError(f"Expected a scalar numeric result, got {value!r}") from exc
 
 
+def infer_required_w_rt_pairs(
+    calc: Calculator,
+    variable: str,
+    params: dict[str, Any],
+) -> list[tuple[int, int]]:
+    available_pairs = set(calc.get_available_pairs())
+
+    def unique_existing(pairs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        seen: set[tuple[int, int]] = set()
+        result: list[tuple[int, int]] = []
+        for r_val, t_val in pairs:
+            pair = (int(r_val), int(t_val))
+            if pair in seen or pair not in available_pairs:
+                continue
+            seen.add(pair)
+            result.append(pair)
+        return result
+
+    if variable == "W_R_T":
+        return unique_existing([(int(params["R"]), int(params["T"]))])
+
+    if variable == "V_R":
+        r_val = int(params["R"])
+        t_min = int(params.get("t_min", 1))
+        t_max = params.get("t_max")
+        return unique_existing(
+            [(r_val, t_val) for t_val in calc.get_unique_Ts(R=r_val) if t_val >= t_min and (t_max is None or t_val <= int(t_max))]
+        )
+
+    if variable == "effective_mass":
+        r_val = int(params["R"])
+        t_val = int(params.get("T", 1))
+        return unique_existing([(r_val, t_val), (r_val, t_val + 1)])
+
+    if variable == "chi":
+        r_int = int(float(params["R"]) - 0.5)
+        t_int = int(float(params["T"]) - 0.5)
+        return unique_existing(
+            [
+                (r_int, t_int),
+                (r_int, t_int + 1),
+                (r_int + 1, t_int),
+                (r_int + 1, t_int + 1),
+            ]
+        )
+
+    if variable == "F_chi":
+        r_int = int(float(params["R"]) - 0.5)
+        t_large = int(params["t_large"])
+        return unique_existing(
+            [
+                (r_int, t_large),
+                (r_int, t_large + 1),
+                (r_int + 1, t_large),
+                (r_int + 1, t_large + 1),
+            ]
+        )
+
+    if variable in {"creutz_P", "a_creutz"}:
+        r_val = int(params["R"])
+        r_half = r_val // 2
+        return unique_existing([(r_val, r_val), (r_half, r_half), (r_val, r_half), (r_half, r_val)])
+
+    if variable in {"r0", "volume_r0"}:
+        t_min = int(params.get("t_min", run_evaluation.DEFAULT_R0_T_MIN))
+        t_max = params.get("t_max")
+        r_min = int(params.get("r_min", run_evaluation.DEFAULT_R0_R_MIN))
+        pairs = [
+            (r_val, t_val)
+            for r_val in calc.get_unique_Rs(r_min=r_min)
+            for t_val in calc.get_unique_Ts(R=r_val)
+            if t_val >= t_min and (t_max is None or t_val <= int(t_max))
+        ]
+        return unique_existing(pairs)
+
+    if variable == "r0_chi":
+        t_large = int(params.get("t_large", run_evaluation.DEFAULT_R0_CHI_T_LARGE))
+        r_min = int(params.get("r_min", run_evaluation.DEFAULT_R0_CHI_R_MIN))
+        unique_ls = calc.get_unique_Rs(r_min=r_min)
+        pairs: list[tuple[int, int]] = []
+        for l_val in unique_ls:
+            if (l_val + 1) not in {r for r, _ in available_pairs}:
+                continue
+            pairs.extend(
+                [
+                    (l_val, t_large),
+                    (l_val, t_large + 1),
+                    (l_val + 1, t_large),
+                    (l_val + 1, t_large + 1),
+                ]
+            )
+        return unique_existing(pairs)
+
+    return []
+
+
 def calculate_one_block_size(
     file_data,
     variable: str,
     params: dict[str, Any],
     block_size: int,
     n_bootstrap: int,
-) -> dict[str, Any]:
+) -> tuple[float, float, str]:
     try:
         calc = Calculator(file_data, n_bootstrap=n_bootstrap, step_size=block_size)
+        calc.prime_w_rt_cache(pairs=infer_required_w_rt_pairs(calc, variable, params))
         variable_data = calc.get_variable(variable, **params)
         value = to_float(variable_data.get())
         estimate_error = to_float(variable_data.err()) if variable_data.err() is not None else float("nan")
-        return {
-            "block_size": block_size,
-            "value": value,
-            "estimate_error": estimate_error,
-            "status": "ok",
-        }
+        return value, estimate_error, "ok"
     except Exception as exc:
-        return {
-            "block_size": block_size,
-            "value": float("nan"),
-            "estimate_error": float("nan"),
-            "status": str(exc),
-        }
+        return float("nan"), float("nan"), str(exc)
 
 
 def calculate_series(
@@ -275,11 +362,30 @@ def calculate_series(
     params: dict[str, Any],
     block_sizes: list[int],
     n_bootstrap: int,
-) -> list[dict[str, Any]]:
-    return [
-        calculate_one_block_size(file_data, variable, params, block_size, n_bootstrap)
-        for block_size in block_sizes
-    ]
+) -> dict[str, np.ndarray]:
+    block_size_array = np.asarray(block_sizes, dtype=int)
+    values = np.full(block_size_array.shape, np.nan, dtype=float)
+    estimate_errors = np.full(block_size_array.shape, np.nan, dtype=float)
+    statuses = np.empty(block_size_array.shape, dtype=object)
+
+    for idx, block_size in enumerate(block_size_array):
+        value, estimate_error, status = calculate_one_block_size(
+            file_data,
+            variable,
+            params,
+            int(block_size),
+            n_bootstrap,
+        )
+        values[idx] = value
+        estimate_errors[idx] = estimate_error
+        statuses[idx] = status
+
+    return {
+        "block_size": block_size_array,
+        "value": values,
+        "estimate_error": estimate_errors,
+        "status": statuses,
+    }
 
 
 def sanitize_filename(text: str) -> str:
@@ -293,7 +399,17 @@ def format_variable_label(variable: str, params: dict[str, Any]) -> str:
     return f"{variable}({param_text})"
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def iter_rows(results: dict[str, np.ndarray]):
+    for idx in range(len(results["block_size"])):
+        yield {
+            "block_size": int(results["block_size"][idx]),
+            "value": float(results["value"][idx]),
+            "estimate_error": float(results["estimate_error"][idx]),
+            "status": str(results["status"][idx]),
+        }
+
+
+def write_csv(path: Path, results: dict[str, np.ndarray]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -301,25 +417,25 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             fieldnames=["block_size", "value", "estimate_error", "status"],
         )
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(iter_rows(results))
 
 
 def write_plot(
     path: Path,
-    rows: list[dict[str, Any]],
+    results: dict[str, np.ndarray],
     variable_label: str,
     run_label: str,
     recommended_block_size: int | None,
 ) -> None:
-    valid_rows = [row for row in rows if np.isfinite(row["estimate_error"])]
-    if not valid_rows:
+    valid_mask = np.isfinite(results["estimate_error"])
+    if not np.any(valid_mask):
         raise RuntimeError("All calculations failed; no finite error estimates available to plot.")
 
-    x = np.array([row["block_size"] for row in valid_rows], dtype=float)
-    y = np.array([row["estimate_error"] for row in valid_rows], dtype=float)
+    x = results["block_size"][valid_mask].astype(float, copy=False)
+    y = results["estimate_error"][valid_mask]
 
     fig, ax = plt.subplots(figsize=(8.5, 5.0))
-    ax.plot(x, y, "o-", linewidth=1.4, markersize=4.5)
+    ax.plot(x, y, "o", markersize=1.5, alpha=0.6)
 
     if recommended_block_size is not None:
         ax.axvline(
@@ -342,12 +458,16 @@ def write_plot(
     plt.close(fig)
 
 
-def print_table(rows: list[dict[str, Any]]) -> None:
+def print_table(results: dict[str, np.ndarray]) -> None:
     print("block_size\tvalue\testimate_error\tstatus")
-    for row in rows:
-        value = "nan" if not np.isfinite(row["value"]) else f"{row['value']:.10g}"
-        estimate_error = "nan" if not np.isfinite(row["estimate_error"]) else f"{row['estimate_error']:.10g}"
-        print(f"{row['block_size']}\t{value}\t{estimate_error}\t{row['status']}")
+    for idx in range(len(results["block_size"])):
+        value_float = float(results["value"][idx])
+        estimate_error_float = float(results["estimate_error"][idx])
+        value = "nan" if not np.isfinite(value_float) else f"{value_float:.10g}"
+        estimate_error = "nan" if not np.isfinite(estimate_error_float) else f"{estimate_error_float:.10g}"
+        print(
+            f"{int(results['block_size'][idx])}\t{value}\t{estimate_error}\t{results['status'][idx]}"
+        )
 
 
 def build_output_path(
