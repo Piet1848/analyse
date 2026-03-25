@@ -24,6 +24,8 @@ CALCULATED_FIELDS = {
     "r0_err": float,
     "a": float,
     "a_err": float,
+    "length": float,
+    "length_err": float,
     "volume_r0": float,
     "volume_r0_err": float,
     "tau_int": float,

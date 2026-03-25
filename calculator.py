@@ -1150,6 +1150,52 @@ class Calculator:
     def _calculate_volume_value(self, lattice_extent, val_r0_on_a, r0_phys):
         return calculate_volume_from_r0(lattice_extent, val_r0_on_a, r0_phys)
     
+    @register("length")
+    def _calc_length(
+        self,
+        L0: int,
+        r0_phys: float = 0.5,
+        **r0_kwargs,
+    ) -> data_organizer.VariableData:
+        try:
+            r0_var = self.get_variable("r0", **r0_kwargs)
+        except (ValueError, KeyError) as e:
+             raise ValueError(f"Could not calculate r0 for length: {e}")
+
+        r0_on_a = r0_var.get()
+
+        def calculate_length(val_r0_on_a):
+            if val_r0_on_a is None or np.isnan(val_r0_on_a) or val_r0_on_a <= 0:
+                return np.nan
+            return L0 * (r0_phys / val_r0_on_a)
+
+        def calculate_length_array(values):
+            arr = np.asarray(values, dtype=float)
+            result = np.full(arr.shape, np.nan, dtype=float)
+            valid = np.isfinite(arr) & (arr > 0)
+            result[valid] = L0 * (r0_phys / arr[valid])
+            return result
+
+        # Main Value
+        len_val = calculate_length(r0_on_a)
+        
+        # Bootstrap
+        r0_boots = r0_var.bootstrap()
+        
+        if r0_boots is not None:
+             len_boots = calculate_length_array(r0_boots)
+        else:
+             len_boots = self._nan_bootstrap_array()
+             
+        var_data = data_organizer.VariableData("length")
+        var_data.set_value(
+            len_val,
+            bootstrap_samples=len_boots,
+            L0=L0,
+            r0_phys=r0_phys,
+        )
+        return var_data
+
     @register("effective_mass")
     def _calc_effective_mass(self, R: int, T: int = 1) -> data_organizer.VariableData:
         """

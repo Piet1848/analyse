@@ -18,7 +18,7 @@ from calculator import Calculator, make_key
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.4"
+CALC_VERSION = "4.5"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 DEFAULT_N_BOOTSTRAP = 200
@@ -602,9 +602,11 @@ def evaluate_run(
     except Exception:
         pass
 
-    vprint("Calculating volume_r0...")
+    vprint("Calculating volume_r0 and length...")
     volume_r0 = None
     volume_r0_err = None
+    length = None
+    length_err = None
     try:
         yaml_path = input_dir / "input.yaml"
         metro, _ = load_params(str(yaml_path))
@@ -623,6 +625,18 @@ def evaluate_run(
             if vol_var.get() is not None and not np.isnan(vol_var.get()):
                 volume_r0 = vol_var.get()
                 volume_r0_err = vol_var.err()
+
+            len_var = calc.get_variable(
+                "length",
+                L0=metro.L0,
+                t_min=DEFAULT_R0_T_MIN,
+                t_max=DEFAULT_R0_T_MAX,
+                target_force=sommer_target,
+                r_min=DEFAULT_R0_R_MIN,
+            )
+            if len_var.get() is not None and not np.isnan(len_var.get()):
+                length = len_var.get()
+                length_err = len_var.err()
     except Exception:
         pass
 
@@ -659,6 +673,8 @@ def evaluate_run(
         "r0_err": float(r0_err) if r0_err is not None else None,
         "volume_r0": float(volume_r0) if volume_r0 is not None else None,
         "volume_r0_err": float(volume_r0_err) if volume_r0_err is not None else None,
+        "length": float(length) if length is not None else None,
+        "length_err": float(length_err) if length_err is not None else None,
         "a": float(lattice_spacing) if lattice_spacing is not None else None,
         "a_err": float(a_err) if a_err is not None else None,
         "tau_int": float(tau),
