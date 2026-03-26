@@ -62,7 +62,9 @@ class Calculator:
         # Bootstrap configuration
         self.n_bootstrap = n_bootstrap
         self.seed = seed
-        self.step_size = step_size
+        self.step_size = int(step_size)
+        if self.step_size < 1:
+            raise ValueError("step_size must be at least 1")
 
         # Wilson-loop lookup is built lazily. For compact combined data we can reuse
         # the pre-grouped arrays directly and avoid rebuilding the cache.
@@ -178,35 +180,61 @@ class Calculator:
             return sorted({t for _, t in pairs})
         return sorted({t for r, t in pairs if r == R})
 
+    def _get_block_layout(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Partition the ordered Monte Carlo history into contiguous blocks.
+        `step_size` is interpreted as the bootstrap block length, not as a
+        thinning stride.
+        """
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive for bootstrap resampling")
+
+        block_starts = np.arange(0, n_samples, self.step_size, dtype=np.int64)
+        block_lengths = np.minimum(self.step_size, n_samples - block_starts).astype(np.int64, copy=False)
+        return block_starts, block_lengths
+
     def _get_bootstrap_indices_seq(self, n_samples: int):
         """
-        Generates indices for one bootstrap sample at a time.
-        Reduces the sample pool by step_size to mitigate autocorrelation.
-        Yields an array of indices.
+        Generate one block-bootstrap replica at a time.
+        Each replica resamples contiguous blocks with replacement, so samples
+        between block boundaries are reused rather than discarded.
         """
-        n_effective = n_samples // self.step_size
-        if n_effective <= 0:
-            raise ValueError(
-                f"step_size={self.step_size} leaves no effective samples for n_samples={n_samples}"
-            )
+        block_starts, block_lengths = self._get_block_layout(n_samples)
+        n_blocks = len(block_starts)
+        block_indices = [
+            np.arange(start, start + length, dtype=np.int64)
+            for start, length in zip(block_starts, block_lengths, strict=False)
+        ]
         rng = np.random.default_rng(self.seed)
-        
+
         for _ in range(self.n_bootstrap):
-            reduced_indices = rng.integers(0, n_effective, size=n_effective)
-            yield reduced_indices * self.step_size
+            sampled_blocks = rng.integers(0, n_blocks, size=n_blocks)
+            total_length = int(block_lengths[sampled_blocks].sum())
+            indices = np.empty(total_length, dtype=np.int64)
+            offset = 0
+            for block_idx in sampled_blocks:
+                current_block = block_indices[int(block_idx)]
+                next_offset = offset + len(current_block)
+                indices[offset:next_offset] = current_block
+                offset = next_offset
+            yield indices
 
     def _nan_bootstrap_array(self) -> np.ndarray:
         return np.full(self.n_bootstrap, np.nan, dtype=float)
 
-    def _build_compact_reduced_matrix(
+    def _build_compact_block_sums(
         self,
         pairs: list[tuple[int, int]],
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         self._ensure_w_rt_cache()
         if self._w_rt_cache is None:
             raise ValueError("Compact Wilson cache is unavailable.")
         if not pairs:
-            return np.array([], dtype=float), np.empty((0, 0), dtype=np.float32)
+            return (
+                np.array([], dtype=float),
+                np.empty((0, 0), dtype=np.float64),
+                np.array([], dtype=np.float64),
+            )
 
         first_pair = pairs[0]
         first_values = np.asarray(self._w_rt_cache[first_pair], dtype=np.float32)
@@ -214,14 +242,8 @@ class Calculator:
         if n_samples <= 0:
             raise ValueError("No Wilson-loop samples available for bootstrap priming.")
 
-        n_effective = n_samples // self.step_size
-        if n_effective <= 0:
-            raise ValueError(
-                f"step_size={self.step_size} leaves no effective samples for n_samples={n_samples}"
-            )
-
-        stop = n_effective * self.step_size
-        reduced_matrix = np.empty((n_effective, len(pairs)), dtype=np.float32)
+        block_starts, block_lengths = self._get_block_layout(n_samples)
+        block_sum_matrix = np.empty((len(block_starts), len(pairs)), dtype=np.float64)
         mean_values = np.empty(len(pairs), dtype=float)
 
         for idx, pair in enumerate(pairs):
@@ -232,9 +254,9 @@ class Calculator:
             if len(series_arr) != n_samples:
                 raise ValueError("Compact Wilson data must have a consistent number of samples per pair.")
             mean_values[idx] = float(np.mean(series_arr))
-            reduced_matrix[:, idx] = series_arr[:stop:self.step_size]
+            block_sum_matrix[:, idx] = np.add.reduceat(series_arr.astype(np.float64, copy=False), block_starts)
 
-        return mean_values, reduced_matrix
+        return mean_values, block_sum_matrix, block_lengths.astype(np.float64, copy=False)
 
     def prime_w_rt_cache(
         self,
@@ -273,20 +295,20 @@ class Calculator:
         if not pending_pairs:
             return
 
-        mean_values, reduced_matrix = self._build_compact_reduced_matrix(pending_pairs)
-        n_effective = reduced_matrix.shape[0]
+        mean_values, block_sum_matrix, block_lengths = self._build_compact_block_sums(pending_pairs)
+        n_blocks = block_sum_matrix.shape[0]
         bootstrap_matrix = np.empty((self.n_bootstrap, len(pending_pairs)), dtype=np.float32)
         rng = np.random.default_rng(self.seed)
 
         for start in range(0, self.n_bootstrap, bootstrap_chunk_size):
             current_size = min(bootstrap_chunk_size, self.n_bootstrap - start)
-            reduced_indices = np.empty((current_size, n_effective), dtype=np.int64)
-            for row in range(current_size):
-                reduced_indices[row] = rng.integers(0, n_effective, size=n_effective)
-
-            counts = np.zeros((current_size, n_effective), dtype=np.float32)
-            np.add.at(counts, (np.arange(current_size)[:, None], reduced_indices), np.float32(1.0))
-            bootstrap_matrix[start:start + current_size] = (counts @ reduced_matrix) / np.float32(n_effective)
+            sampled_blocks = rng.integers(0, n_blocks, size=(current_size, n_blocks))
+            counts = np.zeros((current_size, n_blocks), dtype=np.float64)
+            np.add.at(counts, (np.arange(current_size)[:, None], sampled_blocks), 1.0)
+            total_lengths = counts @ block_lengths
+            bootstrap_matrix[start:start + current_size] = (
+                (counts @ block_sum_matrix) / total_lengths[:, None]
+            ).astype(np.float32, copy=False)
 
         for idx, pair in enumerate(pending_pairs):
             cache_key = make_key("W_R_T", {"R": pair[0], "T": pair[1]})

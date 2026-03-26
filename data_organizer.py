@@ -207,16 +207,22 @@ class FileData:
             step_to_indices[s].append(idx)
 
         rng = np.random.default_rng(seed)
+        block_size = int(block_size)
+        if block_size < 1:
+            raise ValueError("block_size must be at least 1")
+
+        block_slices = [
+            unique_steps[start_idx:start_idx + block_size]
+            for start_idx in range(0, n_steps, block_size)
+        ]
+        n_blocks = len(block_slices)
 
         for _ in range(n_bootstrap):
-            n_blocks = int(np.ceil(n_steps / block_size))
-            max_start = max(1, n_steps - block_size + 1)
-            starts = rng.integers(0, max_start, size=n_blocks)
+            sampled_blocks = rng.integers(0, n_blocks, size=n_blocks)
 
             selected_row_indices = []
-            for start_idx in starts:
-                end_idx = min(start_idx + block_size, n_steps)
-                block_steps = unique_steps[start_idx:end_idx]
+            for block_idx in sampled_blocks:
+                block_steps = block_slices[int(block_idx)]
                 for s in block_steps:
                     selected_row_indices.extend(step_to_indices[s])
 
