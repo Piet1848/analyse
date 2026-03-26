@@ -17,15 +17,16 @@ from calculator import Calculator, make_key
 # --- CONFIGURATION ---
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
-THERMALIZATION_STEPS = 500
-CALC_VERSION = "4.5"
+THERMALIZATION_STEPS = 1500
+CALC_VERSION = "4.6"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 DEFAULT_N_BOOTSTRAP = 200
+DEFAULT_BLOCK_SIZE = 2500
 DEFAULT_SOMMER_TARGET = 1.65
 DEFAULT_V_R_T_MIN = 1
 DEFAULT_V_R_T_MAX = None
-DEFAULT_R0_T_MIN = 5
+DEFAULT_R0_T_MIN = 8
 DEFAULT_R0_T_MAX = None
 DEFAULT_R0_R_MIN = 2
 DEFAULT_R0_CHI_T_LARGE = 4
@@ -472,8 +473,9 @@ def evaluate_run(
         except KeyError:
             tau = 0.5
 
-    vprint(f"Setting up Calculator with block_size={max(1, int(np.ceil(2 * tau)))}...")
     block_size = max(1, int(np.ceil(2 * tau)))
+    block_size = max(block_size, DEFAULT_BLOCK_SIZE)
+    vprint(f"Setting up Calculator with block_size={block_size}...")
     calc = Calculator(file_data, n_bootstrap=DEFAULT_N_BOOTSTRAP, step_size=block_size)
 
     vprint("Extracting unique R and T...")
