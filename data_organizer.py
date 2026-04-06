@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from collections import defaultdict
 import numpy as np
+import pandas as pd
 
 
 class VariableData:
@@ -115,24 +116,21 @@ class FileData:
             raise FileNotFoundError(f"{self.path} not found")
 
         try:
-            data = np.genfromtxt(
+            # pandas.read_csv is highly optimized for memory and speed
+            df = pd.read_csv(
                 self.path,
                 delimiter=',',
-                names=True,
                 encoding='utf-8-sig',
-                ndmin=1,
-                dtype=np.float32,
+                dtype=np.float32,     # Force C-level float32 immediately
+                skipinitialspace=True,
+                on_bad_lines='skip'   # Equivalent to handling IndexError
             )
-        except IndexError:
-            data = np.array([], dtype=np.float32)
-
-        if not hasattr(data, 'dtype') or data.dtype.names is None:
+        except (pd.errors.EmptyDataError, ValueError):
             return self
 
         self.observables = []
-        for name in data.dtype.names:
-            self.observables.append(ObservableData(name, data[name]))
-
+        for name in df.columns:
+            self.observables.append(ObservableData(name, df[name].values))
         return self
 
     def align_lengths(self) -> int:
@@ -306,6 +304,7 @@ def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData 
         obs_L = np.asarray(fd.get("L").values)
         obs_T = np.asarray(fd.get("T").values)
     except ValueError:
+        print(f"Warning: Required observables missing in {path}, skipping W_temp loading.")
         return None
 
     step_obs = next((o for o in fd.observables if o.name in ["# step", "step"]), None)

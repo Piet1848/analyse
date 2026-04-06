@@ -424,10 +424,12 @@ def _load_combined_w_temp(
     if worker_count > 1:
         vprint(f"Loading up to {worker_count} W_temp file(s) in parallel...")
     vprint("Combining W_temp data incrementally...")
+    vprint(f"Total runs in group: {len(run_paths)}")
     combined = do.combine_compact_wilson_data(
         iter_compact_files(),
         source_name="W_temp_combined",
     )
+    vprint("Combination complete.")
 
     metadata = {
         "n_runs_in_group": len(run_paths),
