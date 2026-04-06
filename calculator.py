@@ -324,7 +324,7 @@ class Calculator:
     ### Variable implementations ###
 
     @register("W_R_T")
-    def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData:
+    def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData: #marker wrt
         key = (int(R), int(T))
         self._ensure_w_rt_cache()
         selected_values = self._w_rt_cache.get(key) if self._w_rt_cache is not None else None
@@ -339,15 +339,22 @@ class Calculator:
             raise ValueError(f"No data found for R={R}, T={T}")
 
         var_data = data_organizer.VariableData("W_R_T")
-        
-        mean_val = np.mean(selected_values)
 
-        # 3. Bootstrap Calculation
-        bootstrap_means = np.empty(self.n_bootstrap, dtype=float)
+        mean_val = float(np.mean(selected_values, dtype=np.float64))
 
-        for i, indices in enumerate(self._get_bootstrap_indices_seq(n_samples)):
-            # Calculates one sample at a time, no giant memory allocation
-            bootstrap_means[i] = np.mean(selected_values[indices])
+        block_starts, block_lengths = self._get_block_layout(n_samples)
+        n_blocks = len(block_starts)
+        block_sums = np.add.reduceat(
+            selected_values.astype(np.float64, copy=False),
+            block_starts,
+        )
+
+        rng = np.random.default_rng(self.seed)
+        sampled_blocks = rng.integers(0, n_blocks, size=(self.n_bootstrap, n_blocks))
+        bootstrap_means = (
+            block_sums[sampled_blocks].sum(axis=1) /
+            block_lengths[sampled_blocks].sum(axis=1)
+        ).astype(np.float32, copy=False)
 
         var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T)
         return var_data

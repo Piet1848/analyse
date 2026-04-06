@@ -158,7 +158,8 @@ class FileData:
         if len(steps) == 0:
             return
 
-        monotonic = len(steps) < 2 or np.all(steps[1:] >= steps[:-1])
+        monotonic = np.all(steps[1:] >= steps[:-1])
+
         if monotonic:
             start = int(np.searchsorted(steps, min_step, side='left'))
             if start <= 0:
@@ -171,12 +172,8 @@ class FileData:
                 obs.slice_from(start)
             return
 
-        keep_mask = steps >= min_step
-        if np.all(keep_mask):
-            return
-        keep_indices = np.nonzero(keep_mask)[0]
-        for obs in self.observables:
-            obs.slice(keep_indices)
+        print(f"Warning: Non-monotonic steps in {self.path}, Stopping thermalization removal.")
+        return
 
     def get(self, name: str) -> ObservableData:
         for obs in self.observables:
@@ -291,13 +288,13 @@ def _infer_rows_per_configuration(
     return int(len(obs_L))
 
 
-def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData | None:
+def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData | None: #marker4
     fd = FileData(path)
     fd.read_file()
     fd.align_lengths()
     if min_step > 0:
         fd.remove_thermalization(min_step)
-    fd.align_lengths()
+    fd.align_lengths() # should be redundant but ensures consistency after thermalization removal
 
     if not fd.observables:
         return None
@@ -316,10 +313,12 @@ def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData 
     rows_per_cfg = _infer_rows_per_configuration(steps, obs_L, obs_T)
 
     if rows_per_cfg <= 0 or len(obs_w) % rows_per_cfg != 0:
+        print(f"Warning: Unable to determine rows per configuration for {path}, skipping W_temp loading.")
         return None
 
     pair_order = [(int(l), int(t)) for l, t in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
     if len(set(pair_order)) != len(pair_order):
+        print(f"Warning: Duplicate pairs found in {path}, skipping W_temp loading.")
         return None
 
     w_matrix = obs_w.reshape(-1, rows_per_cfg)
