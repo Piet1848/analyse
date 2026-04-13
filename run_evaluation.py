@@ -18,7 +18,7 @@ from calculator import Calculator, make_key
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 1500
-CALC_VERSION = "4.6"
+CALC_VERSION = "4.7"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 DEFAULT_N_BOOTSTRAP = 200
@@ -40,6 +40,31 @@ _GROUP_INDEX_CACHE: Dict[str, List[str]] | None = None
 _GROUP_INDEX_ROOT: Path | None = None
 
 
+def _default_analysis_options() -> Dict[str, Any]:
+    return {
+        "r0_t_min": DEFAULT_R0_T_MIN,
+    }
+
+
+def _resolve_analysis_options(analysis_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    resolved = _default_analysis_options()
+    if analysis_options:
+        resolved.update(analysis_options)
+
+    resolved["r0_t_min"] = int(resolved["r0_t_min"])
+    return resolved
+
+
+def _cache_id_for_analysis(base_id: str, analysis_options: Dict[str, Any]) -> str:
+    defaults = _default_analysis_options()
+    if analysis_options == defaults:
+        return base_id
+
+    payload = json.dumps(analysis_options, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.md5(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{base_id}__cfg_{digest}"
+
+
 def _range_summary(values: List[float | int]) -> Dict[str, Any]:
     if not values:
         return {"min": None, "max": None, "count": 0}
@@ -56,6 +81,7 @@ def _build_analysis_settings(
     tau: float,
     block_size: int,
     sommer_target: float,
+    r0_t_min: int,
 ) -> Dict[str, Any]:
     unique_R_set = set(unique_Rs)
     r0_fit_Rs = [int(r) for r in unique_Rs if int(r) >= DEFAULT_R0_R_MIN]
@@ -76,7 +102,7 @@ def _build_analysis_settings(
             "r_max": max(unique_Rs) if unique_Rs else None,
         },
         "r0": {
-            "t_min": DEFAULT_R0_T_MIN,
+            "t_min": int(r0_t_min),
             "t_max": DEFAULT_R0_T_MAX,
             "r_min": DEFAULT_R0_R_MIN,
             "r_max": max(r0_fit_Rs) if r0_fit_Rs else None,
@@ -456,11 +482,15 @@ def evaluate_run(
     verbose: bool = False,
     prefix: str = "",
     calc_workers: Optional[int] = None,
+    analysis_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     def vprint(msg: str):
         if verbose:
             import sys
             print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
+    analysis_options = _resolve_analysis_options(analysis_options)
+    r0_t_min = analysis_options["r0_t_min"]
 
     if not file_data.observables and not getattr(file_data, "wilson_by_pair", None):
         return {"error": "No combined W_temp observables available"}
@@ -490,6 +520,7 @@ def evaluate_run(
         tau=tau,
         block_size=block_size,
         sommer_target=sommer_target,
+        r0_t_min=r0_t_min,
     )
 
     all_w, all_w_err, w_cache = _calculate_w_rt_variables(
@@ -525,14 +556,14 @@ def evaluate_run(
             r0_fit_Rs,
             calc_workers,
             seed_cache=dict(calc.variables),
-            extra_params={"t_min": DEFAULT_R0_T_MIN, "t_max": DEFAULT_R0_T_MAX},
+            extra_params={"t_min": r0_t_min, "t_max": DEFAULT_R0_T_MAX},
             verbose=verbose,
             prefix=prefix,
         )
         calc.variables.update(r0_fit_cache)
         r0_var = calc.get_variable(
             "r0",
-            t_min=DEFAULT_R0_T_MIN,
+            t_min=r0_t_min,
             t_max=DEFAULT_R0_T_MAX,
             target_force=sommer_target,
             r_min=DEFAULT_R0_R_MIN,
@@ -551,6 +582,28 @@ def evaluate_run(
     if r0 is not None:
         lattice_spacing = 0.5 / r0
         a_err = (0.5 / (r0**2)) * r0_err if r0_err else 0.0
+
+    epsilon_bar = None
+    epsilon_bar_err = None
+    metro = None
+    try:
+        yaml_path = input_dir / "input.yaml"
+        metro, _ = load_params(str(yaml_path))
+        if r0 is not None:
+            epsilon_bar_var = calc.get_variable(
+                "epsilon_bar",
+                epsilon1=metro.epsilon1,
+                beta=metro.beta,
+                t_min=r0_t_min,
+                t_max=DEFAULT_R0_T_MAX,
+                target_force=sommer_target,
+                r_min=DEFAULT_R0_R_MIN,
+            )
+            if epsilon_bar_var.get() is not None and not np.isnan(epsilon_bar_var.get()):
+                epsilon_bar = epsilon_bar_var.get()
+                epsilon_bar_err = epsilon_bar_var.err()
+    except Exception:
+        pass
 
     vprint("Calculating chi and F_chi...")
     all_chi = {}
@@ -612,16 +665,14 @@ def evaluate_run(
     length = None
     length_err = None
     try:
-        yaml_path = input_dir / "input.yaml"
-        metro, _ = load_params(str(yaml_path))
-        if r0 is not None:
+        if metro is not None and r0 is not None:
             vol_var = calc.get_variable(
                 "volume_r0",
                 L0=metro.L0,
                 L1=metro.L1,
                 L2=metro.L2,
                 L3=metro.L3,
-                t_min=DEFAULT_R0_T_MIN,
+                t_min=r0_t_min,
                 t_max=DEFAULT_R0_T_MAX,
                 target_force=sommer_target,
                 r_min=DEFAULT_R0_R_MIN,
@@ -633,7 +684,7 @@ def evaluate_run(
             len_var = calc.get_variable(
                 "length",
                 L0=metro.L0,
-                t_min=DEFAULT_R0_T_MIN,
+                t_min=r0_t_min,
                 t_max=DEFAULT_R0_T_MAX,
                 target_force=sommer_target,
                 r_min=DEFAULT_R0_R_MIN,
@@ -681,6 +732,8 @@ def evaluate_run(
         "length_err": float(length_err) if length_err is not None else None,
         "a": float(lattice_spacing) if lattice_spacing is not None else None,
         "a_err": float(a_err) if a_err is not None else None,
+        "epsilon_bar": float(epsilon_bar) if epsilon_bar is not None else None,
+        "epsilon_bar_err": float(epsilon_bar_err) if epsilon_bar_err is not None else None,
         "tau_int": float(tau),
         "block_size": int(block_size),
         "analysis_settings": analysis_settings,
@@ -713,9 +766,11 @@ def get_or_calculate(
     calc_workers: Optional[int] = None,
     load_workers: int = 1,
     combine_equivalent_runs: bool = True,
+    analysis_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     path = os.path.abspath(path)
     run_id = get_run_id(path)
+    analysis_options = _resolve_analysis_options(analysis_options)
 
     prefix = f"[{os.path.basename(path)}]"
     def vprint(msg: str):
@@ -727,10 +782,11 @@ def get_or_calculate(
         return {"error": "Directory not found"}
 
     if combine_equivalent_runs:
-        analysis_id, grouped_paths = _discover_equivalent_runs(path)
+        base_analysis_id, grouped_paths = _discover_equivalent_runs(path)
     else:
-        analysis_id = f"run_{run_id}"
+        base_analysis_id = f"run_{run_id}"
         grouped_paths = [path]
+    analysis_id = _cache_id_for_analysis(base_analysis_id, analysis_options)
 
     if not force_recalc:
         cached = load_cached_result(analysis_id)
@@ -758,6 +814,7 @@ def get_or_calculate(
             verbose=verbose,
             prefix=prefix,
             calc_workers=calc_workers,
+            analysis_options=analysis_options,
         )
         result["path"] = path
         result["run_id"] = run_id
@@ -765,7 +822,10 @@ def get_or_calculate(
         result["aggregation"] = aggregation
 
         if "error" not in result:
-            save_result(analysis_id, result)
+            try:
+                save_result(analysis_id, result)
+            except OSError as exc:
+                vprint(f"Warning: Could not save cache: {exc}")
         return result
     except Exception as e:
         return {"error": str(e)}

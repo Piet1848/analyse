@@ -1176,6 +1176,73 @@ class Calculator:
         )
         return var_data
 
+    @register("epsilon_bar")
+    def _calc_epsilon_bar(
+        self,
+        epsilon1: float,
+        beta: float,
+        **r0_kwargs,
+    ) -> data_organizer.VariableData:
+        if epsilon1 == 0:
+            zero_boots = np.zeros(self.n_bootstrap, dtype=float)
+            var_data = data_organizer.VariableData("epsilon_bar")
+            var_data.set_value(
+                0.0,
+                bootstrap_samples=zero_boots,
+                epsilon1=epsilon1,
+                beta=beta,
+                **r0_kwargs,
+            )
+            return var_data
+
+        try:
+            r0_var = self.get_variable("r0", **r0_kwargs)
+        except (ValueError, KeyError) as e:
+             raise ValueError(f"Could not calculate r0 for epsilon_bar: {e}")
+
+        def calculate_epsilon_bar(val_r0_on_a):
+            if beta == 0 or val_r0_on_a is None or np.isnan(val_r0_on_a):
+                return np.nan
+            # Here r0 denotes the fitted Sommer scale r0/a, so
+            # epsilon_bar = epsilon1 / beta * (r0 / a)^2 = epsilon1 / beta * (r0/a)^2.
+            return (epsilon1 / beta) * (val_r0_on_a ** 2)
+
+        def calculate_epsilon_bar_array(values):
+            arr = np.asarray(values, dtype=float)
+            result = np.full(arr.shape, np.nan, dtype=float)
+            if beta == 0:
+                return result
+            valid = np.isfinite(arr)
+            result[valid] = (epsilon1 / beta) * (arr[valid] ** 2)
+            return result
+
+        eps_bar_val = calculate_epsilon_bar(r0_var.get())
+
+        r0_boots = r0_var.bootstrap()
+        if r0_boots is not None:
+            eps_bar_boots = calculate_epsilon_bar_array(r0_boots)
+        else:
+            eps_bar_boots = self._nan_bootstrap_array()
+
+        var_data = data_organizer.VariableData("epsilon_bar")
+        var_data.set_value(
+            eps_bar_val,
+            bootstrap_samples=eps_bar_boots,
+            epsilon1=epsilon1,
+            beta=beta,
+            **r0_kwargs,
+        )
+        return var_data
+
+    @register("eps_bar")
+    def _calc_eps_bar(
+        self,
+        epsilon1: float,
+        beta: float,
+        **r0_kwargs,
+    ) -> data_organizer.VariableData:
+        return self._calc_epsilon_bar(epsilon1=epsilon1, beta=beta, **r0_kwargs)
+
     def _calculate_volume_value(self, lattice_extent, val_r0_on_a, r0_phys):
         return calculate_volume_from_r0(lattice_extent, val_r0_on_a, r0_phys)
     
