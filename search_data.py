@@ -284,7 +284,8 @@ def _build_row(
                 vals.append(_extract_calculated_value(name, calc_data))
             else:
                 obj = metro if block == "metro" else gauge
-                vals.append(getattr(obj, name))
+                canonical_name = FIELD_ALIASES.get(name, name)
+                vals.append(getattr(obj, canonical_name))
         return row_label, vals
     except Exception:
         row_label = row_spec.row_label
