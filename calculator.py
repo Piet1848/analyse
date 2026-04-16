@@ -22,6 +22,129 @@ def exponential_ansatz(t, C, V):
 def cornell_potential_ansatz(r, A, sigma, B):
     return A + sigma * r - B / r
 
+
+def fit_r0_from_potential_data(
+    rs,
+    vs,
+    errs=None,
+    bootstrap_matrix=None,
+    target_force: float = 1.65,
+    n_bootstrap: int | None = None,
+):
+    """
+    Fit the Cornell potential to preselected V(R) points and derive r0/a.
+
+    Parameters
+    ----------
+    rs, vs:
+        One-dimensional arrays with matching lengths.
+    errs:
+        Optional per-point uncertainties for weighted fitting.
+    bootstrap_matrix:
+        Optional array with shape (n_points, n_bootstrap). Each column is one
+        bootstrap replica of the selected potential points.
+    target_force:
+        Sommer target used in the definition r0^2 * F(r0) = target_force.
+    n_bootstrap:
+        Number of bootstrap replicas to return when bootstrap_matrix is not
+        provided. Defaults to the second dimension of bootstrap_matrix or 0.
+    """
+    rs_arr = np.asarray(rs, dtype=float)
+    vs_arr = np.asarray(vs, dtype=float)
+
+    if rs_arr.ndim != 1 or vs_arr.ndim != 1 or len(rs_arr) != len(vs_arr):
+        raise ValueError("rs and vs must be one-dimensional arrays with matching lengths")
+
+    if errs is None:
+        sigma_arr = np.ones(len(rs_arr), dtype=float)
+    else:
+        sigma_arr = np.asarray(errs, dtype=float)
+        if sigma_arr.ndim != 1 or len(sigma_arr) != len(rs_arr):
+            raise ValueError("errs must be a one-dimensional array with the same length as rs")
+
+    boot_arr = None
+    if bootstrap_matrix is not None:
+        boot_arr = np.asarray(bootstrap_matrix, dtype=float)
+        if boot_arr.ndim != 2 or boot_arr.shape[0] != len(rs_arr):
+            raise ValueError(
+                "bootstrap_matrix must have shape (n_points, n_bootstrap) matching rs"
+            )
+        if n_bootstrap is None:
+            n_bootstrap = int(boot_arr.shape[1])
+
+    if n_bootstrap is None:
+        n_bootstrap = 0
+
+    valid_mask = np.isfinite(rs_arr) & np.isfinite(vs_arr) & np.isfinite(sigma_arr)
+    fit_rs = rs_arr[valid_mask]
+    fit_vs = vs_arr[valid_mask]
+    fit_sigma = sigma_arr[valid_mask]
+
+    if boot_arr is not None:
+        boot_arr = boot_arr[valid_mask, :]
+
+    if len(fit_rs) < 3:
+        raise ValueError(f"Not enough valid V(R) points to fit r0 (found {len(fit_rs)}).")
+
+    if np.any(fit_sigma <= 0):
+        mean_err = np.mean(fit_sigma[fit_sigma > 0]) if np.any(fit_sigma > 0) else 1.0
+        fit_sigma = fit_sigma.copy()
+        fit_sigma[fit_sigma <= 0] = mean_err
+
+    def perform_fit(r_vals, v_vals, sigma_vals=None):
+        try:
+            sigma_guess = (
+                (v_vals[-1] - v_vals[0]) / (r_vals[-1] - r_vals[0])
+                if len(r_vals) > 1 and r_vals[-1] != r_vals[0]
+                else 0.1
+            )
+            B_guess = 0.26
+            A_guess = v_vals[0] - sigma_guess * r_vals[0] + (B_guess / r_vals[0])
+            popt, _ = curve_fit(
+                cornell_potential_ansatz,
+                r_vals,
+                v_vals,
+                p0=[A_guess, max(1e-4, sigma_guess), B_guess],
+                sigma=sigma_vals,
+                absolute_sigma=(sigma_vals is not None),
+                maxfev=5000,
+            )
+            A, sig, B = popt
+            numerator = target_force - B
+            if numerator < 0 or sig <= 0:
+                return np.nan, (A, sig, B)
+            return np.sqrt(numerator / sig), (A, sig, B)
+        except (RuntimeError, ValueError, TypeError):
+            return np.nan, (0.0, 0.0, 0.0)
+
+    r0_val, fit_params = perform_fit(fit_rs, fit_vs, fit_sigma)
+    cornell_params = {"A": fit_params[0], "sigma": fit_params[1], "B": fit_params[2]}
+
+    fill_value = float(r0_val) if np.isfinite(r0_val) else np.nan
+    r0_bootstraps = np.full(int(n_bootstrap), fill_value, dtype=float)
+    if boot_arr is not None and boot_arr.size > 0:
+        for i in range(boot_arr.shape[1]):
+            repaired_vs = np.array(boot_arr[:, i], copy=True)
+            invalid_points = ~np.isfinite(repaired_vs)
+            if np.any(invalid_points):
+                repaired_vs[invalid_points] = fit_vs[invalid_points]
+
+            val, _ = perform_fit(fit_rs, repaired_vs, fit_sigma)
+            r0_bootstraps[i] = fill_value if np.isnan(val) else val
+
+    finite_boots = r0_bootstraps[np.isfinite(r0_bootstraps)]
+    r0_err = float(np.std(finite_boots)) if finite_boots.size > 0 else None
+
+    return {
+        "r0": float(r0_val) if np.isfinite(r0_val) else np.nan,
+        "r0_err": r0_err,
+        "bootstrap_samples": r0_bootstraps,
+        "cornell_params": cornell_params,
+        "fit_rs": fit_rs,
+        "fit_vs": fit_vs,
+        "fit_errs": fit_sigma,
+    }
+
 def calculate_volume_from_r0(
     lattice_extent: int | float,
     r0_on_a: float,
@@ -620,85 +743,34 @@ class Calculator:
                 f"Diagnostics: {format_point_diagnostics(point_diagnostics)}"
             )
 
-        rs = np.asarray(rs, dtype=float)
-        vs = np.asarray(vs, dtype=float)
-        errs = np.asarray(errs, dtype=float)
-        
-        # Handle zero errors for fitting
-        sigma = errs.copy()
+        rs_arr = np.asarray(rs, dtype=float)
+        vs_arr = np.asarray(vs, dtype=float)
+        errs_arr = np.asarray(errs, dtype=float)
+        boot_matrix = np.stack(bootstrap_rows, axis=0) if len(bootstrap_rows) == len(rs_arr) and bootstrap_rows else None
 
-        # Filter out NaN/Inf values from sigma
-        valid_mask = np.isfinite(sigma)
-        if not np.all(valid_mask):
-            bad_r_values = rs[~valid_mask].tolist()
-            print(
-                f"Warning: Disregarding {np.sum(~valid_mask)} points with non-finite sigma "
-                f"for R={bad_r_values}."
+        try:
+            fit_result = fit_r0_from_potential_data(
+                rs_arr,
+                vs_arr,
+                errs=errs_arr,
+                bootstrap_matrix=boot_matrix,
+                target_force=target_force,
+                n_bootstrap=self.n_bootstrap,
             )
-            for idx, is_valid in enumerate(valid_mask):
-                if not is_valid and idx < len(point_diagnostics):
-                    point_diagnostics[idx]["status"] = "discarded (non-finite sigma)"
-            rs = rs[valid_mask]
-            vs = vs[valid_mask]
-            sigma = sigma[valid_mask]
-            # Also filter bootstrap rows if they match
-            if len(bootstrap_rows) == len(valid_mask):
-                bootstrap_rows = [bootstrap_rows[i] for i in range(len(valid_mask)) if valid_mask[i]]
-
-            if len(rs) < 3:
-                raise ValueError(
-                    f"Not enough valid V(R) points after filtering NaNs to fit r0 (found {len(rs)}). "
-                    f"Diagnostics: {format_point_diagnostics(point_diagnostics)}"
-                )
-
-        if np.any(sigma <= 0):
-            mean_err = np.mean(sigma[sigma > 0]) if np.any(sigma > 0) else 1.0
-            sigma[sigma <= 0] = mean_err
-
-        def perform_fit(r_vals, v_vals, sigma_vals=None):
-            try:
-                # Better initial guess
-                sigma_guess = (v_vals[-1] - v_vals[0]) / (r_vals[-1] - r_vals[0]) if len(r_vals) > 1 else 0.1
-                B_guess = 0.26
-                A_guess = v_vals[0] - sigma_guess * r_vals[0] + (B_guess / r_vals[0])
-                p0 = [A_guess, max(1e-4, sigma_guess), B_guess]
-                popt, _ = curve_fit(
-                    cornell_potential_ansatz, r_vals, v_vals, 
-                    p0=p0, sigma=sigma_vals, 
-                    absolute_sigma=(sigma_vals is not None), maxfev=5000
-                )
-                A, sig, B = popt
-                # r0 definition: r^2 * (sigma + B/r^2) = 1.65  => r^2 = (1.65 - B)/sigma
-                numerator = target_force - B
-                if numerator < 0 or sig <= 0:
-                    return np.nan, (A, sig, B)
-                return np.sqrt(numerator / sig), (A, sig, B)
-            except (RuntimeError, ValueError, TypeError):
-                return np.nan, (0,0,0)
-
-        # Main Fit
-        r0_val, fit_params = perform_fit(rs, vs, sigma)
-        corn_params = {'A': fit_params[0], 'sigma': fit_params[1], 'B': fit_params[2]}
-        
-        # Bootstrap Fits
-        fill_value = float(r0_val) if np.isfinite(r0_val) else np.nan
-        r0_bootstraps = self._nan_bootstrap_array()
-        if len(bootstrap_rows) == len(rs) and len(bootstrap_rows) > 0:
-            boot_data = np.stack(bootstrap_rows, axis=0).T
-            r0_bootstraps.fill(fill_value)
-            for i, sample_vs in enumerate(boot_data):
-                repaired_vs = np.array(sample_vs, copy=True)
-                invalid_points = ~np.isfinite(repaired_vs)
-                if np.any(invalid_points):
-                    repaired_vs[invalid_points] = vs[invalid_points]
-
-                val, _ = perform_fit(rs, repaired_vs, sigma)
-                r0_bootstraps[i] = fill_value if np.isnan(val) else val
-        elif np.isfinite(r0_val):
-            r0_bootstraps = np.full(self.n_bootstrap, r0_val, dtype=float)
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc} Diagnostics: {format_point_diagnostics(point_diagnostics)}"
+            ) from exc
 
         var_data = data_organizer.VariableData("r0")
-        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_min=t_min, t_max=t_max, r_min=r_min, cornell_params=corn_params)
+        var_data.set_value(
+            fit_result["r0"],
+            bootstrap_samples=fit_result["bootstrap_samples"],
+            t_min=t_min,
+            t_max=t_max,
+            r_min=r_min,
+            cornell_params=fit_result["cornell_params"],
+        )
         return var_data
 
     # --- Implementation of Creutz Ratio Analysis ---

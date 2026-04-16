@@ -224,22 +224,27 @@ def _resolve_worker_count(requested: Optional[int], task_count: int, default: Op
     return max(1, min(int(requested), task_count))
 
 
-def _load_single_compact_w_temp(run_path: str) -> Tuple[str, Optional[do.CompactWilsonData]]:
+def _load_single_compact_w_temp(
+    run_path: str,
+    thermalization_steps: Optional[int] = None,
+) -> Tuple[str, Optional[do.CompactWilsonData]]:
     w_temp_path = Path(run_path) / "W_temp.out"
     if not w_temp_path.exists():
         return run_path, None
 
-    compact = do.load_compact_wilson_file(str(w_temp_path), min_step=THERMALIZATION_STEPS)
+    min_step = THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps)
+    compact = do.load_compact_wilson_file(str(w_temp_path), min_step=min_step)
     return run_path, compact
 
 
 def _iter_loaded_compact_w_temp(
     run_paths: List[str],
     load_workers: int,
+    thermalization_steps: Optional[int] = None,
 ):
     if load_workers <= 1:
         for run_path in run_paths:
-            yield _load_single_compact_w_temp(run_path)
+            yield _load_single_compact_w_temp(run_path, thermalization_steps=thermalization_steps)
         return
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=load_workers) as executor:
@@ -249,7 +254,11 @@ def _iter_loaded_compact_w_temp(
         next_yield = 0
 
         def submit_one(index: int):
-            future = executor.submit(_load_single_compact_w_temp, run_paths[index])
+            future = executor.submit(
+                _load_single_compact_w_temp,
+                run_paths[index],
+                thermalization_steps,
+            )
             future_to_index[future] = index
 
         initial = min(load_workers, len(run_paths))
@@ -429,6 +438,7 @@ def _load_combined_w_temp(
     verbose: bool = False,
     prefix: str = "",
     load_workers: int = 1,
+    thermalization_steps: Optional[int] = None,
 ) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
     def vprint(msg: str):
         if verbose:
@@ -440,7 +450,11 @@ def _load_combined_w_temp(
 
     def iter_compact_files():
         nonlocal runs_with_w_temp
-        for run_path, compact in _iter_loaded_compact_w_temp(run_paths, worker_count):
+        for run_path, compact in _iter_loaded_compact_w_temp(
+            run_paths,
+            worker_count,
+            thermalization_steps=thermalization_steps,
+        ):
             if compact is None:
                 continue
             runs_with_w_temp += 1
@@ -463,7 +477,7 @@ def _load_combined_w_temp(
         "n_w_temp_files": runs_with_w_temp,
         "n_samples_after_cut": 0,
         "n_configurations_after_cut": 0,
-        "thermalization_steps": THERMALIZATION_STEPS,
+        "thermalization_steps": THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps),
         "load_workers": worker_count,
     }
 
