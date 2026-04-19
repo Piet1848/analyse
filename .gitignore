@@ -3,3 +3,4 @@
 *.pyc
 __pycache__/
 __pycache__/load_input_yaml.cpython-310.pyc
+.codex
