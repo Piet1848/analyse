@@ -12,6 +12,8 @@ class VariableData:
         self.value = None
         self.error = None
         self.bootstrap_samples: np.ndarray | None = None
+        self.bootstrap_invalid_count = 0
+        self.bootstrap_finite_fraction = None
         self.parameters: Dict[str, Any] = {}
 
     def set_value(self, value: Any, bootstrap_samples: Any = None, **params):
@@ -23,6 +25,10 @@ class VariableData:
 
             finite_boots = boot_arr[np.isfinite(boot_arr)]
             repaired_boots = boot_arr
+            self.bootstrap_invalid_count = int((~np.isfinite(boot_arr)).sum())
+            self.bootstrap_finite_fraction = (
+                float(finite_boots.size / boot_arr.size) if boot_arr.size > 0 else None
+            )
 
             # Treat isolated failed bootstrap replicas as missing values and
             # replace them with the central estimate so downstream error
@@ -53,6 +59,8 @@ class VariableData:
         else:
             self.bootstrap_samples = None
             self.error = None
+            self.bootstrap_invalid_count = 0
+            self.bootstrap_finite_fraction = None
         self.parameters.update(params)
 
     def get(self) -> Any:

@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 import finalize_analysis
+import finalized_analysis_helpers as helpers
 import run_evaluation
 from calculator import Calculator, fit_r0_from_potential_data
 
@@ -117,6 +118,72 @@ class InputSequence:
 
 
 class FinalizeAnalysisTests(unittest.TestCase):
+    def test_prompt_window_choice_reuses_previous_on_blank_input(self):
+        runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
+        runner.input = InputSequence([""])
+        runner.print = lambda *args, **kwargs: None
+
+        choice = runner._prompt_window_choice(
+            3,
+            [{"R": 3, "t_min": 1, "t_max": None, "value": 0.1}],
+            previous_choice=(1, None),
+        )
+
+        self.assertEqual(choice, (1, None))
+
+    def test_select_preview_pair_keys_limits_to_representative_subset(self):
+        selected = helpers._select_preview_pair_keys(
+            [(1, 1), (1, 8), (5, 8), (8, 10), (8, 11), (10, 10)],
+        )
+
+        self.assertEqual(selected, [(1, 1), (1, 8), (5, 8), (8, 10), (10, 10)])
+
+    def test_trim_preview_series_keeps_first_ten_percent(self):
+        row = {
+            "steps": list(range(100)),
+            "values": [float(idx) for idx in range(100)],
+            "running_mean": [float(idx) / 2.0 for idx in range(100)],
+        }
+
+        trimmed = helpers._trim_preview_series(row, fraction=0.10)
+
+        self.assertEqual(trimmed["steps"], list(range(10)))
+        self.assertEqual(trimmed["values"], [float(idx) for idx in range(10)])
+        self.assertEqual(trimmed["running_mean"], [float(idx) / 2.0 for idx in range(10)])
+
+    def test_open_html_plot_returns_false_when_linux_openers_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = Path(tmp) / "preview.html"
+            html_path.write_text("<html></html>", encoding="utf-8")
+
+            failing_process = mock.Mock()
+            failing_process.wait.return_value = 1
+
+            with (
+                mock.patch.object(finalize_analysis.os, "name", "posix"),
+                mock.patch.object(finalize_analysis.sys, "platform", "linux"),
+                mock.patch.dict(finalize_analysis.os.environ, {}, clear=True),
+                mock.patch.object(
+                    finalize_analysis.shutil,
+                    "which",
+                    side_effect=lambda name: {
+                        "xdg-open": "/usr/bin/xdg-open",
+                        "gio": "/usr/bin/gio",
+                    }.get(name),
+                ),
+                mock.patch.object(finalize_analysis.subprocess, "Popen", return_value=failing_process) as popen_mock,
+            ):
+                opened = finalize_analysis.open_html_plot(html_path)
+
+            self.assertFalse(opened)
+            self.assertEqual(popen_mock.call_count, 2)
+            first_call = popen_mock.call_args_list[0]
+            self.assertEqual(first_call.args[0], ["/usr/bin/xdg-open", str(html_path.resolve())])
+            self.assertIs(first_call.kwargs["stdin"], finalize_analysis.subprocess.DEVNULL)
+            self.assertIs(first_call.kwargs["stdout"], finalize_analysis.subprocess.DEVNULL)
+            self.assertIs(first_call.kwargs["stderr"], finalize_analysis.subprocess.DEVNULL)
+            self.assertTrue(first_call.kwargs["start_new_session"])
+
     def test_validate_run_directories_accepts_seed_and_nsweep_differences(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,6 +227,32 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertEqual(meta_default["n_configurations_after_cut"], 4)
             self.assertEqual(meta_strict["n_configurations_after_cut"], 2)
 
+    def test_per_run_thermalization_threads_into_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a")
+            run_b = make_run(root, "run_b", seed=2, n_sweep=200, run_offset=0.005)
+
+            combined, metadata = run_evaluation._load_combined_w_temp(
+                [str(run_a), str(run_b)],
+                load_workers=1,
+                thermalization_steps_by_run={
+                    str(run_a): 1500,
+                    str(run_b): 2500,
+                },
+            )
+
+            self.assertIsNotNone(combined)
+            self.assertEqual(metadata["n_configurations_after_cut"], 3)
+            self.assertIsNone(metadata["thermalization_steps"])
+            self.assertEqual(
+                metadata["thermalization_steps_by_run"],
+                {
+                    str(run_a.resolve()): 1500,
+                    str(run_b.resolve()): 2500,
+                },
+            )
+
     def test_r0_helper_matches_calculator_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -197,6 +290,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
             run_b = make_run(data_root, "run_b", seed=2, n_sweep=200, run_offset=0.005)
 
             patchers = [
+                mock.patch.object(finalize_analysis, "save_thermalization_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_effective_mass_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_r0_stability_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_cornell_plot", side_effect=write_stub_plot),
@@ -212,18 +306,33 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     calc_workers=None,
                     n_bootstrap=16,
                     target_force=1.65,
-                    input_func=InputSequence(["", "1"]),
+                    open_plots=False,
+                    input_func=InputSequence(["", "", "1"]),
                     print_func=lambda *args, **kwargs: None,
                 )
                 with self.assertRaisesRegex(RuntimeError, "input exhausted"):
                     first_runner.run()
 
                 analysis_dir = first_runner.analysis_dir
+                self.assertIsNotNone(first_runner.thermalization_preview_path)
+                assert first_runner.thermalization_preview_path is not None
+                self.assertTrue(first_runner.thermalization_preview_path.exists())
                 first_choices = finalize_analysis.load_json(
                     analysis_dir / "wilsonloop" / "choices.json",
                     default={"choices": {}},
                 )
                 self.assertEqual(sorted(first_choices["choices"]), ["2"])
+                selection_state = finalize_analysis.load_json(
+                    first_runner.selection_preview_dir / "thermalization_cuts.json",
+                    default={},
+                )
+                self.assertEqual(
+                    selection_state["cuts_by_run"],
+                    {
+                        str(run_a.resolve()): run_evaluation.THERMALIZATION_STEPS,
+                        str(run_b.resolve()): run_evaluation.THERMALIZATION_STEPS,
+                    },
+                )
 
                 second_runner = finalize_analysis.FinalizedAnalysisRunner(
                     run_dirs=[str(run_a), str(run_b)],
@@ -233,7 +342,8 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     calc_workers=None,
                     n_bootstrap=16,
                     target_force=1.65,
-                    input_func=InputSequence(["", "1", "1", "2"]),
+                    open_plots=False,
+                    input_func=InputSequence(["1", "1", "2"]),
                     print_func=lambda *args, **kwargs: None,
                 )
                 second_runner.run()
@@ -242,12 +352,22 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue(manifest["status"]["wilsonloop_complete"])
                 self.assertTrue(manifest["status"]["r0_complete"])
                 self.assertTrue(manifest["status"]["derived_complete"])
+                self.assertIn("thermalization_preview_plot", manifest)
+                self.assertEqual(
+                    manifest["thermalization_steps_by_run"],
+                    {
+                        str(run_a.resolve()): run_evaluation.THERMALIZATION_STEPS,
+                        str(run_b.resolve()): run_evaluation.THERMALIZATION_STEPS,
+                    },
+                )
 
                 self.assertTrue((analysis_dir / "scan_cache" / "wrt_scan.json").exists())
                 self.assertTrue((analysis_dir / "wilsonloop" / "V_R_summary.json").exists())
                 self.assertTrue((analysis_dir / "r0" / "r0_result.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "summary.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "bootstrap" / "volume_r0.npy").exists())
+                self.assertTrue((analysis_dir / "plots" / "thermalization_preview.html").exists())
+                self.assertTrue((analysis_dir / "plots" / "thermalization_by_run").exists())
             finally:
                 for patcher in reversed(patchers):
                     patcher.stop()

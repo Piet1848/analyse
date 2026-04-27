@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+import data_organizer as do
 from calculator import Calculator, cornell_potential_ansatz, fit_r0_from_potential_data
 
 
@@ -82,6 +83,111 @@ def build_wrt_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any
                 }
             )
     return records
+
+
+def build_thermalization_preview(
+    run_dirs: list[str],
+    *,
+    include_combined: bool = True,
+) -> list[dict[str, Any]]:
+    run_series: list[dict[str, Any]] = []
+
+    for run_dir in run_dirs:
+        print(f"Processing run directory for thermalization preview: {run_dir}")
+        w_temp_path = Path(run_dir) / "W_temp.out"
+        if not w_temp_path.exists():
+            continue
+
+        file_data = do.FileData(str(w_temp_path))
+        file_data.read_file()
+        file_data.align_lengths()
+
+        if not file_data.observables:
+            continue
+        if min((len(obs.values) for obs in file_data.observables), default=0) <= 0:
+            continue
+
+        try:
+            obs_w = np.asarray(file_data.get("W_temp").values, dtype=float)
+            obs_l = np.asarray(file_data.get("L").values)
+            obs_t = np.asarray(file_data.get("T").values)
+        except ValueError:
+            continue
+
+        step_obs = next((o for o in file_data.observables if o.name in {"# step", "step"}), None)
+        if step_obs is None:
+            continue
+
+        steps = np.asarray(step_obs.values, dtype=float)
+        if steps.size == 0:
+            continue
+
+        rows_per_cfg = do._infer_rows_per_configuration(steps, obs_l, obs_t)
+        if rows_per_cfg <= 0:
+            continue
+        if len(obs_w) % rows_per_cfg != 0 or len(steps) % rows_per_cfg != 0:
+            continue
+
+        pair_order = [(int(l_val), int(t_val)) for l_val, t_val in zip(obs_l[:rows_per_cfg], obs_t[:rows_per_cfg])]
+        if len(set(pair_order)) != len(pair_order):
+            continue
+
+        step_series = steps[::rows_per_cfg]
+        w_matrix = obs_w.reshape(-1, rows_per_cfg)
+        run_label = Path(run_dir).name
+
+        for idx, (r_val, t_val) in enumerate(pair_order):
+            values = np.asarray(w_matrix[:, idx], dtype=float)
+            if values.size == 0:
+                continue
+            running_mean = np.cumsum(values) / np.arange(1, values.size + 1, dtype=float)
+            run_series.append(
+                {
+                    "kind": "run",
+                    "run_label": run_label,
+                    "R": int(r_val),
+                    "T": int(t_val),
+                    "steps": [float(step) for step in step_series],
+                    "values": [float(value) for value in values],
+                    "running_mean": [float(value) for value in running_mean],
+                }
+            )
+    print(f"Collected thermalization preview data for {len(run_series)} series from {len(run_dirs)} run directories.")
+    if not include_combined:
+        return run_series
+
+    combined_series: list[dict[str, Any]] = []
+    pair_keys = sorted({(int(row["R"]), int(row["T"])) for row in run_series}, key=lambda item: (item[0], item[1]))
+    for r_val, t_val in pair_keys:
+        print(f"Constructing combined series for R={r_val}, T={t_val} from {sum(1 for row in run_series if int(row['R']) == r_val and int(row['T']) == t_val)} runs.")
+        grouped: dict[float, list[float]] = {}
+        for row in run_series:
+            if int(row["R"]) != r_val or int(row["T"]) != t_val:
+                continue
+            for step, value in zip(row["steps"], row["values"]):
+                grouped.setdefault(float(step), []).append(float(value))
+
+        if not grouped:
+            continue
+
+        sorted_steps = sorted(grouped)
+        means = np.asarray([np.mean(grouped[step]) for step in sorted_steps], dtype=float)
+        errs = np.asarray([np.std(grouped[step]) for step in sorted_steps], dtype=float)
+        running_mean = np.cumsum(means) / np.arange(1, len(means) + 1, dtype=float)
+        combined_series.append(
+            {
+                "kind": "combined",
+                "run_label": "combined",
+                "R": int(r_val),
+                "T": int(t_val),
+                "steps": [float(step) for step in sorted_steps],
+                "values": [float(value) for value in means],
+                "err": [float(value) for value in errs],
+                "running_mean": [float(value) for value in running_mean],
+            }
+        )
+    print(f"Constructed combined thermalization series for {len(combined_series)} R-T pairs.")
+    return combined_series + run_series
 
 
 def build_effective_mass_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any]]:
@@ -193,10 +299,13 @@ def build_locked_r0_scan(
                 "sigma": float(params["sigma"]),
                 "B": float(params["B"]),
                 "target_force": float(target_force),
+                "chi2": float(fit_result["chi2"]) if fit_result["chi2"] is not None else None,
+                "dof": int(fit_result["dof"]),
+                "chi2_dof": float(fit_result["chi2_dof"]) if fit_result["chi2_dof"] is not None else None,
             }
         )
 
-        for r_val in fit_rs:
+        for r_val in r_values:
             curve_records.append(
                 {
                     "kind": "point",
@@ -216,10 +325,12 @@ def build_locked_r0_scan(
                         if v_results_by_r[r_val].get("err") is not None
                         else None
                     ),
+                    "used_in_fit": bool(r_val in fit_rs),
                 }
             )
 
-        r_grid = np.linspace(float(min(fit_rs)), float(max(fit_rs)), 300)
+        r_grid_min = min(1.0, float(min(fit_rs)))
+        r_grid = np.linspace(r_grid_min, float(max(fit_rs)), 300)
         for r_val in r_grid:
             curve_records.append(
                 {
@@ -258,112 +369,360 @@ def _write_figure_html(fig, path: Path) -> None:
     fig.write_html(path, include_plotlyjs="cdn", full_html=True)
 
 
-def save_effective_mass_plot(
+def _select_preview_pair_keys(
+    pair_keys: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    ordered = sorted(pair_keys, key=lambda item: (item[0], item[1]))
+    if not ordered:
+        return []
+
+    available = set(ordered)
+    max_r = max(r_val for r_val, _ in ordered)
+    max_t_for_max_r = max(t_val for r_val, t_val in ordered if r_val == max_r)
+    preferred = [(1, 1), (1, 8), (5, 8), (8, 10), (max_r, max_t_for_max_r)]
+
+    selected: list[tuple[int, int]] = []
+    for pair in preferred:
+        if pair in available and pair not in selected:
+            selected.append(pair)
+
+    if selected:
+        return selected
+
+    if len(ordered) <= 5:
+        return ordered
+
+    selected_indices: list[int] = []
+    for idx in range(5):
+        position = round(idx * (len(ordered) - 1) / 4)
+        if position not in selected_indices:
+            selected_indices.append(position)
+
+    for position in range(len(ordered)):
+        if len(selected_indices) >= 5:
+            break
+        if position not in selected_indices:
+            selected_indices.append(position)
+
+    return [ordered[position] for position in sorted(selected_indices[:5])]
+
+
+def _trim_preview_series(
+    row: dict[str, Any],
+    *,
+    fraction: float = 0.10,
+    min_points: int = 3,
+) -> dict[str, Any]:
+    steps = [float(step) for step in row["steps"]]
+    if not steps:
+        return row
+
+    keep_count = min(len(steps), max(min_points, int(math.ceil(len(steps) * float(fraction)))))
+    trimmed = dict(row)
+    trimmed["steps"] = steps[:keep_count]
+    trimmed["values"] = [float(value) for value in row["values"][:keep_count]]
+    trimmed["running_mean"] = [float(value) for value in row["running_mean"][:keep_count]]
+    if "err" in row:
+        trimmed["err"] = [float(value) for value in row.get("err", [])[:keep_count]]
+    return trimmed
+
+
+def save_thermalization_plot(
     path: Path,
-    effective_mass_records: list[dict[str, Any]],
-    v_scan_records: list[dict[str, Any]],
-    r_value: int,
+    thermalization_records: list[dict[str, Any]],
+    suggested_cut: int | None,
 ) -> None:
     go = _get_plotly()
-    eff_rows = sorted(
-        [row for row in effective_mass_records if int(row["R"]) == int(r_value)],
-        key=lambda row: row["T"],
-    )
-    if not eff_rows:
-        raise ValueError(f"No effective mass data available for R={r_value}")
+    from plotly.subplots import make_subplots
 
-    candidate_rows = sorted(
-        [row for row in v_scan_records if int(row["R"]) == int(r_value)],
-        key=lambda row: (row["t_min"], math.inf if row["t_max"] is None else row["t_max"]),
+    all_pair_keys = sorted(
+        {(int(row["R"]), int(row["T"])) for row in thermalization_records},
+        key=lambda item: (item[0], item[1]),
     )
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=[row["t_mid"] for row in eff_rows],
-            y=[row["value"] for row in eff_rows],
-            mode="lines+markers",
-            name=f"m_eff (R={int(r_value)})",
-            error_y={
-                "type": "data",
-                "array": [0.0 if row["err"] is None else row["err"] for row in eff_rows],
-                "visible": any(row["err"] is not None for row in eff_rows),
-            },
-        )
+    if not all_pair_keys:
+        raise ValueError("No thermalization preview data available")
+    pair_keys = _select_preview_pair_keys(all_pair_keys)
+    selected_pairs = set(pair_keys)
+    preview_records = [
+        _trim_preview_series(row, fraction=0.10)
+        for row in thermalization_records
+        if (int(row["R"]), int(row["T"])) in selected_pairs
+    ]
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.09,
+        subplot_titles=("Raw W(R,T) vs Monte Carlo step", "Running mean of W(R,T)"),
     )
 
-    window_to_trace_indices: dict[str, list[int]] = {}
-    x_vals = [row["t_mid"] for row in eff_rows]
-    x_min = min(x_vals) - 0.25
-    x_max = max(x_vals) + 0.25
+    trace_indices: dict[tuple[int, int], list[int]] = {}
 
-    if not candidate_rows:
-        fig.update_layout(
-            title=f"Effective mass for R={int(r_value)}",
-            xaxis_title="T + 1/2",
-            yaxis_title="m_eff",
-            template="plotly_white",
-        )
-        _write_figure_html(fig, path)
-        return
-
-    for idx, row in enumerate(candidate_rows):
-        label = window_label(int(row["t_min"]), row["t_max"])
-        trace_indices = window_to_trace_indices.setdefault(label, [])
-        v_val = float(row["value"])
-        v_err = row["err"]
+    for idx, pair_key in enumerate(pair_keys):
+        r_val, t_val = pair_key
         visible = idx == 0
+        trace_indices[pair_key] = []
 
-        trace_indices.append(len(fig.data))
-        fig.add_trace(
-            go.Scatter(
-                x=[x_min, x_max],
-                y=[v_val, v_val],
-                mode="lines",
-                name=f"V(R) {label}",
-                visible=visible,
-                line={"dash": "dash"},
-            )
+        pair_rows = sorted(
+            [row for row in preview_records if int(row["R"]) == r_val and int(row["T"]) == t_val],
+            key=lambda row: (0 if row["kind"] == "combined" else 1, row["run_label"]),
         )
 
-        if v_err is not None and np.isfinite(v_err):
-            trace_indices.append(len(fig.data))
+        for row in pair_rows:
+            kind = str(row["kind"])
+            run_label = str(row["run_label"])
+            steps = [float(step) for step in row["steps"]]
+            values = [float(value) for value in row["values"]]
+            running_mean = [float(value) for value in row["running_mean"]]
+            legend_name = "Combined mean" if kind == "combined" else f"Run {run_label}"
+            line_width = 3 if kind == "combined" else 1.4
+            opacity = 1.0 if kind == "combined" else 0.45
+            legend_group = f"{kind}:{run_label}"
+
+            if kind == "combined":
+                err = [float(value) for value in row.get("err", [])]
+                if err:
+                    lower = [val - delta for val, delta in zip(values, err)]
+                    upper = [val + delta for val, delta in zip(values, err)]
+                    trace_indices[pair_key].append(len(fig.data))
+                    fig.add_trace(
+                        go.Scatter(
+                            x=steps + steps[::-1],
+                            y=lower + upper[::-1],
+                            fill="toself",
+                            mode="lines",
+                            line={"width": 0},
+                            fillcolor="rgba(31, 119, 180, 0.12)",
+                            name="Combined spread",
+                            hoverinfo="skip",
+                            showlegend=False,
+                            visible=visible,
+                            legendgroup=legend_group,
+                        ),
+                        row=1,
+                        col=1,
+                    )
+
+            trace_indices[pair_key].append(len(fig.data))
             fig.add_trace(
                 go.Scatter(
-                    x=[x_min, x_max, x_max, x_min],
-                    y=[v_val - v_err, v_val - v_err, v_val + v_err, v_val + v_err],
-                    fill="toself",
-                    mode="lines",
-                    line={"width": 0},
-                    fillcolor="rgba(31, 119, 180, 0.18)",
-                    name=f"{label} error band",
+                    x=steps,
+                    y=values,
+                    mode="lines+markers",
+                    name=legend_name,
                     visible=visible,
-                    showlegend=False,
-                )
+                    opacity=opacity,
+                    line={"width": line_width},
+                    legendgroup=legend_group,
+                    showlegend=True,
+                ),
+                row=1,
+                col=1,
             )
 
-    base_visible = [True] + [False] * (len(fig.data) - 1)
+            trace_indices[pair_key].append(len(fig.data))
+            fig.add_trace(
+                go.Scatter(
+                    x=steps,
+                    y=running_mean,
+                    mode="lines",
+                    name=f"{legend_name} running mean",
+                    visible=visible,
+                    opacity=opacity,
+                    line={"width": line_width},
+                    legendgroup=legend_group,
+                    showlegend=False,
+                ),
+                row=2,
+                col=1,
+            )
+
     buttons = []
-    for label, indices in window_to_trace_indices.items():
-        visible = base_visible.copy()
-        for trace_idx in indices:
+    for r_val, t_val in pair_keys:
+        visible = [False] * len(fig.data)
+        for trace_idx in trace_indices[(r_val, t_val)]:
             visible[trace_idx] = True
         buttons.append(
             {
-                "label": label,
+                "label": f"R={r_val}, T={t_val}",
                 "method": "update",
                 "args": [
                     {"visible": visible},
-                    {"title": f"Effective mass for R={int(r_value)} with {label}"},
+                    {"title": f"Thermalization preview for W(R={r_val}, T={t_val})"},
                 ],
             }
         )
 
-    first_label = next(iter(window_to_trace_indices))
+    first_r, first_t = pair_keys[0]
+    layout_updates: dict[str, Any] = {
+        "title": f"Thermalization preview for W(R={first_r}, T={first_t})",
+        "template": "plotly_white",
+        "xaxis2_title": "Monte Carlo step",
+        "yaxis_title": "W(R,T)",
+        "yaxis2_title": "Running mean",
+        "margin": {"l": 65, "r": 250, "t": 80, "b": 65},
+        "annotations": [
+            {
+                "x": 0.0,
+                "y": 1.12,
+                "xref": "paper",
+                "yref": "paper",
+                "text": (
+                    f"Preview limited to {len(pair_keys)} representative (R,T) pairs "
+                    f"and the first 10% of Monte Carlo steps."
+                ),
+                "showarrow": False,
+                "xanchor": "left",
+                "font": {"size": 12, "color": "#555"},
+            }
+        ],
+        "updatemenus": [
+            {
+                "buttons": buttons,
+                "direction": "down",
+                "showactive": True,
+                "x": 1.02,
+                "xanchor": "left",
+                "y": 1.0,
+                "yanchor": "top",
+            }
+        ],
+    }
+    if suggested_cut is not None:
+        layout_updates["shapes"] = [
+            {
+                "type": "line",
+                "xref": "x",
+                "yref": "paper",
+                "x0": float(suggested_cut),
+                "x1": float(suggested_cut),
+                "y0": 0.0,
+                "y1": 1.0,
+                "line": {"color": "firebrick", "dash": "dash"},
+            }
+        ]
+        layout_updates["annotations"].append(
+            {
+                "x": float(suggested_cut),
+                "y": 1.02,
+                "xref": "x",
+                "yref": "paper",
+                "text": f"suggested cut = {int(suggested_cut)}",
+                "showarrow": False,
+                "font": {"color": "firebrick"},
+            }
+        )
+
     fig.update_layout(
-        title=f"Effective mass for R={int(r_value)} with {first_label}",
-        xaxis_title="T + 1/2",
-        yaxis_title="m_eff",
+        **layout_updates,
+    )
+    _write_figure_html(fig, path)
+
+
+def save_effective_mass_plot(
+    path: Path,
+    wrt_records: list[dict[str, Any]],
+    effective_mass_records: list[dict[str, Any]],
+) -> None:
+    go = _get_plotly()
+    from plotly.subplots import make_subplots
+
+    r_values = sorted({int(row["R"]) for row in effective_mass_records})
+    if not r_values:
+        raise ValueError("No effective mass data available")
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.09,
+        subplot_titles=("Effective mass plateau", "log W(R,T) used in the fit"),
+    )
+
+    trace_indices_by_r: dict[int, list[int]] = {}
+    for idx, r_value in enumerate(r_values):
+        visible = idx == 0
+        trace_indices_by_r[int(r_value)] = []
+
+        eff_rows = sorted(
+            [row for row in effective_mass_records if int(row["R"]) == int(r_value)],
+            key=lambda row: row["T"],
+        )
+        if eff_rows:
+            trace_indices_by_r[int(r_value)].append(len(fig.data))
+            fig.add_trace(
+                go.Scatter(
+                    x=[row["t_mid"] for row in eff_rows],
+                    y=[row["value"] for row in eff_rows],
+                    mode="lines+markers",
+                    name=f"m_eff (R={int(r_value)})",
+                    visible=visible,
+                    error_y={
+                        "type": "data",
+                        "array": [0.0 if row["err"] is None else row["err"] for row in eff_rows],
+                        "visible": any(row["err"] is not None for row in eff_rows),
+                    },
+                ),
+                row=1,
+                col=1,
+            )
+
+        wrt_rows = sorted(
+            [row for row in wrt_records if int(row["R"]) == int(r_value)],
+            key=lambda row: row["T"],
+        )
+        positive_wrt_rows = [
+            row for row in wrt_rows
+            if np.isfinite(row["value"]) and float(row["value"]) > 0
+        ]
+        if positive_wrt_rows:
+            log_w_values = [float(np.log(row["value"])) for row in positive_wrt_rows]
+            log_w_errors = [
+                (float(row["err"]) / float(row["value"]))
+                if row.get("err") is not None and np.isfinite(row["err"]) and float(row["err"]) >= 0
+                else 0.0
+                for row in positive_wrt_rows
+            ]
+            trace_indices_by_r[int(r_value)].append(len(fig.data))
+            fig.add_trace(
+                go.Scatter(
+                    x=[row["T"] for row in positive_wrt_rows],
+                    y=log_w_values,
+                    mode="lines+markers",
+                    name=f"log W(R={int(r_value)},T)",
+                    visible=visible,
+                    error_y={
+                        "type": "data",
+                        "array": log_w_errors,
+                        "visible": any(err > 0 for err in log_w_errors),
+                    },
+                ),
+                row=2,
+                col=1,
+            )
+
+    buttons = []
+    for r_value in r_values:
+        visible = [False] * len(fig.data)
+        for trace_idx in trace_indices_by_r[int(r_value)]:
+            visible[trace_idx] = True
+        buttons.append(
+            {
+                "label": f"R={int(r_value)}",
+                "method": "update",
+                "args": [
+                    {"visible": visible},
+                    {"title": f"Effective mass for R={int(r_value)}"},
+                ],
+            }
+        )
+
+    first_r = int(r_values[0])
+    fig.update_layout(
+        title=f"Effective mass for R={first_r}",
         template="plotly_white",
+        margin={"l": 60, "r": 180, "t": 80, "b": 60},
         updatemenus=[
             {
                 "buttons": buttons,
@@ -375,8 +734,11 @@ def save_effective_mass_plot(
                 "yanchor": "top",
             }
         ],
-        margin={"l": 60, "r": 240, "t": 70, "b": 60},
     )
+    fig.update_xaxes(title_text="T + 1/2", row=1, col=1)
+    fig.update_yaxes(title_text="m_eff", row=1, col=1)
+    fig.update_xaxes(title_text="T", row=2, col=1)
+    fig.update_yaxes(title_text="log W(R,T)", row=2, col=1)
     _write_figure_html(fig, path)
 
 
@@ -385,11 +747,12 @@ def save_r0_stability_plot(path: Path, r0_records: list[dict[str, Any]]) -> None
     rows = sorted(r0_records, key=lambda row: row["r_min"])
     if not rows:
         raise ValueError("No r0 scan data available")
+    r_min_values = [int(row["r_min"]) for row in rows]
 
     fig = go.Figure(
         data=[
             go.Scatter(
-                x=[row["r_min"] for row in rows],
+                x=r_min_values,
                 y=[row["r0"] for row in rows],
                 mode="lines+markers",
                 error_y={
@@ -407,6 +770,11 @@ def save_r0_stability_plot(path: Path, r0_records: list[dict[str, Any]]) -> None
         yaxis_title="r0/a",
         template="plotly_white",
     )
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=r_min_values,
+        range=[min(r_min_values) - 0.25, max(r_min_values) + 0.25],
+    )
     _write_figure_html(fig, path)
 
 
@@ -418,6 +786,15 @@ def save_cornell_plot(
     go = _get_plotly()
     if not curve_records or not r0_records:
         raise ValueError("No Cornell fit data available")
+
+    def format_title(row: dict[str, Any]) -> str:
+        title = f"Cornell fit for r_min={int(row['r_min'])} (r0/a={row['r0']:.4f})"
+        chi2_dof = row.get("chi2_dof")
+        if chi2_dof is not None and np.isfinite(chi2_dof):
+            title += f", chi2/dof={chi2_dof:.3f}"
+        elif row.get("chi2") is not None and np.isfinite(row["chi2"]):
+            title += f", chi2={float(row['chi2']):.3f}"
+        return title
 
     r_min_values = [int(row["r_min"]) for row in sorted(r0_records, key=lambda row: row["r_min"])]
     fig = go.Figure()
@@ -446,21 +823,43 @@ def save_cornell_plot(
                 )
             )
         if point_rows:
-            trace_indices[r_min].append(len(fig.data))
-            fig.add_trace(
-                go.Scatter(
-                    x=[row["R"] for row in point_rows],
-                    y=[row["V"] for row in point_rows],
-                    mode="markers",
-                    name=f"Selected V(R) (r_min={r_min})",
-                    visible=visible,
-                    error_y={
-                        "type": "data",
-                        "array": [0.0 if row["err"] is None else row["err"] for row in point_rows],
-                        "visible": any(row["err"] is not None for row in point_rows),
-                    },
+            used_rows = [row for row in point_rows if bool(row.get("used_in_fit"))]
+            excluded_rows = [row for row in point_rows if not bool(row.get("used_in_fit"))]
+
+            if excluded_rows:
+                trace_indices[r_min].append(len(fig.data))
+                fig.add_trace(
+                    go.Scatter(
+                        x=[row["R"] for row in excluded_rows],
+                        y=[row["V"] for row in excluded_rows],
+                        mode="markers",
+                        name=f"Excluded V(R) (r_min={r_min})",
+                        visible=visible,
+                        marker={"symbol": "circle-open", "size": 9},
+                        error_y={
+                            "type": "data",
+                            "array": [0.0 if row["err"] is None else row["err"] for row in excluded_rows],
+                            "visible": any(row["err"] is not None for row in excluded_rows),
+                        },
+                    )
                 )
-            )
+            if used_rows:
+                trace_indices[r_min].append(len(fig.data))
+                fig.add_trace(
+                    go.Scatter(
+                        x=[row["R"] for row in used_rows],
+                        y=[row["V"] for row in used_rows],
+                        mode="markers",
+                        name=f"Fit points V(R) (r_min={r_min})",
+                        visible=visible,
+                        marker={"size": 9},
+                        error_y={
+                            "type": "data",
+                            "array": [0.0 if row["err"] is None else row["err"] for row in used_rows],
+                            "visible": any(row["err"] is not None for row in used_rows),
+                        },
+                    )
+                )
 
     buttons = []
     for row in sorted(r0_records, key=lambda item: item["r_min"]):
@@ -474,14 +873,14 @@ def save_cornell_plot(
                 "method": "update",
                 "args": [
                     {"visible": visible},
-                    {"title": f"Cornell fit for r_min={r_min} (r0/a={row['r0']:.4f})"},
+                    {"title": format_title(row)},
                 ],
             }
         )
 
     first = sorted(r0_records, key=lambda item: item["r_min"])[0]
     fig.update_layout(
-        title=f"Cornell fit for r_min={int(first['r_min'])} (r0/a={first['r0']:.4f})",
+        title=format_title(first),
         xaxis_title="R",
         yaxis_title="V(R)",
         template="plotly_white",

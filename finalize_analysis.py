@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import os
+import shlex
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -16,6 +20,7 @@ import run_evaluation
 from calculator import Calculator, fit_r0_from_potential_data
 from finalized_analysis_helpers import (
     build_effective_mass_scan,
+    build_thermalization_preview,
     build_locked_r0_scan,
     build_v_r_scan,
     build_wrt_scan,
@@ -24,6 +29,7 @@ from finalized_analysis_helpers import (
     save_cornell_plot,
     save_effective_mass_plot,
     save_json,
+    save_thermalization_plot,
     save_r0_stability_plot,
     summarize_bootstrap,
     window_label,
@@ -33,6 +39,10 @@ from load_input_yaml import GaugeObservableParams, MetropolisParams, load_params
 
 SCHEMA_VERSION = 1
 IGNORED_METRO_FIELDS = {"seed", "nSweep"}
+GROUP_FIELD_ALIASES = {
+    "eps1": "epsilon1",
+    "eps2": "epsilon2",
+}
 
 
 def utc_now() -> str:
@@ -45,13 +55,110 @@ def format_token(value: Any) -> str:
     return str(value)
 
 
-def analysis_hash(run_dirs: list[str], thermalization_steps: int) -> str:
+def normalize_thermalization_steps_by_run(
+    run_dirs: list[str],
+    thermalization_steps_by_run: dict[str, int],
+) -> dict[str, int]:
+    normalized = {os.path.abspath(path): int(value) for path, value in thermalization_steps_by_run.items()}
+    ordered: dict[str, int] = {}
+    for run_dir in [os.path.abspath(path) for path in run_dirs]:
+        if run_dir not in normalized:
+            raise ValueError(f"Missing thermalization cut for run: {run_dir}")
+        if int(normalized[run_dir]) < 0:
+            raise ValueError(f"Thermalization cut must be non-negative for run: {run_dir}")
+        ordered[run_dir] = int(normalized[run_dir])
+    return ordered
+
+
+def common_thermalization_step(thermalization_steps_by_run: dict[str, int]) -> int | None:
+    unique = sorted({int(value) for value in thermalization_steps_by_run.values()})
+    return unique[0] if len(unique) == 1 else None
+
+
+def analysis_hash(run_dirs: list[str], thermalization_steps_by_run: dict[str, int]) -> str:
+    normalized_cuts = normalize_thermalization_steps_by_run(run_dirs, thermalization_steps_by_run)
     payload = {
         "run_dirs": sorted(os.path.abspath(path) for path in run_dirs),
-        "thermalization_steps": int(thermalization_steps),
+        "thermalization_steps_by_run": normalized_cuts,
     }
     digest = hashlib.md5(repr(payload).encode("utf-8")).hexdigest()
     return digest[:12]
+
+
+def preview_hash(run_dirs: list[str]) -> str:
+    payload = {
+        "run_dirs": sorted(os.path.abspath(path) for path in run_dirs),
+    }
+    digest = hashlib.md5(repr(payload).encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def thermalization_preview_filename(run_dir: str) -> str:
+    run_name = Path(run_dir).name or "run"
+    safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_name)
+    digest = hashlib.md5(os.path.abspath(run_dir).encode("utf-8")).hexdigest()[:12]
+    return f"thermalization_{safe_name}_{digest}.html"
+
+
+def open_html_plot(path: Path) -> bool:
+    resolved = path.resolve()
+    uri = resolved.as_uri()
+
+    if os.name == "nt":
+        try:
+            os.startfile(str(resolved))  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return False
+
+    candidates: list[list[str]] = []
+    browser_env = os.environ.get("BROWSER", "").strip()
+    if browser_env:
+        for entry in browser_env.split(os.pathsep):
+            tokens = shlex.split(entry)
+            if not tokens:
+                continue
+            if any("%s" in token for token in tokens):
+                candidates.append([token.replace("%s", uri) for token in tokens])
+            else:
+                candidates.append([*tokens, uri])
+
+    if sys.platform == "darwin":
+        opener = shutil.which("open")
+        if opener:
+            candidates.append([opener, str(resolved)])
+    else:
+        opener = shutil.which("xdg-open")
+        if opener:
+            candidates.append([opener, str(resolved)])
+        gio = shutil.which("gio")
+        if gio:
+            candidates.append([gio, "open", uri])
+
+    seen: set[tuple[str, ...]] = set()
+    for command in candidates:
+        key = tuple(command)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                returncode = process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                return True
+            if returncode == 0:
+                return True
+        except Exception:
+            continue
+
+    return False
 
 
 def compare_dataclass_dicts(reference: dict[str, Any], current: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
@@ -61,6 +168,67 @@ def compare_dataclass_dicts(reference: dict[str, Any], current: dict[str, Any]) 
         if reference.get(key) != current.get(key):
             diff[key] = (reference.get(key), current.get(key))
     return diff
+
+
+def canonical_group_field(name: str) -> str:
+    return GROUP_FIELD_ALIASES.get(name, name)
+
+
+def discover_run_directories(root: str) -> list[str]:
+    root_path = Path(root).expanduser().resolve()
+    if not root_path.is_dir():
+        raise ValueError(f"Run root not found: {root_path}")
+
+    run_dirs = sorted(
+        {
+            str(path.parent.resolve())
+            for path in root_path.rglob("input.yaml")
+            if path.is_file()
+        }
+    )
+    if not run_dirs:
+        raise ValueError(f"No run directories with input.yaml found under {root_path}")
+    return run_dirs
+
+
+def build_group_signature(
+    metro: MetropolisParams,
+    gauge: GaugeObservableParams,
+    group_by: list[str] | None = None,
+) -> tuple[tuple[str, Any], ...]:
+    metro_fields = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
+    gauge_fields = asdict(gauge)
+    combined = {**metro_fields, **gauge_fields}
+
+    if group_by:
+        requested = [canonical_group_field(name) for name in group_by]
+        missing = [name for name in requested if name not in combined]
+        if missing:
+            raise ValueError(f"Unknown grouping field(s): {', '.join(missing)}")
+        return tuple((name, combined[name]) for name in requested)
+
+    return tuple(sorted(combined.items()))
+
+
+def describe_group_signature(signature: tuple[tuple[str, Any], ...]) -> str:
+    return ", ".join(f"{name}={format_token(value)}" for name, value in signature)
+
+
+def group_run_directories(
+    run_dirs: list[str],
+    group_by: list[str] | None = None,
+) -> list[tuple[tuple[tuple[str, Any], ...], list[str]]]:
+    grouped: dict[tuple[tuple[str, Any], ...], list[str]] = {}
+
+    for run_dir in sorted(os.path.abspath(path) for path in run_dirs):
+        yaml_path = Path(run_dir) / "input.yaml"
+        if not yaml_path.exists():
+            raise ValueError(f"Missing input.yaml in {run_dir}")
+        metro, gauge = load_params(str(yaml_path))
+        signature = build_group_signature(metro, gauge, group_by=group_by)
+        grouped.setdefault(signature, []).append(run_dir)
+
+    return sorted(grouped.items(), key=lambda item: (describe_group_signature(item[0]), item[1]))
 
 
 def validate_run_directories(
@@ -124,6 +292,8 @@ class FinalizedAnalysisRunner:
         calc_workers: int | None,
         n_bootstrap: int,
         target_force: float,
+        open_plots: bool = True,
+        open_plot_func: Callable[[Path], bool] = open_html_plot,
         input_func: Callable[[str], str] = input,
         print_func: Callable[..., None] = print,
     ):
@@ -137,12 +307,24 @@ class FinalizedAnalysisRunner:
         self.calc_workers = calc_workers
         self.n_bootstrap = int(n_bootstrap)
         self.target_force = float(target_force)
+        self.open_plots = bool(open_plots)
+        self.open_plot_func = open_plot_func
         self.input = input_func
         self.print = print_func
 
         self.metro, self.gauge, self.compatibility_summary = validate_run_directories(self.run_dirs)
-        self.thermalization_steps = self._prompt_thermalization()
-        self.analysis_id = analysis_hash(self.run_dirs, self.thermalization_steps)
+        self.selection_preview_dir = (self.output_root / "_selection_previews" / preview_hash(self.run_dirs)).resolve()
+        self.selection_preview_dir.mkdir(parents=True, exist_ok=True)
+        self.thermalization_selection_path = self.selection_preview_dir / "thermalization_cuts.json"
+        self.thermalization_preview_records_by_run: dict[str, list[dict[str, Any]]] = {}
+        self.thermalization_preview_path: Path | None = None
+        self.thermalization_steps_by_run = self._prompt_thermalization_by_run()
+        self.thermalization_steps = common_thermalization_step(self.thermalization_steps_by_run)
+        if self.thermalization_steps is not None:
+            self.print(f"Thermalization cut set to: {self.thermalization_steps} for all runs")
+        else:
+            self.print("Thermalization cuts saved per run.")
+        self.analysis_id = analysis_hash(self.run_dirs, self.thermalization_steps_by_run)
         self.analysis_dir = self._analysis_dir_path()
 
         self.manifest_path = self.analysis_dir / "manifest.json"
@@ -158,6 +340,7 @@ class FinalizedAnalysisRunner:
 
         self.manifest = self._load_or_init_manifest()
         self._ensure_output_layout()
+        self._save_final_thermalization_preview()
         self._write_input_runs()
 
         self.combined_w_temp = None
@@ -178,17 +361,87 @@ class FinalizedAnalysisRunner:
         )
         return self.output_root / folder_name
 
-    def _prompt_thermalization(self) -> int:
-        default_cut = int(run_evaluation.THERMALIZATION_STEPS)
-        self.print("Selected run directories:")
-        for path in self.run_dirs:
-            self.print(f"  {path}")
+    def _load_saved_thermalization_cuts(self) -> dict[str, int]:
+        payload = load_json(self.thermalization_selection_path, default={})
+        raw_cuts = payload.get("cuts_by_run", payload) if isinstance(payload, dict) else {}
+        if not isinstance(raw_cuts, dict):
+            return {}
+
+        cuts_by_run: dict[str, int] = {}
+        for run_dir in self.run_dirs:
+            value = raw_cuts.get(run_dir)
+            if value is None:
+                value = raw_cuts.get(os.path.abspath(run_dir))
+            if value is None:
+                continue
+            try:
+                cut = int(value)
+            except (TypeError, ValueError):
+                continue
+            if cut < 0:
+                continue
+            cuts_by_run[os.path.abspath(run_dir)] = cut
+        return cuts_by_run
+
+    def _save_thermalization_selection_state(self, cuts_by_run: dict[str, int]) -> None:
+        normalized = normalize_thermalization_steps_by_run(
+            [run_dir for run_dir in self.run_dirs if run_dir in cuts_by_run],
+            cuts_by_run,
+        )
+        save_json(
+            self.thermalization_selection_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "run_dirs": self.run_dirs,
+                "cuts_by_run": normalized,
+                "updated_at": utc_now(),
+            },
+        )
+
+    def _thermalization_preview_records_for_run(self, run_dir: str) -> list[dict[str, Any]]:
+        run_dir = os.path.abspath(run_dir)
+        cached = self.thermalization_preview_records_by_run.get(run_dir)
+        if cached is None:
+            cached = build_thermalization_preview([run_dir], include_combined=False)
+            self.thermalization_preview_records_by_run[run_dir] = cached
+        return cached
+
+    def _selection_preview_path_for_run(self, run_dir: str) -> Path:
+        return self.selection_preview_dir / thermalization_preview_filename(run_dir)
+
+    def _analysis_preview_path_for_run(self, run_dir: str) -> Path:
+        return self.plots_dir / "thermalization_by_run" / thermalization_preview_filename(run_dir)
+
+    def _save_selection_thermalization_preview(self, run_dir: str, suggested_cut: int) -> Path | None:
+        records = self._thermalization_preview_records_for_run(run_dir)
+        if not records:
+            return None
+
+        preview_path = self._selection_preview_path_for_run(run_dir)
+        save_thermalization_plot(
+            preview_path,
+            records,
+            suggested_cut=int(suggested_cut),
+        )
+        self.thermalization_preview_path = preview_path
+        return preview_path
+
+    def _open_plot(self, path: Path) -> bool:
+        if not self.open_plots:
+            return False
+        try:
+            return bool(self.open_plot_func(path))
+        except Exception:
+            return False
+
+    def _prompt_single_run_thermalization(self, run_dir: str, suggested_cut: int) -> int:
+        run_name = Path(run_dir).name
         while True:
             response = self.input(
-                f"Thermalization cut is {default_cut}. Press Enter to accept, or type a new integer: "
+                f"Thermalization cut for {run_name} is {int(suggested_cut)}. Press Enter to accept, or type a new integer: "
             ).strip()
             if response == "" or response.lower() in {"y", "yes"}:
-                return default_cut
+                return int(suggested_cut)
             try:
                 value = int(response)
             except ValueError:
@@ -198,6 +451,129 @@ class FinalizedAnalysisRunner:
                 self.print("Thermalization cut must be non-negative.")
                 continue
             return value
+
+    def _prompt_thermalization_by_run(self) -> dict[str, int]:
+        default_cut = int(run_evaluation.THERMALIZATION_STEPS)
+        self.print("Selected run directories:")
+        for index, path in enumerate(self.run_dirs, start=1):
+            self.print(f"  {index}. {path}")
+
+        cuts_by_run = self._load_saved_thermalization_cuts()
+        if cuts_by_run:
+            self.print(f"Loaded saved thermalization cuts for {len(cuts_by_run)} run(s).")
+
+        for index, run_dir in enumerate(self.run_dirs, start=1):
+            if run_dir in cuts_by_run:
+                self.print(
+                    f"Reusing thermalization cut {cuts_by_run[run_dir]} for run {index}/{len(self.run_dirs)}: {run_dir}"
+                )
+                continue
+
+            self.print(f"\nRun {index}/{len(self.run_dirs)}: {run_dir}")
+            preview_path = self._save_selection_thermalization_preview(run_dir, default_cut)
+            if preview_path is not None:
+                opened = self._open_plot(preview_path)
+                action = "Opened" if opened else "Saved"
+                self.print(f"{action} thermalization preview: {preview_path}")
+            else:
+                self.print("No thermalization preview data was available for this run.")
+
+            cut = self._prompt_single_run_thermalization(run_dir, default_cut)
+            cuts_by_run[run_dir] = int(cut)
+            self._save_thermalization_selection_state(cuts_by_run)
+            self.print(f"Saved thermalization cut {cut} for {Path(run_dir).name}.")
+
+        normalized = normalize_thermalization_steps_by_run(self.run_dirs, cuts_by_run)
+        self.print("Thermalization summary:")
+        for run_dir, cut in normalized.items():
+            self.print(f"  {Path(run_dir).name}: {cut}")
+        return normalized
+
+    def _write_thermalization_index(self, path: Path, entries: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows: list[str] = []
+        for entry in entries:
+            run_dir = str(entry["run_dir"])
+            run_name = html.escape(Path(run_dir).name or run_dir)
+            cut = int(entry["cut"])
+            plot_path = entry.get("plot_path")
+            link_html = "not available"
+            if plot_path is not None:
+                rel_path = os.path.relpath(str(plot_path), start=str(path.parent))
+                link_html = f'<a href="{html.escape(rel_path)}">interactive preview</a>'
+            rows.append(
+                "<tr>"
+                f"<td><code>{run_name}</code></td>"
+                f"<td><code>{html.escape(run_dir)}</code></td>"
+                f"<td>{cut}</td>"
+                f"<td>{link_html}</td>"
+                "</tr>"
+            )
+
+        body_rows = "\n".join(rows) if rows else "<tr><td colspan='4'>No thermalization previews available.</td></tr>"
+        document = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Thermalization Selection Summary</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 2rem; color: #222; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #ddd; padding: 0.6rem; text-align: left; vertical-align: top; }}
+    th {{ background: #f5f5f5; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  </style>
+</head>
+<body>
+  <h1>Thermalization Selection Summary</h1>
+  <p>Each run was reviewed individually before the combined analysis was built.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Directory</th>
+        <th>Cut</th>
+        <th>Preview</th>
+      </tr>
+    </thead>
+    <tbody>
+      {body_rows}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+        path.write_text(document, encoding="utf-8")
+
+    def _save_final_thermalization_preview(self) -> None:
+        entries: list[dict[str, Any]] = []
+        for run_dir in self.run_dirs:
+            records = self._thermalization_preview_records_for_run(run_dir)
+            plot_path: Path | None = None
+            if records:
+                plot_path = self._analysis_preview_path_for_run(run_dir)
+                save_thermalization_plot(
+                    plot_path,
+                    records,
+                    suggested_cut=int(self.thermalization_steps_by_run[run_dir]),
+                )
+            entries.append(
+                {
+                    "run_dir": run_dir,
+                    "cut": int(self.thermalization_steps_by_run[run_dir]),
+                    "plot_path": plot_path,
+                }
+            )
+
+        final_path = self.plots_dir / "thermalization_preview.html"
+        self._write_thermalization_index(final_path, entries)
+        self.manifest["thermalization_preview_plot"] = str(final_path)
+        self.manifest["thermalization_preview_plots_by_run"] = {
+            str(entry["run_dir"]): str(entry["plot_path"])
+            for entry in entries
+            if entry["plot_path"] is not None
+        }
+        self._save_manifest()
 
     def _load_or_init_manifest(self) -> dict[str, Any]:
         manifest = load_json(self.manifest_path, default=None)
@@ -215,7 +591,9 @@ class FinalizedAnalysisRunner:
                 },
                 "run_evaluation_version": run_evaluation.CALC_VERSION,
                 "calculator_helper": "fit_r0_from_potential_data",
-                "thermalization_steps": int(self.thermalization_steps),
+                "thermalization_mode": "per_run",
+                "thermalization_steps": self.thermalization_steps,
+                "thermalization_steps_by_run": self.thermalization_steps_by_run,
                 "n_bootstrap": int(self.n_bootstrap),
                 "target_force": float(self.target_force),
                 "plot_mode": self.plot_mode,
@@ -224,10 +602,18 @@ class FinalizedAnalysisRunner:
                 "compatibility_summary": self.compatibility_summary,
             }
 
-        if int(manifest.get("thermalization_steps")) != int(self.thermalization_steps):
+        stored_cuts_raw = manifest.get("thermalization_steps_by_run")
+        if stored_cuts_raw is None:
+            stored_step = manifest.get("thermalization_steps")
+            if stored_step is None:
+                raise ValueError("Existing analysis is missing thermalization cut information.")
+            stored_cuts = {run_dir: int(stored_step) for run_dir in self.run_dirs}
+        else:
+            stored_cuts = normalize_thermalization_steps_by_run(self.run_dirs, stored_cuts_raw)
+
+        if stored_cuts != self.thermalization_steps_by_run:
             raise ValueError(
-                f"Existing analysis uses thermalization_steps={manifest.get('thermalization_steps')} "
-                f"but this run requested {self.thermalization_steps}."
+                "Existing analysis uses different per-run thermalization cuts than this run requested."
             )
         if int(manifest.get("n_bootstrap")) != int(self.n_bootstrap):
             raise ValueError(
@@ -260,6 +646,7 @@ class FinalizedAnalysisRunner:
     def _write_input_runs(self) -> None:
         payload = {
             "run_dirs": self.run_dirs,
+            "thermalization_steps_by_run": self.thermalization_steps_by_run,
             "compatibility_summary": self.compatibility_summary,
         }
         save_json(self.input_runs_path, payload)
@@ -277,10 +664,12 @@ class FinalizedAnalysisRunner:
             verbose=True,
             prefix="[finalize_analysis]",
             load_workers=self.load_workers,
-            thermalization_steps=self.thermalization_steps,
+            thermalization_steps_by_run=self.thermalization_steps_by_run,
         )
         if combined_w_temp is None:
             raise RuntimeError("No combined W_temp data could be loaded from the selected runs.")
+        
+        self.print(f"Combined W_temp data loaded with aggregation: {aggregation}")
 
         block_size = max(1, run_evaluation.DEFAULT_BLOCK_SIZE)
         self.combined_w_temp = combined_w_temp
@@ -302,6 +691,7 @@ class FinalizedAnalysisRunner:
 
     def _build_scan_cache(self) -> None:
         self._load_data()
+        self.print("\nBuilding scan cache for V(R) analysis...")
         assert self.calc is not None
 
         wrt_path = self.scan_dir / "wrt_scan.json"
@@ -336,39 +726,41 @@ class FinalizedAnalysisRunner:
             if int(row["R"]) == int(r_value)
         ]
 
-    def _prompt_window_choice(self, r_value: int, candidates: list[dict[str, Any]]) -> tuple[int, int | None]:
+    def _prompt_window_choice(
+        self,
+        r_value: int,
+        candidates: list[dict[str, Any]],
+        previous_choice: tuple[int, int | None] | None = None,
+    ) -> tuple[int, int | None]:
         if not candidates:
             raise RuntimeError(f"No finite V(R) candidate windows available for R={r_value}.")
 
         self.print(f"\nR = {r_value}")
-        self.print("Candidate windows:")
-        for row in candidates:
-            self.print(
-                f"  {window_label(int(row['t_min']), row['t_max'])}: "
-                f"V(R)={row['value']:.6g}"
-                + (f" +/- {row['err']:.3g}" if row.get("err") is not None else "")
-            )
         while True:
-            response = self.input(
-                "Choose t_min and optional t_max as `t_min` or `t_min,t_max` (use `none` for no t_max): "
-            ).strip()
+            prompt = "Enter t_min and optional t_max as `t_min` or `t_min,t_max` (use `none` for no t_max)"
+            if previous_choice is not None:
+                prompt += f", or press Enter to reuse {window_label(*previous_choice)}"
+            prompt += ": "
+            response = self.input(prompt).strip()
             if not response:
-                self.print("A t_min selection is required.")
-                continue
-
-            try:
-                parts = [part.strip().lower() for part in response.split(",")]
-                if len(parts) == 1:
-                    t_min = int(parts[0])
-                    t_max = None
-                elif len(parts) == 2:
-                    t_min = int(parts[0])
-                    t_max = None if parts[1] in {"", "none"} else int(parts[1])
-                else:
-                    raise ValueError
-            except ValueError:
-                self.print("Please enter either `t_min` or `t_min,t_max`.")
-                continue
+                if previous_choice is None:
+                    self.print("A t_min selection is required for the first R.")
+                    continue
+                t_min, t_max = previous_choice
+            else:
+                try:
+                    parts = [part.strip().lower() for part in response.split(",")]
+                    if len(parts) == 1:
+                        t_min = int(parts[0])
+                        t_max = None
+                    elif len(parts) == 2:
+                        t_min = int(parts[0])
+                        t_max = None if parts[1] in {"", "none"} else int(parts[1])
+                    else:
+                        raise ValueError
+                except ValueError:
+                    self.print("Please enter either `t_min` or `t_min,t_max`.")
+                    continue
 
             for row in candidates:
                 if int(row["t_min"]) == t_min and row["t_max"] == t_max:
@@ -378,23 +770,29 @@ class FinalizedAnalysisRunner:
 
     def _finalize_wilsonloop(self) -> None:
         self._build_scan_cache()
+        self.print("\nScan cache built. Proceeding to finalize V(R) results for each R...")
         assert self.calc is not None
 
+        wrt_records = load_json(self.scan_dir / "wrt_scan.json", default=[])
         effective_mass_records = load_json(self.scan_dir / "effective_mass_scan.json", default=[])
         v_choices = self._load_v_choices()
         v_summary = self._load_v_summary()
+        plot_path = self.plots_dir / "effective_mass_all_R.html"
+        save_effective_mass_plot(plot_path, wrt_records, effective_mass_records)
+        self.print(f"\nSaved effective-mass plot with R dropdown: {plot_path}")
+        previous_choice: tuple[int, int | None] | None = None
 
         for r_value in self.unique_rs:
             key = str(int(r_value))
             bootstrap_path = self.wilson_bootstrap_dir / f"V_R_R_{key}.npy"
             if key in v_choices["choices"] and bootstrap_path.exists():
+                choice = v_choices["choices"][key]
+                previous_choice = (int(choice["t_min"]), choice["t_max"])
                 continue
 
             candidates = self._candidate_windows_for_r(r_value)
-            plot_path = self.plots_dir / f"effective_mass_R_{key}.html"
-            save_effective_mass_plot(plot_path, effective_mass_records, candidates, r_value)
-            self.print(f"\nSaved effective-mass plot for R={r_value}: {plot_path}")
-            t_min, t_max = self._prompt_window_choice(r_value, candidates)
+            t_min, t_max = self._prompt_window_choice(r_value, candidates, previous_choice=previous_choice)
+            previous_choice = (t_min, t_max)
 
             var = self.calc.get_variable("V_R", R=int(r_value), t_min=int(t_min), t_max=t_max)
             value = var.get()
@@ -461,9 +859,13 @@ class FinalizedAnalysisRunner:
 
         self.print("\nCandidate r_min values:")
         for row in sorted(r0_records, key=lambda item: item["r_min"]):
+            chi2_text = ""
+            if row.get("chi2_dof") is not None and np.isfinite(row["chi2_dof"]):
+                chi2_text = f", chi2/dof={row['chi2_dof']:.3f}"
             self.print(
                 f"  r_min={row['r_min']}: r0={row['r0']:.6g}"
                 + (f" +/- {row['err']:.3g}" if row.get("err") is not None else "")
+                + chi2_text
             )
         valid = {int(row["r_min"]) for row in r0_records}
         while True:
@@ -561,6 +963,9 @@ class FinalizedAnalysisRunner:
                 "r0_err": float(fit_result["r0_err"]) if fit_result["r0_err"] is not None else None,
                 "target_force": float(self.target_force),
                 "cornell_params": fit_result["cornell_params"],
+                "chi2": float(fit_result["chi2"]) if fit_result["chi2"] is not None else None,
+                "dof": int(fit_result["dof"]),
+                "chi2_dof": float(fit_result["chi2_dof"]) if fit_result["chi2_dof"] is not None else None,
                 "fit_rs": [int(r) for r in fit_rs],
                 "bootstrap_path": str(bootstrap_path),
             },
@@ -634,7 +1039,9 @@ class FinalizedAnalysisRunner:
 
     def run(self) -> Path:
         self._finalize_wilsonloop()
+        self.print("\nWilson loop analysis complete. Proceeding to finalize r0 fit...")
         self._finalize_r0()
+        self.print("\nr0 fit complete. Proceeding to compute derived quantities...")
         self._finalize_derived()
         self.print(f"\nFinalized analysis saved to: {self.analysis_dir}")
         return self.analysis_dir
@@ -642,7 +1049,21 @@ class FinalizedAnalysisRunner:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Finalize the interactive lattice analysis workflow.")
-    parser.add_argument("run_dirs", nargs="+", help="Exact run directories to combine and analyze.")
+    parser.add_argument("run_dirs", nargs="*", help="Exact run directories to combine and analyze.")
+    parser.add_argument(
+        "--run-root",
+        help="Discover all run directories beneath this root and process them in grouped batches.",
+    )
+    parser.add_argument(
+        "--group-by",
+        nargs="+",
+        help="Optional field names used to split discovered runs, e.g. eps1 beta L0. Defaults to full compatibility.",
+    )
+    parser.add_argument(
+        "--list-groups",
+        action="store_true",
+        help="Print the discovered analysis groups and exit without running the final analysis.",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -669,22 +1090,56 @@ def build_parser() -> argparse.ArgumentParser:
         default=run_evaluation.DEFAULT_SOMMER_TARGET,
         help="Sommer target force used in the r0 fit.",
     )
+    parser.add_argument(
+        "--no-open-plots",
+        action="store_false",
+        dest="open_plots",
+        help="Do not auto-open the HTML thermalization previews while selecting per-run cuts.",
+    )
+    parser.set_defaults(open_plots=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    runner = FinalizedAnalysisRunner(
-        run_dirs=args.run_dirs,
-        output_root=args.output_root,
-        plot_mode=args.plot_mode,
-        load_workers=args.load_workers,
-        calc_workers=args.calc_workers,
-        n_bootstrap=args.n_bootstrap,
-        target_force=args.target_force,
-    )
-    runner.run()
+
+    if args.run_root and args.run_dirs:
+        parser.error("Use either positional run_dirs or --run-root, not both.")
+    if not args.run_root and not args.run_dirs:
+        parser.error("Provide run directories or use --run-root.")
+
+    if args.run_root:
+        grouped_runs = group_run_directories(
+            discover_run_directories(args.run_root),
+            group_by=args.group_by,
+        )
+    else:
+        grouped_runs = [(tuple(), [os.path.abspath(path) for path in args.run_dirs])]
+
+    if args.list_groups:
+        for index, (signature, run_dirs) in enumerate(grouped_runs, start=1):
+            header = describe_group_signature(signature) if signature else "manual selection"
+            print(f"[group {index}] {header}")
+            for run_dir in run_dirs:
+                print(f"  {run_dir}")
+        return 0
+
+    for index, (signature, run_dirs) in enumerate(grouped_runs, start=1):
+        if len(grouped_runs) > 1:
+            header = describe_group_signature(signature)
+            print(f"\n=== Finalized analysis group {index}/{len(grouped_runs)}: {header} ===")
+        runner = FinalizedAnalysisRunner(
+            run_dirs=run_dirs,
+            output_root=args.output_root,
+            plot_mode=args.plot_mode,
+            load_workers=args.load_workers,
+            calc_workers=args.calc_workers,
+            n_bootstrap=args.n_bootstrap,
+            target_force=args.target_force,
+            open_plots=args.open_plots,
+        )
+        runner.run()
     return 0
 
 

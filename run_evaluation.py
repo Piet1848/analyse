@@ -241,10 +241,19 @@ def _iter_loaded_compact_w_temp(
     run_paths: List[str],
     load_workers: int,
     thermalization_steps: Optional[int] = None,
+    thermalization_steps_by_run: Optional[Dict[str, int]] = None,
 ):
+    cut_by_run = {
+        os.path.abspath(path): int(value)
+        for path, value in (thermalization_steps_by_run or {}).items()
+    }
+
+    def cut_for_run(run_path: str) -> Optional[int]:
+        return cut_by_run.get(os.path.abspath(run_path), thermalization_steps)
+
     if load_workers <= 1:
         for run_path in run_paths:
-            yield _load_single_compact_w_temp(run_path, thermalization_steps=thermalization_steps)
+            yield _load_single_compact_w_temp(run_path, thermalization_steps=cut_for_run(run_path))
         return
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=load_workers) as executor:
@@ -257,7 +266,7 @@ def _iter_loaded_compact_w_temp(
             future = executor.submit(
                 _load_single_compact_w_temp,
                 run_paths[index],
-                thermalization_steps,
+                cut_for_run(run_paths[index]),
             )
             future_to_index[future] = index
 
@@ -439,6 +448,7 @@ def _load_combined_w_temp(
     prefix: str = "",
     load_workers: int = 1,
     thermalization_steps: Optional[int] = None,
+    thermalization_steps_by_run: Optional[Dict[str, int]] = None,
 ) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
     def vprint(msg: str):
         if verbose:
@@ -447,6 +457,15 @@ def _load_combined_w_temp(
 
     worker_count = _resolve_worker_count(load_workers, len(run_paths), default=1)
     runs_with_w_temp = 0
+    resolved_cuts_by_run = {
+        os.path.abspath(path): (
+            int(thermalization_steps_by_run[os.path.abspath(path)])
+            if thermalization_steps_by_run is not None and os.path.abspath(path) in thermalization_steps_by_run
+            else (THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps))
+        )
+        for path in run_paths
+    }
+    unique_cuts = sorted(set(resolved_cuts_by_run.values()))
 
     def iter_compact_files():
         nonlocal runs_with_w_temp
@@ -454,6 +473,7 @@ def _load_combined_w_temp(
             run_paths,
             worker_count,
             thermalization_steps=thermalization_steps,
+            thermalization_steps_by_run=resolved_cuts_by_run,
         ):
             if compact is None:
                 continue
@@ -477,7 +497,8 @@ def _load_combined_w_temp(
         "n_w_temp_files": runs_with_w_temp,
         "n_samples_after_cut": 0,
         "n_configurations_after_cut": 0,
-        "thermalization_steps": THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps),
+        "thermalization_steps": unique_cuts[0] if len(unique_cuts) == 1 else None,
+        "thermalization_steps_by_run": resolved_cuts_by_run,
         "load_workers": worker_count,
     }
 

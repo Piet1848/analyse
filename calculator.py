@@ -119,6 +119,11 @@ def fit_r0_from_potential_data(
 
     r0_val, fit_params = perform_fit(fit_rs, fit_vs, fit_sigma)
     cornell_params = {"A": fit_params[0], "sigma": fit_params[1], "B": fit_params[2]}
+    fit_model = cornell_potential_ansatz(fit_rs, *fit_params)
+    residuals = fit_vs - fit_model
+    chi2 = float(np.sum((residuals / fit_sigma) ** 2)) if len(fit_sigma) > 0 else None
+    dof = max(int(len(fit_rs)) - len(fit_params), 0)
+    chi2_dof = float(chi2 / dof) if chi2 is not None and dof > 0 else None
 
     fill_value = float(r0_val) if np.isfinite(r0_val) else np.nan
     r0_bootstraps = np.full(int(n_bootstrap), fill_value, dtype=float)
@@ -143,6 +148,9 @@ def fit_r0_from_potential_data(
         "fit_rs": fit_rs,
         "fit_vs": fit_vs,
         "fit_errs": fit_sigma,
+        "chi2": chi2,
+        "dof": dof,
+        "chi2_dof": chi2_dof,
     }
 
 def calculate_volume_from_r0(
