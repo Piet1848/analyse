@@ -151,6 +151,18 @@ class FinalizeAnalysisTests(unittest.TestCase):
         self.assertEqual(trimmed["values"], [float(idx) for idx in range(10)])
         self.assertEqual(trimmed["running_mean"], [float(idx) / 2.0 for idx in range(10)])
 
+    def test_prompt_bootstrap_block_size_rejects_invalid_values(self):
+        runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
+        runner.input = InputSequence(["abc", "0", "3"])
+        messages = []
+        runner.print = lambda *args, **kwargs: messages.append(" ".join(str(arg) for arg in args))
+
+        block_size = runner._prompt_bootstrap_block_size(2)
+
+        self.assertEqual(block_size, 3)
+        self.assertTrue(any("Invalid bootstrap block size" in message for message in messages))
+        self.assertTrue(any("must be at least 1" in message for message in messages))
+
     def test_open_html_plot_returns_false_when_linux_openers_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = Path(tmp) / "preview.html"
@@ -291,6 +303,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
 
             patchers = [
                 mock.patch.object(finalize_analysis, "save_thermalization_plot", side_effect=write_stub_plot),
+                mock.patch.object(finalize_analysis, "save_bootstrap_block_size_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_effective_mass_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_r0_stability_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_cornell_plot", side_effect=write_stub_plot),
@@ -306,8 +319,9 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     calc_workers=None,
                     n_bootstrap=16,
                     target_force=1.65,
+                    block_size_scan_values=[1, 2],
                     open_plots=False,
-                    input_func=InputSequence(["", "", "1"]),
+                    input_func=InputSequence(["", "", "1", "1"]),
                     print_func=lambda *args, **kwargs: None,
                 )
                 with self.assertRaisesRegex(RuntimeError, "input exhausted"):
@@ -322,6 +336,11 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     default={"choices": {}},
                 )
                 self.assertEqual(sorted(first_choices["choices"]), ["2"])
+                block_choice = finalize_analysis.load_json(
+                    analysis_dir / "bootstrap_block_size_choice.json",
+                    default={},
+                )
+                self.assertEqual(block_choice["block_size"], 1)
                 selection_state = finalize_analysis.load_json(
                     first_runner.selection_preview_dir / "thermalization_cuts.json",
                     default={},
@@ -342,6 +361,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     calc_workers=None,
                     n_bootstrap=16,
                     target_force=1.65,
+                    block_size_scan_values=[1, 2],
                     open_plots=False,
                     input_func=InputSequence(["1", "1", "2"]),
                     print_func=lambda *args, **kwargs: None,
@@ -353,6 +373,8 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue(manifest["status"]["r0_complete"])
                 self.assertTrue(manifest["status"]["derived_complete"])
                 self.assertIn("thermalization_preview_plot", manifest)
+                self.assertEqual(manifest["block_size"], 1)
+                self.assertEqual(second_runner.calc.step_size, 1)
                 self.assertEqual(
                     manifest["thermalization_steps_by_run"],
                     {
@@ -362,10 +384,12 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 )
 
                 self.assertTrue((analysis_dir / "scan_cache" / "wrt_scan.json").exists())
+                self.assertTrue((analysis_dir / "scan_cache" / "bootstrap_block_size_scan.json").exists())
                 self.assertTrue((analysis_dir / "wilsonloop" / "V_R_summary.json").exists())
                 self.assertTrue((analysis_dir / "r0" / "r0_result.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "summary.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "bootstrap" / "volume_r0.npy").exists())
+                self.assertTrue((analysis_dir / "plots" / "bootstrap_block_size.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_preview.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_by_run").exists())
             finally:

@@ -85,6 +85,84 @@ def build_wrt_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any
     return records
 
 
+def build_bootstrap_block_size_scan(
+    file_data,
+    block_sizes: list[int],
+    *,
+    n_bootstrap: int,
+    pair_keys: list[tuple[int, int]] | None = None,
+) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
+    probe_calc = Calculator(file_data, n_bootstrap=1, step_size=1)
+    available_pairs = probe_calc.get_available_pairs()
+    selected_pairs = (
+        _select_preview_pair_keys([(int(r_val), int(t_val)) for r_val, t_val in available_pairs])
+        if pair_keys is None
+        else [(int(r_val), int(t_val)) for r_val, t_val in pair_keys]
+    )
+    if not selected_pairs:
+        raise ValueError("No W(R,T) pairs available for bootstrap block-size scan.")
+
+    records: list[dict[str, Any]] = []
+    for block_size in sorted({int(value) for value in block_sizes if int(value) >= 1}):
+        calc = Calculator(file_data, n_bootstrap=int(n_bootstrap), step_size=int(block_size))
+        try:
+            calc.prime_w_rt_cache(pairs=selected_pairs)
+        except Exception:
+            pass
+
+        for r_val, t_val in selected_pairs:
+            row: dict[str, Any] = {
+                "block_size": int(block_size),
+                "R": int(r_val),
+                "T": int(t_val),
+                "value": None,
+                "err": None,
+                "status": "ok",
+            }
+            try:
+                var = calc.get_variable("W_R_T", R=int(r_val), T=int(t_val))
+                value = var.get()
+                err = var.err()
+                row["value"] = float(value) if value is not None and np.isfinite(value) else None
+                row["err"] = float(err) if err is not None and np.isfinite(err) else None
+            except Exception as exc:
+                row["status"] = str(exc)
+            records.append(row)
+
+    return records, selected_pairs
+
+
+def recommend_bootstrap_block_size(
+    scan_records: list[dict[str, Any]],
+    *,
+    fallback: int,
+    relative_tolerance: float = 0.10,
+) -> int:
+    by_pair: dict[tuple[int, int], dict[int, float]] = {}
+    for row in scan_records:
+        err = row.get("err")
+        if err is None or not np.isfinite(err):
+            continue
+        by_pair.setdefault((int(row["R"]), int(row["T"])), {})[int(row["block_size"])] = float(err)
+
+    block_sizes = sorted({block for pair_errors in by_pair.values() for block in pair_errors})
+    if len(block_sizes) < 2:
+        return max(1, int(fallback))
+
+    for current, next_block in zip(block_sizes, block_sizes[1:], strict=False):
+        relative_changes: list[float] = []
+        for pair_errors in by_pair.values():
+            current_err = pair_errors.get(current)
+            next_err = pair_errors.get(next_block)
+            if current_err is None or next_err is None or current_err <= 0:
+                continue
+            relative_changes.append(abs(next_err - current_err) / current_err)
+        if relative_changes and float(np.median(relative_changes)) <= float(relative_tolerance):
+            return int(current)
+
+    return max(1, int(fallback))
+
+
 def build_thermalization_preview(
     run_dirs: list[str],
     *,
@@ -617,6 +695,92 @@ def save_thermalization_plot(
     fig.update_layout(
         **layout_updates,
     )
+    _write_figure_html(fig, path)
+
+
+def save_bootstrap_block_size_plot(
+    path: Path,
+    scan_records: list[dict[str, Any]],
+    *,
+    recommended_block_size: int | None,
+) -> None:
+    go = _get_plotly()
+    finite_rows = [
+        row
+        for row in scan_records
+        if row.get("err") is not None and np.isfinite(row["err"])
+    ]
+    if not finite_rows:
+        raise ValueError("No finite bootstrap error data available for block-size plot.")
+
+    pair_keys = sorted({(int(row["R"]), int(row["T"])) for row in finite_rows})
+    fig = go.Figure()
+    for r_val, t_val in pair_keys:
+        rows = sorted(
+            [
+                row
+                for row in finite_rows
+                if int(row["R"]) == int(r_val) and int(row["T"]) == int(t_val)
+            ],
+            key=lambda row: int(row["block_size"]),
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[int(row["block_size"]) for row in rows],
+                y=[float(row["err"]) for row in rows],
+                mode="lines+markers",
+                name=f"W(R={r_val}, T={t_val})",
+            )
+        )
+
+    shapes: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = [
+        {
+            "x": 0.0,
+            "y": 1.12,
+            "xref": "paper",
+            "yref": "paper",
+            "text": "Block size is measured in saved configurations, not raw Monte Carlo sweeps.",
+            "showarrow": False,
+            "xanchor": "left",
+            "font": {"size": 12, "color": "#555"},
+        }
+    ]
+    if recommended_block_size is not None:
+        shapes.append(
+            {
+                "type": "line",
+                "xref": "x",
+                "yref": "paper",
+                "x0": float(recommended_block_size),
+                "x1": float(recommended_block_size),
+                "y0": 0.0,
+                "y1": 1.0,
+                "line": {"color": "firebrick", "dash": "dash"},
+            }
+        )
+        annotations.append(
+            {
+                "x": float(recommended_block_size),
+                "y": 1.02,
+                "xref": "x",
+                "yref": "paper",
+                "text": f"recommended block size = {int(recommended_block_size)}",
+                "showarrow": False,
+                "font": {"color": "firebrick"},
+            }
+        )
+
+    fig.update_layout(
+        title="Bootstrap error vs block size",
+        xaxis_title="Bootstrap block size (saved configurations)",
+        yaxis_title="Bootstrap error of W(R,T)",
+        template="plotly_white",
+        shapes=shapes,
+        annotations=annotations,
+        margin={"l": 70, "r": 180, "t": 90, "b": 70},
+    )
+    fig.update_xaxes(type="linear")
     _write_figure_html(fig, path)
 
 

@@ -19,6 +19,7 @@ import numpy as np
 import run_evaluation
 from calculator import Calculator, fit_r0_from_potential_data
 from finalized_analysis_helpers import (
+    build_bootstrap_block_size_scan,
     build_effective_mass_scan,
     build_thermalization_preview,
     build_locked_r0_scan,
@@ -26,6 +27,8 @@ from finalized_analysis_helpers import (
     build_wrt_scan,
     enumerate_t_windows,
     load_json,
+    recommend_bootstrap_block_size,
+    save_bootstrap_block_size_plot,
     save_cornell_plot,
     save_effective_mass_plot,
     save_json,
@@ -43,6 +46,9 @@ GROUP_FIELD_ALIASES = {
     "eps1": "epsilon1",
     "eps2": "epsilon2",
 }
+DEFAULT_BLOCK_SIZE_SCAN_MIN = 1
+DEFAULT_BLOCK_SIZE_SCAN_MAX = 16
+DEFAULT_BLOCK_SIZE_SCAN_STEP = 1
 
 
 def utc_now() -> str:
@@ -98,6 +104,32 @@ def thermalization_preview_filename(run_dir: str) -> str:
     safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_name)
     digest = hashlib.md5(os.path.abspath(run_dir).encode("utf-8")).hexdigest()[:12]
     return f"thermalization_{safe_name}_{digest}.html"
+
+
+def parse_bootstrap_block_sizes(args: argparse.Namespace) -> list[int]:
+    if args.block_sizes:
+        values: list[int] = []
+        for chunk in args.block_sizes.split(","):
+            stripped = chunk.strip()
+            if not stripped:
+                continue
+            values.append(int(stripped))
+    else:
+        min_block = int(args.min_block_size)
+        max_block = int(args.max_block_size)
+        step = int(args.block_step)
+        if min_block < 1:
+            raise ValueError("--min-block-size must be at least 1")
+        if max_block < min_block:
+            raise ValueError("--max-block-size must be greater than or equal to --min-block-size")
+        if step < 1:
+            raise ValueError("--block-step must be at least 1")
+        values = list(range(min_block, max_block + 1, step))
+
+    block_sizes = sorted({int(value) for value in values if int(value) >= 1})
+    if not block_sizes:
+        raise ValueError("No valid bootstrap block sizes selected.")
+    return block_sizes
 
 
 def open_html_plot(path: Path) -> bool:
@@ -292,6 +324,7 @@ class FinalizedAnalysisRunner:
         calc_workers: int | None,
         n_bootstrap: int,
         target_force: float,
+        block_size_scan_values: list[int] | None = None,
         open_plots: bool = True,
         open_plot_func: Callable[[Path], bool] = open_html_plot,
         input_func: Callable[[str], str] = input,
@@ -307,6 +340,13 @@ class FinalizedAnalysisRunner:
         self.calc_workers = calc_workers
         self.n_bootstrap = int(n_bootstrap)
         self.target_force = float(target_force)
+        self.block_size_scan_values = (
+            sorted({int(value) for value in block_size_scan_values if int(value) >= 1})
+            if block_size_scan_values is not None
+            else list(range(DEFAULT_BLOCK_SIZE_SCAN_MIN, DEFAULT_BLOCK_SIZE_SCAN_MAX + 1, DEFAULT_BLOCK_SIZE_SCAN_STEP))
+        )
+        if not self.block_size_scan_values:
+            raise ValueError("At least one positive bootstrap block size is required.")
         self.open_plots = bool(open_plots)
         self.open_plot_func = open_plot_func
         self.input = input_func
@@ -337,6 +377,7 @@ class FinalizedAnalysisRunner:
         self.r0_bootstrap_dir = self.r0_dir / "bootstrap"
         self.derived_dir = self.analysis_dir / "derived"
         self.derived_bootstrap_dir = self.derived_dir / "bootstrap"
+        self.bootstrap_block_size_choice_path = self.analysis_dir / "bootstrap_block_size_choice.json"
 
         self.manifest = self._load_or_init_manifest()
         self._ensure_output_layout()
@@ -596,6 +637,8 @@ class FinalizedAnalysisRunner:
                 "thermalization_steps_by_run": self.thermalization_steps_by_run,
                 "n_bootstrap": int(self.n_bootstrap),
                 "target_force": float(self.target_force),
+                "block_size": None,
+                "block_size_scan_values": self.block_size_scan_values,
                 "plot_mode": self.plot_mode,
                 "calc_workers": self.calc_workers,
                 "load_workers": self.load_workers,
@@ -655,6 +698,121 @@ class FinalizedAnalysisRunner:
         self.manifest["updated_at"] = utc_now()
         save_json(self.manifest_path, self.manifest)
 
+    def _saved_bootstrap_block_size(self) -> int | None:
+        choice_payload = load_json(self.bootstrap_block_size_choice_path, default=None)
+        if isinstance(choice_payload, dict):
+            try:
+                value = int(choice_payload.get("block_size"))
+            except (TypeError, ValueError):
+                value = 0
+            if value >= 1:
+                return value
+
+        try:
+            value = int(self.manifest.get("block_size"))
+        except (TypeError, ValueError):
+            value = 0
+        return value if value >= 1 else None
+
+    def _compute_tau_hint(self, file_data) -> float | None:
+        if not any(obs.name in {"plaquette", "retrace"} for obs in getattr(file_data, "observables", [])):
+            return None
+
+        calc = Calculator(file_data, n_bootstrap=self.n_bootstrap, step_size=1)
+        for obs_name in ("plaquette", "retrace"):
+            try:
+                tau = calc.get_variable("tau_int", obs_name=obs_name).get()
+            except KeyError:
+                continue
+            if tau is not None and np.isfinite(tau):
+                return float(tau)
+        return None
+
+    def _prompt_bootstrap_block_size(self, recommended_block_size: int) -> int:
+        while True:
+            response = self.input(
+                "Bootstrap block size in saved configurations "
+                f"is {int(recommended_block_size)}. Press Enter to accept, or type a new integer: "
+            ).strip()
+            if response == "" or response.lower() in {"y", "yes"}:
+                return int(recommended_block_size)
+            try:
+                value = int(response)
+            except ValueError:
+                self.print(f"Invalid bootstrap block size: {response!r}")
+                continue
+            if value < 1:
+                self.print("Bootstrap block size must be at least 1.")
+                continue
+            return value
+
+    def _select_bootstrap_block_size(self, file_data) -> int:
+        saved_block_size = self._saved_bootstrap_block_size()
+        if saved_block_size is not None:
+            self.print(f"Reusing bootstrap block size: {saved_block_size}")
+            self.manifest["block_size"] = int(saved_block_size)
+            self._save_manifest()
+            return int(saved_block_size)
+
+        self.print("\nBuilding bootstrap block-size diagnostic for representative W(R,T) points...")
+        scan_path = self.scan_dir / "bootstrap_block_size_scan.json"
+        plot_path = self.plots_dir / "bootstrap_block_size.html"
+        scan_records, selected_pairs = build_bootstrap_block_size_scan(
+            file_data,
+            self.block_size_scan_values,
+            n_bootstrap=self.n_bootstrap,
+        )
+        tau_hint = self._compute_tau_hint(file_data)
+        recommended = recommend_bootstrap_block_size(
+            scan_records,
+            fallback=run_evaluation.DEFAULT_BLOCK_SIZE,
+        )
+
+        save_json(
+            scan_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "block_size_scan_values": self.block_size_scan_values,
+                "selected_pairs": [{"R": int(r_val), "T": int(t_val)} for r_val, t_val in selected_pairs],
+                "tau_int": tau_hint,
+                "recommended_block_size": int(recommended),
+                "records": scan_records,
+                "saved_at": utc_now(),
+            },
+        )
+        save_bootstrap_block_size_plot(
+            plot_path,
+            scan_records,
+            recommended_block_size=int(recommended),
+        )
+        opened = self._open_plot(plot_path)
+        action = "Opened" if opened else "Saved"
+        self.print(f"{action} bootstrap block-size plot: {plot_path}")
+        if tau_hint is None:
+            self.print("tau_int unavailable from loaded data; using the error-vs-block-size diagnostic.")
+        else:
+            self.print(f"tau_int hint: {tau_hint:.6g}")
+
+        block_size = self._prompt_bootstrap_block_size(int(recommended))
+        save_json(
+            self.bootstrap_block_size_choice_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "block_size": int(block_size),
+                "recommended_block_size": int(recommended),
+                "scan_path": str(scan_path),
+                "plot_path": str(plot_path),
+                "tau_int": tau_hint,
+                "saved_at": utc_now(),
+            },
+        )
+        self.manifest["block_size"] = int(block_size)
+        self.manifest["bootstrap_block_size_scan"] = str(scan_path)
+        self.manifest["bootstrap_block_size_plot"] = str(plot_path)
+        self.manifest["tau_int"] = tau_hint
+        self._save_manifest()
+        return int(block_size)
+
     def _load_data(self) -> None:
         if self.combined_w_temp is not None and self.calc is not None:
             return
@@ -671,7 +829,7 @@ class FinalizedAnalysisRunner:
         
         self.print(f"Combined W_temp data loaded with aggregation: {aggregation}")
 
-        block_size = max(1, run_evaluation.DEFAULT_BLOCK_SIZE)
+        block_size = self._select_bootstrap_block_size(combined_w_temp)
         self.combined_w_temp = combined_w_temp
         self.aggregation = aggregation
         self.calc = Calculator(
@@ -1091,6 +1249,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sommer target force used in the r0 fit.",
     )
     parser.add_argument(
+        "--block-sizes",
+        help="Comma-separated bootstrap block sizes to scan. Overrides --min-block-size/--max-block-size.",
+    )
+    parser.add_argument(
+        "--min",
+        "--min-block-size",
+        dest="min_block_size",
+        type=int,
+        default=DEFAULT_BLOCK_SIZE_SCAN_MIN,
+        help="Minimum bootstrap block size to scan when using a range.",
+    )
+    parser.add_argument(
+        "--max",
+        "--max-block-size",
+        dest="max_block_size",
+        type=int,
+        default=DEFAULT_BLOCK_SIZE_SCAN_MAX,
+        help="Maximum bootstrap block size to scan when using a range.",
+    )
+    parser.add_argument(
+        "--block-step",
+        type=int,
+        default=DEFAULT_BLOCK_SIZE_SCAN_STEP,
+        help="Step for generated bootstrap block sizes.",
+    )
+    parser.add_argument(
         "--no-open-plots",
         action="store_false",
         dest="open_plots",
@@ -1108,6 +1292,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Use either positional run_dirs or --run-root, not both.")
     if not args.run_root and not args.run_dirs:
         parser.error("Provide run directories or use --run-root.")
+
+    try:
+        block_size_scan_values = parse_bootstrap_block_sizes(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.run_root:
         grouped_runs = group_run_directories(
@@ -1137,6 +1326,7 @@ def main(argv: list[str] | None = None) -> int:
             calc_workers=args.calc_workers,
             n_bootstrap=args.n_bootstrap,
             target_force=args.target_force,
+            block_size_scan_values=block_size_scan_values,
             open_plots=args.open_plots,
         )
         runner.run()
