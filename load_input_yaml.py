@@ -4,7 +4,7 @@ Read and store parameters from input.yaml into Python dataclasses.
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Any
+from typing import List, Any
 import yaml
 import argparse
 
@@ -24,6 +24,23 @@ class MetropolisParams:
     delta: float
     epsilon1: float
     epsilon2: float
+
+
+@dataclass
+class GradientFlowParams:
+    enabled: bool
+    integrator: str
+    dt: float
+    t_values: List[float]
+    measure_energy_clover: bool
+    measure_wilson_loop_temporal: bool
+    measure_wilson_loop_mu_nu: bool
+    extract_t0: bool
+    t0_target: float
+    obs_filename: str
+    W_temp_filename: str
+    W_mu_nu_filename: str
+    t0_filename: str
 
 
 @dataclass
@@ -69,9 +86,12 @@ def load_params(yaml_path: str) -> tuple[MetropolisParams, GaugeObservableParams
     with open(yaml_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    metro_raw = data["MetropolisParams"]
+    metro_raw = dict(data["MetropolisParams"])
     gauge_raw = data["GaugeObservableParams"]
 
+    metro_raw.setdefault("Ndims", 4)
+    metro_raw.setdefault("Nd", 4)
+    metro_raw.setdefault("Nc", 2)
     metro = MetropolisParams(**metro_raw)
 
     # Ensure the list entries are tuples (dataclass type annotation)
@@ -117,6 +137,29 @@ def load_params(yaml_path: str) -> tuple[MetropolisParams, GaugeObservableParams
     )
 
     return metro, gauge
+
+
+def load_gradient_flow_params(yaml_path: str) -> GradientFlowParams:
+    """Read optional GradientFlowParams from YAML with disabled defaults."""
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    raw = dict(data.get("GradientFlowParams") or {})
+    return GradientFlowParams(
+        enabled=raw.get("enabled", False),
+        integrator=raw.get("integrator", ""),
+        dt=float(raw.get("dt", 0.0)),
+        t_values=[float(value) for value in raw.get("t_values", [])],
+        measure_energy_clover=raw.get("measure_energy_clover", False),
+        measure_wilson_loop_temporal=raw.get("measure_wilson_loop_temporal", False),
+        measure_wilson_loop_mu_nu=raw.get("measure_wilson_loop_mu_nu", False),
+        extract_t0=raw.get("extract_t0", False),
+        t0_target=float(raw.get("t0_target", 0.3)),
+        obs_filename=raw.get("obs_filename", "gradient_flow_obs.dat"),
+        W_temp_filename=raw.get("W_temp_filename", "gradient_flow_wtemp.dat"),
+        W_mu_nu_filename=raw.get("W_mu_nu_filename", "gradient_flow_w_mu_nu.dat"),
+        t0_filename=raw.get("t0_filename", "gradient_flow_t0.dat"),
+    )
 
 
 if __name__ == "__main__":

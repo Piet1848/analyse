@@ -9,7 +9,12 @@ from typing import Dict, Any, Optional, List, Tuple
 
 import numpy as np
 
-from load_input_yaml import load_params, MetropolisParams, GaugeObservableParams
+from load_input_yaml import (
+    GaugeObservableParams,
+    MetropolisParams,
+    load_gradient_flow_params,
+    load_params,
+)
 
 import data_organizer as do
 from calculator import Calculator, make_key
@@ -18,7 +23,7 @@ from calculator import Calculator, make_key
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 1500
-CALC_VERSION = "4.7"
+CALC_VERSION = "5.0"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 DEFAULT_N_BOOTSTRAP = 200
@@ -228,13 +233,250 @@ def _load_single_compact_w_temp(
     run_path: str,
     thermalization_steps: Optional[int] = None,
 ) -> Tuple[str, Optional[do.CompactWilsonData]]:
-    w_temp_path = Path(run_path) / "W_temp.out"
-    if not w_temp_path.exists():
-        return run_path, None
+    run_dir = Path(run_path)
+    candidates = [run_dir / "W_temp.out"]
+    try:
+        flow_params = load_gradient_flow_params(str(run_dir / "input.yaml"))
+        candidates.append(run_dir / flow_params.W_temp_filename)
+    except Exception:
+        pass
 
     min_step = THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps)
-    compact = do.load_compact_wilson_file(str(w_temp_path), min_step=min_step)
-    return run_path, compact
+    compact_parts = [
+        do.load_compact_wilson_file(str(path), min_step=min_step)
+        for path in candidates
+        if path.exists()
+    ]
+    compact_parts = [part for part in compact_parts if part is not None]
+    if not compact_parts:
+        return run_path, None
+
+    flow_order: list[do.FlowKey] = []
+    wilson_by_flow_pair: dict[do.FlowKey, np.ndarray] = {}
+    for compact in compact_parts:
+        for key in compact.flow_pair_order:
+            if key in wilson_by_flow_pair:
+                raise ValueError(f"Duplicate Wilson-loop key {key} while loading {run_path}")
+            flow_order.append(key)
+            wilson_by_flow_pair[key] = compact.wilson_by_flow_pair[key]
+
+    return run_path, do.CompactWilsonData(
+        f"{run_path}/combined_w_temp",
+        flow_pair_order=flow_order,
+        wilson_by_flow_pair=wilson_by_flow_pair,
+    )
+
+
+def _load_single_gradient_flow_obs(
+    run_path: str,
+    thermalization_steps: Optional[int] = None,
+) -> Tuple[str, Optional[Dict[float, Dict[str, np.ndarray]]], Optional[float]]:
+    run_dir = Path(run_path)
+    try:
+        flow_params = load_gradient_flow_params(str(run_dir / "input.yaml"))
+    except Exception:
+        return run_path, None, None
+
+    obs_path = run_dir / flow_params.obs_filename
+    if not obs_path.exists():
+        return run_path, None, float(flow_params.t0_target)
+
+    fd = do.FileData(str(obs_path))
+    fd.read_file()
+    fd.align_lengths()
+    min_step = THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps)
+    if min_step > 0:
+        fd.remove_thermalization(min_step)
+    fd.align_lengths()
+
+    if not fd.observables:
+        return run_path, None, float(flow_params.t0_target)
+
+    try:
+        t_values = np.asarray(fd.get("t_over_a2").values, dtype=float)
+        ehat = np.asarray(fd.get("Ehat_clover").values, dtype=float)
+        t2e = np.asarray(fd.get("t2E_clover").values, dtype=float)
+    except ValueError:
+        return run_path, None, float(flow_params.t0_target)
+
+    grouped: Dict[float, Dict[str, list[float]]] = {}
+    for t_val, e_val, t2e_val in zip(t_values, ehat, t2e):
+        key = float(round(float(t_val), 12))
+        row = grouped.setdefault(key, {"Ehat_clover": [], "t2E_clover": []})
+        row["Ehat_clover"].append(float(e_val))
+        row["t2E_clover"].append(float(t2e_val))
+
+    flow_data = {
+        t_val: {
+            "Ehat_clover": np.asarray(values["Ehat_clover"], dtype=np.float32),
+            "t2E_clover": np.asarray(values["t2E_clover"], dtype=np.float32),
+        }
+        for t_val, values in grouped.items()
+    }
+    return run_path, flow_data, float(flow_params.t0_target)
+
+
+def _load_combined_gradient_flow_obs(
+    run_paths: List[str],
+    load_workers: int = 1,
+    thermalization_steps: Optional[int] = None,
+    thermalization_steps_by_run: Optional[Dict[str, int]] = None,
+) -> Tuple[Optional[Dict[float, Dict[str, np.ndarray]]], Dict[str, Any]]:
+    cut_by_run = {
+        os.path.abspath(path): int(value)
+        for path, value in (thermalization_steps_by_run or {}).items()
+    }
+
+    def cut_for_run(run_path: str) -> Optional[int]:
+        return cut_by_run.get(os.path.abspath(run_path), thermalization_steps)
+
+    runs_with_flow = 0
+    target = None
+    common_times: set[float] | None = None
+    chunks: Dict[float, Dict[str, list[np.ndarray]]] = {}
+
+    for run_path in run_paths:
+        _, flow_data, run_target = _load_single_gradient_flow_obs(
+            run_path,
+            thermalization_steps=cut_for_run(run_path),
+        )
+        if run_target is not None:
+            target = run_target if target is None else target
+        if not flow_data:
+            continue
+        runs_with_flow += 1
+        current_times = set(flow_data)
+        if common_times is None:
+            common_times = set(current_times)
+        else:
+            common_times &= current_times
+        for t_val in current_times:
+            slot = chunks.setdefault(t_val, {"Ehat_clover": [], "t2E_clover": []})
+            slot["Ehat_clover"].append(flow_data[t_val]["Ehat_clover"])
+            slot["t2E_clover"].append(flow_data[t_val]["t2E_clover"])
+
+    if not common_times:
+        return None, {
+            "n_runs_with_gradient_flow": runs_with_flow,
+            "t0_target": target,
+        }
+
+    combined = {
+        t_val: {
+            name: np.concatenate(chunks[t_val][name]).astype(np.float32, copy=False)
+            for name in ("Ehat_clover", "t2E_clover")
+        }
+        for t_val in sorted(common_times)
+    }
+    first = next(iter(combined.values()))
+    return combined, {
+        "n_runs_with_gradient_flow": runs_with_flow,
+        "available_flow_times": sorted(float(t) for t in common_times),
+        "n_configurations_after_cut": int(len(first["t2E_clover"])),
+        "t0_target": target,
+    }
+
+
+def _bootstrap_series_matrix(
+    series_by_row: list[np.ndarray],
+    block_size: int,
+    n_bootstrap: int,
+    seed: int = 42,
+) -> np.ndarray:
+    if not series_by_row:
+        return np.empty((0, n_bootstrap), dtype=float)
+    n_samples = len(series_by_row[0])
+    if n_samples <= 0:
+        return np.empty((len(series_by_row), n_bootstrap), dtype=float)
+    if any(len(row) != n_samples for row in series_by_row):
+        raise ValueError("Gradient-flow observable series must have matching lengths")
+
+    block_size = max(1, int(block_size))
+    starts = np.arange(0, n_samples, block_size, dtype=np.int64)
+    lengths = np.minimum(block_size, n_samples - starts).astype(np.float64)
+    sums = np.empty((len(starts), len(series_by_row)), dtype=np.float64)
+    for idx, row in enumerate(series_by_row):
+        sums[:, idx] = np.add.reduceat(np.asarray(row, dtype=np.float64), starts)
+
+    rng = np.random.default_rng(seed)
+    n_blocks = len(starts)
+    out = np.empty((len(series_by_row), n_bootstrap), dtype=float)
+    for boot_idx in range(n_bootstrap):
+        sampled = rng.integers(0, n_blocks, size=n_blocks)
+        out[:, boot_idx] = sums[sampled].sum(axis=0) / lengths[sampled].sum()
+    return out
+
+
+def _interpolate_t0(flow_times: np.ndarray, t2e_values: np.ndarray, target: float) -> float:
+    valid = np.isfinite(flow_times) & np.isfinite(t2e_values)
+    x = flow_times[valid]
+    y = t2e_values[valid]
+    if len(x) < 2:
+        return np.nan
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+    shifted = y - float(target)
+    for idx in range(len(x) - 1):
+        y1 = shifted[idx]
+        y2 = shifted[idx + 1]
+        if y1 == 0:
+            return float(x[idx])
+        if y1 * y2 <= 0 and y2 != y1:
+            return float(x[idx] + (-y1) * (x[idx + 1] - x[idx]) / (y2 - y1))
+    if shifted[-1] == 0:
+        return float(x[-1])
+    return np.nan
+
+
+def summarize_gradient_flow_obs(
+    flow_data: Optional[Dict[float, Dict[str, np.ndarray]]],
+    *,
+    t0_target: float | None,
+    block_size: int,
+    n_bootstrap: int,
+    include_bootstrap: bool = False,
+) -> Dict[str, Any]:
+    if not flow_data:
+        return {}
+    times = np.asarray(sorted(flow_data), dtype=float)
+    e_series = [np.asarray(flow_data[float(t)]["Ehat_clover"], dtype=float) for t in times]
+    t2e_series = [np.asarray(flow_data[float(t)]["t2E_clover"], dtype=float) for t in times]
+    e_means = np.asarray([np.mean(row) for row in e_series], dtype=float)
+    t2e_means = np.asarray([np.mean(row) for row in t2e_series], dtype=float)
+    e_boot = _bootstrap_series_matrix(e_series, block_size, n_bootstrap)
+    t2e_boot = _bootstrap_series_matrix(t2e_series, block_size, n_bootstrap)
+    target = 0.3 if t0_target is None else float(t0_target)
+    t0 = _interpolate_t0(times, t2e_means, target)
+    t0_boot = np.asarray([
+        _interpolate_t0(times, t2e_boot[:, idx], target)
+        for idx in range(t2e_boot.shape[1])
+    ], dtype=float)
+    finite_t0 = t0_boot[np.isfinite(t0_boot)]
+
+    payload: Dict[str, Any] = {
+        "available_flow_times": [float(t) for t in times],
+        "Ehat_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, e_means)},
+        "Ehat_clover_err": {
+            f"{float(t):.12g}": float(np.std(e_boot[idx][np.isfinite(e_boot[idx])]))
+            for idx, t in enumerate(times)
+        },
+        "t2E_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, t2e_means)},
+        "t2E_clover_err": {
+            f"{float(t):.12g}": float(np.std(t2e_boot[idx][np.isfinite(t2e_boot[idx])]))
+            for idx, t in enumerate(times)
+        },
+        "t0_target": target,
+        "t0": float(t0) if np.isfinite(t0) else None,
+        "t0_err": float(np.std(finite_t0)) if finite_t0.size > 0 else None,
+    }
+    if include_bootstrap:
+        payload["bootstrap_samples"] = {
+            "Ehat_clover": e_boot,
+            "t2E_clover": t2e_boot,
+            "t0": t0_boot,
+        }
+    return payload
 
 
 def _iter_loaded_compact_w_temp(
@@ -505,7 +747,11 @@ def _load_combined_w_temp(
     if combined is not None:
         n_configurations_after_cut = getattr(combined, "n_configurations", 0)
         metadata["n_configurations_after_cut"] = n_configurations_after_cut
-        metadata["n_samples_after_cut"] = n_configurations_after_cut * len(getattr(combined, "pair_order", []))
+        metadata["n_samples_after_cut"] = n_configurations_after_cut * len(getattr(combined, "flow_pair_order", []))
+        metadata["available_wilson_flow_times"] = [
+            None if value is None else float(value)
+            for value in combined.available_flow_times()
+        ]
 
     return combined, metadata
 
@@ -518,6 +764,8 @@ def evaluate_run(
     prefix: str = "",
     calc_workers: Optional[int] = None,
     analysis_options: Optional[Dict[str, Any]] = None,
+    gradient_flow_data: Optional[Dict[float, Dict[str, np.ndarray]]] = None,
+    gradient_flow_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     def vprint(msg: str):
         if verbose:
@@ -527,7 +775,11 @@ def evaluate_run(
     analysis_options = _resolve_analysis_options(analysis_options)
     r0_t_min = analysis_options["r0_t_min"]
 
-    if not file_data.observables and not getattr(file_data, "wilson_by_pair", None):
+    if (
+        not file_data.observables
+        and not getattr(file_data, "wilson_by_pair", None)
+        and not getattr(file_data, "wilson_by_flow_pair", None)
+    ):
         return {"error": "No combined W_temp observables available"}
 
     vprint("Calculating tau_int...")
@@ -557,6 +809,18 @@ def evaluate_run(
         sommer_target=sommer_target,
         r0_t_min=r0_t_min,
     )
+    flow_summary = summarize_gradient_flow_obs(
+        gradient_flow_data,
+        t0_target=(gradient_flow_metadata or {}).get("t0_target"),
+        block_size=block_size,
+        n_bootstrap=DEFAULT_N_BOOTSTRAP,
+        include_bootstrap=False,
+    )
+    if flow_summary:
+        analysis_settings["gradient_flow"] = {
+            "available_flow_times": flow_summary.get("available_flow_times", []),
+            "t0_target": flow_summary.get("t0_target"),
+        }
 
     all_w, all_w_err, w_cache = _calculate_w_rt_variables(
         file_data,
@@ -645,6 +909,7 @@ def evaluate_run(
     all_f_chi = {}
     r0_chi = None
     r0_chi_err = None
+    creutz_status = "ok"
     chi_t_large = DEFAULT_R0_CHI_T_LARGE
 
     try:
@@ -656,6 +921,9 @@ def evaluate_run(
                 if t + 1 not in unique_Ts:
                     continue
                 chi_pairs.append((r + 0.5, t + 0.5))
+
+        if not chi_pairs:
+            creutz_status = "not enough adjacent L values for standard Creutz ratios"
 
         for r_p, t_p in chi_pairs:
             try:
@@ -692,7 +960,8 @@ def evaluate_run(
         else:
             r0_chi_err = r0_chi_var.err()
     except Exception:
-        pass
+        if creutz_status == "ok":
+            creutz_status = "failed"
 
     vprint("Calculating volume_r0 and length...")
     volume_r0 = None
@@ -784,12 +1053,16 @@ def evaluate_run(
         "creutz_P_err": all_creutz_P_err,
         "a_creutz": all_a_creutz,
         "a_creutz_err": all_a_creutz_err,
+        "creutz_status": creutz_status,
+        "gradient_flow": flow_summary,
+        "gradient_flow_metadata": gradient_flow_metadata or {},
         "plot_meta": {
             "potentials": potentials,
             "potential_errors": potential_errors,
             "cornell_params": cornell_params,
             "chi": all_chi,
             "F_chi": all_f_chi,
+            "gradient_flow": flow_summary,
         },
     }
 
@@ -843,6 +1116,11 @@ def get_or_calculate(
         if combined_w_temp is None:
             return {"error": "No W_temp data found in equivalent run group"}
 
+        gradient_flow_data, gradient_flow_metadata = _load_combined_gradient_flow_obs(
+            grouped_paths,
+            load_workers=load_workers,
+        )
+
         result = evaluate_run(
             combined_w_temp,
             Path(path),
@@ -850,6 +1128,8 @@ def get_or_calculate(
             prefix=prefix,
             calc_workers=calc_workers,
             analysis_options=analysis_options,
+            gradient_flow_data=gradient_flow_data,
+            gradient_flow_metadata=gradient_flow_metadata,
         )
         result["path"] = path
         result["run_id"] = run_id

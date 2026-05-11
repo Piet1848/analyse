@@ -5,6 +5,8 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+FlowKey = Tuple[Optional[float], int, int]
+
 
 class VariableData:
     def __init__(self, name: str):
@@ -124,15 +126,7 @@ class FileData:
             raise FileNotFoundError(f"{self.path} not found")
 
         try:
-            # pandas.read_csv is highly optimized for memory and speed
-            df = pd.read_csv(
-                self.path,
-                delimiter=',',
-                encoding='utf-8-sig',
-                dtype=np.float32,     # Force C-level float32 immediately
-                skipinitialspace=True,
-                on_bad_lines='skip'   # Equivalent to handling IndexError
-            )
+            df = _read_numeric_table(self.path)
         except (pd.errors.EmptyDataError, ValueError):
             return self
 
@@ -156,7 +150,7 @@ class FileData:
             return
         self.align_lengths()
 
-        step_obs = next((o for o in self.observables if o.name in ["# step", "step"]), None)
+        step_obs = next((o for o in self.observables if o.name in ["# step", "step", "conf_id"]), None)
         if step_obs is None:
             return
 
@@ -243,17 +237,102 @@ class CompactWilsonData(FileData):
     def __init__(
         self,
         path: str,
-        pair_order: List[Tuple[int, int]],
-        wilson_by_pair: Dict[Tuple[int, int], np.ndarray],
+        pair_order: List[Tuple[int, int]] | None = None,
+        wilson_by_pair: Dict[Tuple[int, int], np.ndarray] | None = None,
+        flow_pair_order: List[FlowKey] | None = None,
+        wilson_by_flow_pair: Dict[FlowKey, np.ndarray] | None = None,
     ):
         super().__init__(path)
-        self.pair_order = [(int(r), int(t)) for r, t in pair_order]
-        self.wilson_by_pair = {
-            (int(r), int(t)): np.asarray(values, dtype=np.float32)
-            for (r, t), values in wilson_by_pair.items()
+        if wilson_by_flow_pair is None:
+            wilson_by_flow_pair = {
+                (None, int(r), int(t)): values
+                for (r, t), values in (wilson_by_pair or {}).items()
+            }
+        if flow_pair_order is None:
+            flow_pair_order = [
+                (None, int(r), int(t))
+                for r, t in (pair_order or list(wilson_by_pair or {}))
+            ]
+
+        self.flow_pair_order = [
+            (_normalize_flow_time(flow_time), int(r), int(t))
+            for flow_time, r, t in flow_pair_order
+        ]
+        self.wilson_by_flow_pair = {
+            (_normalize_flow_time(flow_time), int(r), int(t)): np.asarray(values, dtype=np.float32)
+            for (flow_time, r, t), values in wilson_by_flow_pair.items()
         }
-        first = next(iter(self.wilson_by_pair.values()), np.array([], dtype=np.float32))
+        self.pair_order = [(r, t) for flow_time, r, t in self.flow_pair_order if flow_time is None]
+        self.wilson_by_pair = {
+            (r, t): values
+            for (flow_time, r, t), values in self.wilson_by_flow_pair.items()
+            if flow_time is None
+        }
+        first = next(iter(self.wilson_by_flow_pair.values()), np.array([], dtype=np.float32))
         self.n_configurations = int(len(first))
+
+    def available_flow_times(self) -> list[Optional[float]]:
+        return sorted(
+            {flow_time for flow_time, _, _ in self.flow_pair_order},
+            key=lambda value: (-1.0 if value is None else float(value)),
+        )
+
+
+def _normalize_flow_time(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        flow_time = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(flow_time, 12)
+
+
+def _read_numeric_table(path: Path) -> pd.DataFrame:
+    first_data_line = ""
+    header_tokens: list[str] | None = None
+
+    with path.open("r", encoding="utf-8-sig") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                tokens = stripped[1:].strip().split()
+                if tokens and "=" not in stripped and all(_looks_like_column_name(token) for token in tokens):
+                    header_tokens = tokens
+                continue
+            first_data_line = stripped
+            break
+
+    if not first_data_line:
+        raise pd.errors.EmptyDataError("no numeric data")
+
+    if "," in first_data_line:
+        return pd.read_csv(
+            path,
+            delimiter=",",
+            encoding="utf-8-sig",
+            dtype=np.float32,
+            skipinitialspace=True,
+            on_bad_lines="skip",
+        )
+
+    return pd.read_csv(
+        path,
+        sep=r"\s+",
+        comment="#",
+        names=header_tokens,
+        encoding="utf-8-sig",
+        dtype=np.float32,
+        on_bad_lines="skip",
+    )
+
+
+def _looks_like_column_name(token: str) -> bool:
+    return any(ch.isalpha() for ch in token) and all(
+        ch.isalnum() or ch in {"_", "/"} for ch in token
+    )
 
 
 class ExperimentData:
@@ -278,6 +357,7 @@ def _infer_rows_per_configuration(
     steps: Optional[np.ndarray],
     obs_L: np.ndarray,
     obs_T: np.ndarray,
+    flow_times: Optional[np.ndarray] = None,
 ) -> int:
     if steps is not None and len(steps) > 0:
         change_idx = np.flatnonzero(steps != steps[0])
@@ -285,9 +365,10 @@ def _infer_rows_per_configuration(
             return int(change_idx[0])
         return int(len(steps))
 
-    seen: set[Tuple[int, int]] = set()
-    for i, (l_val, t_val) in enumerate(zip(obs_L, obs_T)):
-        pair = (int(l_val), int(t_val))
+    seen: set[FlowKey] = set()
+    flow_iter = flow_times if flow_times is not None else [None] * len(obs_L)
+    for i, (flow_time, l_val, t_val) in enumerate(zip(flow_iter, obs_L, obs_T)):
+        pair = (_normalize_flow_time(flow_time), int(l_val), int(t_val))
         if pair in seen:
             return i
         seen.add(pair)
@@ -315,39 +396,47 @@ def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData 
         print(f"Warning: Required observables missing in {path}, skipping W_temp loading.")
         return None
 
-    step_obs = next((o for o in fd.observables if o.name in ["# step", "step"]), None)
+    flow_obs = next((o for o in fd.observables if o.name == "t_over_a2"), None)
+    flow_times = np.asarray(flow_obs.values) if flow_obs is not None else None
+    step_obs = next((o for o in fd.observables if o.name in ["# step", "step", "conf_id"]), None)
     steps = np.asarray(step_obs.values) if step_obs is not None else None
-    rows_per_cfg = _infer_rows_per_configuration(steps, obs_L, obs_T)
+    rows_per_cfg = _infer_rows_per_configuration(steps, obs_L, obs_T, flow_times=flow_times)
 
     if rows_per_cfg <= 0 or len(obs_w) % rows_per_cfg != 0:
         print(f"Warning: Unable to determine rows per configuration for {path}, skipping W_temp loading.")
         return None
 
-    pair_order = [(int(l), int(t)) for l, t in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
-    if len(set(pair_order)) != len(pair_order):
+    if flow_times is None:
+        flow_order = [(None, int(l), int(t)) for l, t in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
+    else:
+        flow_order = [
+            (_normalize_flow_time(flow_time), int(l), int(t))
+            for flow_time, l, t in zip(flow_times[:rows_per_cfg], obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])
+        ]
+    if len(set(flow_order)) != len(flow_order):
         print(f"Warning: Duplicate pairs found in {path}, skipping W_temp loading.")
         return None
 
     w_matrix = obs_w.reshape(-1, rows_per_cfg)
-    wilson_by_pair = {pair: w_matrix[:, idx] for idx, pair in enumerate(pair_order)}
-    return CompactWilsonData(path, pair_order, wilson_by_pair)
+    wilson_by_flow_pair = {pair: w_matrix[:, idx] for idx, pair in enumerate(flow_order)}
+    return CompactWilsonData(path, flow_pair_order=flow_order, wilson_by_flow_pair=wilson_by_flow_pair)
 
 
 def combine_compact_wilson_data(
     files: Iterable[CompactWilsonData],
     source_name: str = "combined",
 ) -> CompactWilsonData | None:
-    pair_order: Optional[List[Tuple[int, int]]] = None
-    common_pairs: Optional[set[Tuple[int, int]]] = None
-    chunks_by_pair: Dict[Tuple[int, int], List[np.ndarray]] = defaultdict(list)
+    flow_pair_order: Optional[List[FlowKey]] = None
+    common_pairs: Optional[set[FlowKey]] = None
+    chunks_by_pair: Dict[FlowKey, List[np.ndarray]] = defaultdict(list)
 
     for fd in files:
-        if not fd.wilson_by_pair:
+        if not fd.wilson_by_flow_pair:
             continue
-        current_pairs = list(fd.pair_order)
+        current_pairs = list(fd.flow_pair_order)
         current_set = set(current_pairs)
-        if pair_order is None:
-            pair_order = current_pairs
+        if flow_pair_order is None:
+            flow_pair_order = current_pairs
             common_pairs = set(current_pairs)
         else:
             previous_common = set(common_pairs)
@@ -358,12 +447,12 @@ def combine_compact_wilson_data(
         active_pairs = common_pairs if common_pairs is not None else current_set
         for pair in current_pairs:
             if pair in active_pairs:
-                chunks_by_pair[pair].append(fd.wilson_by_pair[pair])
+                chunks_by_pair[pair].append(fd.wilson_by_flow_pair[pair])
 
-    if not pair_order or not common_pairs:
+    if not flow_pair_order or not common_pairs:
         return None
 
-    final_order = [pair for pair in pair_order if pair in common_pairs]
+    final_order = [pair for pair in flow_pair_order if pair in common_pairs]
     if not final_order:
         return None
 
@@ -371,7 +460,11 @@ def combine_compact_wilson_data(
         pair: np.concatenate(chunks_by_pair[pair]).astype(np.float32, copy=False)
         for pair in final_order
     }
-    return CompactWilsonData(f"{source_name}.out", final_order, combined_pairs)
+    return CompactWilsonData(
+        f"{source_name}.out",
+        flow_pair_order=final_order,
+        wilson_by_flow_pair=combined_pairs,
+    )
 
 
 def combine_file_data(

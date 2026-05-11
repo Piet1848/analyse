@@ -1,0 +1,863 @@
+\documentclass[12pt,a4paper,oneside]{scrreprt}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{csquotes}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{siunitx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\graphicspath{{figures/}{../figures/}}
+
+\newcommand{\SU}{\mathrm{SU}}
+\newcommand{\U}{\mathrm{U}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\order}{\mathcal{O}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\latspacing}{a}
+\newcommand{\wilsonloop}{W(R,T)}
+\newcommand{\creutz}{\chi(R,T)}
+\newcommand{\rzero}{r_0}
+\newcommand{\stringtension}{\sigma}
+
+\title{Investigation of the Continuum Limit in the Presence of Small Breaking of Gauge Invariance in Lattice Gauge Theories}
+\author{Piet Leyendecker}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This thesis investigates whether and how the continuum limit of a lattice gauge theory is affected by small explicit violations of gauge invariance. The study combines theoretical expectations from lattice regularization and symmetry restoration with numerical measurements of Wilson loops, Creutz ratios, the static potential, the Sommer scale, and related scaling observables. The central goal is to determine whether gauge-breaking effects vanish, persist, or modify the extrapolation toward the continuum limit as the lattice spacing is reduced.
+\end{abstract}
+
+\tableofcontents
+
+\chapter*{Notation and Conventions}
+\addcontentsline{toc}{chapter}{Notation and Conventions}
+\begin{description}
+  \item[$\latspacing$] Lattice spacing.
+  \item[$\beta$] Bare lattice coupling parameter.
+  \item[$\eps$] Parameter controlling the explicit breaking of gauge invariance.
+  \item[$\wilsonloop$] Wilson loop with spatial extent $R$ and temporal extent $T$.
+  \item[$\creutz$] Creutz ratio used to estimate the force and string tension.
+  \item[$\rzero$] Sommer scale defined through $r^2F(r)=1.65$.
+  \item[$\stringtension$] String tension.
+\end{description}
+
+\chapter{Introduction}
+\section{Motivation}
+Explain why gauge invariance is normally central in lattice gauge theory and why controlled violations are relevant. Possible motivations include numerical robustness, effective descriptions, regulator artifacts, quantum simulation errors, or imperfect implementation of gauge constraints.
+
+\section{Research Question}
+State the main question precisely:
+\begin{quote}
+  Does a small explicit breaking of gauge invariance disappear in the continuum limit, or does it alter the continuum extrapolation of physical observables?
+\end{quote}
+
+\section{Strategy and Main Observables}
+Introduce the numerical strategy and the observables used to probe the continuum limit: Wilson loops, Creutz ratios, the static potential $V(R)$, $\rzero$, and $\stringtension$.
+
+\chapter{Theoretical Background}
+\label{chap:theoretical-background}
+
+The aim of this chapter is to collect the theoretical ingredients needed for the
+analysis of the continuum limit in the presence of small explicit violations of
+gauge invariance. The discussion starts from continuum Yang--Mills theory and
+then introduces the lattice formulation, Wilson loops, the static potential,
+Creutz ratios, and the Sommer scale. These are the central concepts used later
+to define and compare physical observables at different lattice spacings.
+
+\section{Gauge Theories in the Continuum}
+\label{sec:continuum-gauge-theory}
+
+\subsection{Gauge Fields and Local Gauge Symmetry}
+\label{subsec:gauge-fields-local-symmetry}
+
+A non-Abelian gauge theory is built from fields that transform locally under a
+Lie group. In this thesis the relevant case is the group $\SU(2)$. A continuum
+gauge field can be written as
+\begin{equation}
+  A_\mu(x) = A_\mu^a(x) T^a ,
+\end{equation}
+where $T^a$ are the generators of the Lie algebra of $\SU(2)$. A common choice is
+$T^a = \sigma^a/2$, with $\sigma^a$ the Pauli matrices. The gauge field defines
+the covariant derivative
+\begin{equation}
+  D_\mu = \partial_\mu + i A_\mu ,
+\end{equation}
+and the associated field-strength tensor
+\begin{equation}
+  F_{\mu\nu}
+  =
+  \partial_\mu A_\nu
+  -
+  \partial_\nu A_\mu
+  +
+  i [A_\mu,A_\nu] .
+\end{equation}
+The commutator term distinguishes a non-Abelian gauge theory from an Abelian
+one. It implies that the gauge field itself carries charge under the gauge
+group and therefore self-interacts.
+
+A local gauge transformation is specified by a group element
+\begin{equation}
+  \Omega(x) \in \SU(2)
+\end{equation}
+at every point in space-time. Under such a transformation, matter fields in the
+fundamental representation transform as
+\begin{equation}
+  \psi(x) \mapsto \Omega(x)\psi(x),
+\end{equation}
+while the gauge field transforms inhomogeneously,
+\begin{equation}
+  A_\mu(x)
+  \mapsto
+  \Omega(x) A_\mu(x) \Omega^\dagger(x)
+  -
+  i \bigl(\partial_\mu \Omega(x)\bigr)\Omega^\dagger(x).
+\end{equation}
+The inhomogeneous derivative term is necessary because the transformation is
+local. The field strength transforms covariantly,
+\begin{equation}
+  F_{\mu\nu}(x)
+  \mapsto
+  \Omega(x) F_{\mu\nu}(x) \Omega^\dagger(x),
+\end{equation}
+so traces of products of field strengths at the same point are gauge invariant.
+
+In Euclidean space-time, the pure Yang--Mills action can be written as
+\begin{equation}
+  S_{\mathrm{YM}}
+  =
+  \frac{1}{2g^2}
+  \int \dd^4 x \,
+  \mathrm{tr}\,
+  F_{\mu\nu}(x) F_{\mu\nu}(x),
+  \label{eq:continuum-yang-mills-action}
+\end{equation}
+with summation over repeated Lorentz indices. This action is invariant under
+local gauge transformations. The coupling $g$ controls the strength of the
+interaction. For an asymptotically free gauge theory, the effective coupling
+becomes small at short distances, while the long-distance theory is strongly
+coupled and requires non-perturbative methods.
+
+\subsection{Gauge-Invariant Observables}
+\label{subsec:gauge-invariant-observables}
+
+Physical observables in a gauge theory must be gauge invariant. Gauge-dependent
+quantities can be useful after a gauge fixing has been imposed, but they do not
+directly correspond to physical observables unless the gauge dependence is
+properly controlled. For pure gauge theory, important gauge-invariant
+observables include traces of closed parallel transporters, local action-density
+operators, correlation functions of gauge-invariant operators, and quantities
+derived from Wilson loops.
+
+A central continuum object is the path-ordered parallel transporter along a
+curve $C$,
+\begin{equation}
+  U(C)
+  =
+  \mathcal{P}
+  \exp\left(
+    i \int_C \dd x^\mu A_\mu(x)
+  \right).
+\end{equation}
+For a closed curve, the trace
+\begin{equation}
+  W(C)
+  =
+  \frac{1}{N_c}
+  \mathrm{Re}\,\mathrm{tr}\, U(C)
+\end{equation}
+is gauge invariant. On the lattice this object becomes the Wilson loop and is
+one of the most direct probes of confinement and of the static quark--antiquark
+potential.
+
+\subsection{Physical Consequences of Gauge Invariance}
+\label{subsec:consequences-gauge-invariance}
+
+Gauge invariance is not only a formal redundancy of the description. It
+constrains the allowed terms in the action, the form of correlation functions,
+and the possible continuum limits. In the lattice formulation, preserving gauge
+invariance exactly at nonzero lattice spacing is usually advantageous because it
+prevents gauge-noninvariant counterterms from being generated by radiative
+corrections. Wilson's lattice gauge action realizes this idea by putting compact
+group-valued variables on links and by constructing the action from traces of
+closed loops \cite{Wilson1974,GattringerLang2010,MontvayMuenster1994}.
+
+The purpose of this thesis is to study what happens when this exact symmetry is
+slightly violated by an explicit deformation. From a renormalization-group point
+of view, the key question is whether the deformation behaves like an irrelevant
+lattice artifact, so that its effects vanish as $\latspacing \to 0$, or whether
+it defines a relevant perturbation that changes the continuum limit. This
+question is not purely formal: small violations of gauge constraints can appear
+as regulator artifacts, algorithmic imperfections, or implementation errors in
+effective or quantum-simulation formulations of lattice gauge theories
+\cite{Foerster1980,Bonati2021Breaking}.
+
+\section{Lattice Gauge Theory}
+\label{sec:lattice-gauge-theory}
+
+\subsection{Discretization of Space-Time}
+\label{subsec:discretization}
+
+In lattice gauge theory, Euclidean space-time is replaced by a hypercubic
+lattice
+\begin{equation}
+  \Lambda_{\latspacing}
+  =
+  \left\{
+    x = \latspacing n
+    \,\middle|\,
+    n \in \mathbb{Z}^4
+  \right\},
+\end{equation}
+where $\latspacing$ is the lattice spacing. The lattice spacing acts as an
+ultraviolet cutoff. Momenta larger than order $1/\latspacing$ are not resolved.
+The continuum limit is obtained by sending
+\begin{equation}
+  \latspacing \to 0
+\end{equation}
+while keeping physical quantities fixed.
+
+In a numerical simulation the lattice has finite extent
+\begin{equation}
+  L_\mu = N_\mu \latspacing ,
+\end{equation}
+where $N_\mu$ is the number of lattice points in direction $\mu$. Therefore two
+limits are conceptually distinct: the continuum limit $\latspacing \to 0$ and
+the infinite-volume limit $L_\mu \to \infty$. In practice, one tries to choose
+volumes large enough that finite-volume effects are smaller than the statistical
+and systematic errors relevant for the analysis.
+
+\subsection{Link Variables and Plaquettes}
+\label{subsec:link-variables-plaquettes}
+
+The fundamental degrees of freedom of Wilson lattice gauge theory are link
+variables
+\begin{equation}
+  U_\mu(x) \in \SU(2),
+\end{equation}
+which live on the oriented link from $x$ to $x+\latspacing\hat\mu$. They are the
+lattice analogues of parallel transporters. For a smooth continuum field one may
+formally write
+\begin{equation}
+  U_\mu(x)
+  \approx
+  \exp\left[
+    i \latspacing A_\mu\left(x+\frac{\latspacing}{2}\hat\mu\right)
+  \right].
+\end{equation}
+A local lattice gauge transformation assigns a group element $\Omega(x)$ to each
+site and acts on the link variables as
+\begin{equation}
+  U_\mu(x)
+  \mapsto
+  \Omega(x) U_\mu(x) \Omega^\dagger(x+\latspacing\hat\mu).
+  \label{eq:lattice-gauge-transformation}
+\end{equation}
+
+The elementary closed loop on the lattice is the plaquette,
+\begin{equation}
+  U_{\mu\nu}(x)
+  =
+  U_\mu(x)
+  U_\nu(x+\latspacing\hat\mu)
+  U_\mu^\dagger(x+\latspacing\hat\nu)
+  U_\nu^\dagger(x).
+  \label{eq:plaquette-definition}
+\end{equation}
+Under a gauge transformation, the plaquette transforms covariantly at its base
+point,
+\begin{equation}
+  U_{\mu\nu}(x)
+  \mapsto
+  \Omega(x) U_{\mu\nu}(x) \Omega^\dagger(x).
+\end{equation}
+Therefore $\mathrm{Re}\,\mathrm{tr}\,U_{\mu\nu}(x)$ is gauge invariant.
+
+For smooth fields, the plaquette has the continuum expansion
+\begin{equation}
+  U_{\mu\nu}(x)
+  =
+  \exp\left[
+    i \latspacing^2 F_{\mu\nu}(x)
+    +
+    \order(\latspacing^3)
+  \right].
+\end{equation}
+Thus the plaquette is the lattice object from which the continuum field
+strength is recovered.
+
+\subsection{Wilson Gauge Action}
+\label{subsec:wilson-gauge-action}
+
+The standard Wilson gauge action for $\SU(N_c)$ is
+\begin{equation}
+  S_W[U]
+  =
+  \beta
+  \sum_x
+  \sum_{\mu<\nu}
+  \left(
+    1
+    -
+    \frac{1}{N_c}
+    \mathrm{Re}\,\mathrm{tr}\,
+    U_{\mu\nu}(x)
+  \right),
+  \label{eq:standard-wilson-action}
+\end{equation}
+with
+\begin{equation}
+  \beta = \frac{2N_c}{g_0^2}.
+\end{equation}
+For $\SU(2)$ this becomes
+\begin{equation}
+  \beta = \frac{4}{g_0^2},
+\end{equation}
+and
+\begin{equation}
+  S_W[U]
+  =
+  \beta
+  \sum_x
+  \sum_{\mu<\nu}
+  \left(
+    1
+    -
+    \frac{1}{2}
+    \mathrm{Re}\,\mathrm{tr}\,
+    U_{\mu\nu}(x)
+  \right).
+  \label{eq:wilson-action-su2}
+\end{equation}
+The action is built only from traces of closed loops and is therefore exactly
+gauge invariant at nonzero lattice spacing.
+
+The continuum limit of the Wilson action is obtained by inserting the plaquette
+expansion. Up to an irrelevant additive constant and lattice artifacts,
+\begin{equation}
+  S_W[U]
+  \longrightarrow
+  \frac{1}{2g_0^2}
+  \int \dd^4x\,
+  \mathrm{tr}\,
+  F_{\mu\nu}(x)F_{\mu\nu}(x).
+\end{equation}
+This reproduces the Euclidean Yang--Mills action. The corrections at finite
+lattice spacing are cutoff effects. For the pure Wilson gauge action, the
+leading gauge-invariant lattice artifacts in many on-shell quantities are of
+order $\latspacing^2$, although the actual scaling observed in numerical data
+can be affected by statistics, finite-volume effects, operator definitions, and
+the accessible range of lattice spacings.
+
+In this thesis the precise normalization convention used in the simulation must
+be stated explicitly in the numerical setup. Additive constants in the action do
+not affect expectation values, because they cancel between numerator and
+denominator in normalized path-integral averages and do not change Metropolis
+acceptance probabilities.
+
+\subsection{Path Integral and Expectation Values}
+\label{subsec:lattice-path-integral}
+
+The lattice path integral is finite-dimensional at finite lattice spacing and
+finite volume. The partition function is
+\begin{equation}
+  Z
+  =
+  \int
+  \prod_{x,\mu}
+  \dd U_\mu(x)
+  \,
+  e^{-S[U]},
+  \label{eq:lattice-partition-function}
+\end{equation}
+where $\dd U_\mu(x)$ is the Haar measure on $\SU(2)$. The expectation value of
+an observable $\mathcal{O}[U]$ is
+\begin{equation}
+  \langle \mathcal{O} \rangle
+  =
+  \frac{1}{Z}
+  \int
+  \prod_{x,\mu}
+  \dd U_\mu(x)
+  \,
+  \mathcal{O}[U]
+  e^{-S[U]}.
+  \label{eq:lattice-expectation-value}
+\end{equation}
+Gauge-invariant expectation values can be computed without gauge fixing. This
+is one of the practical advantages of the compact Wilson formulation.
+
+In Monte Carlo simulations the path integral is estimated by generating an
+ensemble of gauge-field configurations distributed according to $e^{-S[U]}$.
+For an ensemble of $N_{\mathrm{cfg}}$ configurations $U_i$, the estimator is
+\begin{equation}
+  \langle \mathcal{O} \rangle
+  \approx
+  \frac{1}{N_{\mathrm{cfg}}}
+  \sum_{i=1}^{N_{\mathrm{cfg}}}
+  \mathcal{O}[U_i].
+\end{equation}
+Because successive configurations in a Markov chain are correlated,
+autocorrelations must be considered when estimating uncertainties.
+
+\subsection{Continuum Limit and Renormalization}
+\label{subsec:continuum-limit-renormalization}
+
+The continuum limit is not obtained by simply decreasing $\latspacing$ at fixed
+bare coupling. Instead, the bare parameters have to be tuned so that physical
+observables remain fixed in physical units. For pure $\SU(2)$ gauge theory with
+the Wilson action, decreasing the lattice spacing corresponds to increasing
+$\beta$, or equivalently decreasing the bare coupling $g_0$.
+
+A useful way to formulate the continuum limit is in terms of a physical length
+scale, such as the Sommer scale $\rzero$. The dimensionless ratio
+\begin{equation}
+  \frac{\rzero}{\latspacing}
+\end{equation}
+is measured on the lattice. Increasing $\rzero/\latspacing$ means that the same
+physical length is resolved by more lattice points, i.e. the lattice spacing is
+smaller in physical units. Therefore continuum extrapolations can be expressed
+as fits in
+\begin{equation}
+  \left(\frac{\latspacing}{\rzero}\right)^2
+\end{equation}
+or another measured dimensionless lattice-spacing proxy.
+
+The renormalization-group interpretation is central for the present thesis.
+Different lattice actions can lead to the same continuum theory if they differ
+only by irrelevant operators. In that case they lie in the same universality
+class. By contrast, a relevant deformation changes the long-distance theory
+unless its coefficient is tuned to zero. A gauge-breaking term must therefore be
+classified by its effect on long-distance, gauge-invariant observables as
+$\latspacing \to 0$. The numerical analysis in later chapters tests this
+question directly.
+
+\section{Static Potential and Confinement}
+\label{sec:static-potential-confinement}
+
+\subsection{Wilson Loops}
+\label{subsec:wilson-loops}
+
+A Wilson loop is the trace of the ordered product of link variables around a
+closed contour. For a rectangular loop in the $\mu\nu$-plane with side lengths
+$L_\mu$ and $L_\nu$ in lattice units, the code measures the normalized real
+trace
+\begin{equation}
+  W_{\mu\nu}(L_\mu,L_\nu)
+  =
+  \frac{1}{N_c V}
+  \sum_x
+  \operatorname{Re}\operatorname{tr}
+  \left[
+    U_\mu(x;L_\mu)\,
+    U_\nu(x+L_\mu\hat\mu;L_\nu)\,
+    U_\mu^\dagger(x+L_\nu\hat\nu;L_\mu)\,
+    U_\nu^\dagger(x;L_\nu)
+  \right],
+  \label{eq:rectangular-wilson-loop-code}
+\end{equation}
+where $V$ is the lattice volume and
+\begin{equation}
+  U_\mu(x;L_\mu)
+  =
+  U_\mu(x)
+  U_\mu(x+\hat\mu)
+  \cdots
+  U_\mu(x+(L_\mu-1)\hat\mu)
+\end{equation}
+denotes a straight Wilson line of length $L_\mu$ in direction $\mu$. The factor
+$1/N_c$ normalizes the trace, while the factor $1/V$ averages over all possible
+base points of the loop.
+
+For temporal Wilson loops, the last lattice direction is used as the Euclidean
+time direction,
+\begin{equation}
+  t = N_d - 1.
+\end{equation}
+The code computes rectangular loops in each spatial-time plane and averages over
+the spatial directions:
+\begin{equation}
+  W(R,T)
+  =
+  \frac{1}{N_d-1}
+  \sum_{\mu=0}^{N_d-2}
+  W_{\mu,t}(R,T).
+  \label{eq:temporal-wilson-loop-spatial-average}
+\end{equation}
+For the $\SU(2)$ simulations considered in this thesis, $N_c=2$, so the stored
+temporal Wilson loop is
+\begin{equation}
+  W(R,T)
+  =
+  \frac{1}{2V(N_d-1)}
+  \sum_{\mu=0}^{N_d-2}
+  \sum_x
+  \operatorname{Re}\operatorname{tr}
+  W_{\mu,t}(x;R,T).
+  \label{eq:temporal-wilson-loop-su2-code}
+\end{equation}
+Thus the values written to the output file are already normalized by the color
+factor, averaged over the full lattice volume, and averaged over spatial
+directions.
+
+In the implementation, the rectangular loop is constructed from two paths that
+connect opposite corners of the rectangle. The first path is
+\begin{equation}
+  l_\mu
+  =
+  U_\mu(x;L_\mu)\,
+  U_\nu(x+L_\mu\hat\mu;L_\nu),
+\end{equation}
+and the second path is
+\begin{equation}
+  l_\nu
+  =
+  U_\nu(x;L_\nu)\,
+  U_\mu(x+L_\nu\hat\nu;L_\mu).
+\end{equation}
+The measured loop contribution is then
+\begin{equation}
+  \operatorname{Re}\operatorname{tr}
+  \left(
+    l_\mu l_\nu^\dagger
+  \right).
+\end{equation}
+This is equivalent to the trace of the ordered product around the rectangular
+closed contour.
+
+The temporal Wilson-loop output file has the structure
+\begin{verbatim}
+# step, L, T, W_temp
+\end{verbatim}
+where \texttt{L} is the spatial extent $R$, \texttt{T} is the temporal extent,
+and \texttt{W\_temp} is the averaged, normalized value defined in
+Eq.~\eqref{eq:temporal-wilson-loop-spatial-average}.
+
+\subsection{Effective Potential Extraction}
+\label{subsec:effective-potential-extraction}
+
+Temporal Wilson loops are used to extract the static quark--antiquark potential.
+For large Euclidean time extent $T$, the Wilson loop has the spectral form
+\begin{equation}
+  W(R,T)
+  =
+  \sum_n c_n(R) e^{-a E_n(R) T},
+  \label{eq:wilson-loop-spectral-decomposition}
+\end{equation}
+where $E_0(R)=V(R)$ is the static ground-state potential and the higher
+$E_n(R)$ describe excited states with the same static sources. At sufficiently
+large $T$, the ground state dominates:
+\begin{equation}
+  W(R,T)
+  \propto
+  e^{-a V(R) T}.
+\end{equation}
+
+A lattice effective potential is therefore defined by the ratio
+\begin{equation}
+  a V_{\mathrm{eff}}(R,T)
+  =
+  -
+  \ln
+  \left[
+    \frac{W(R,T+1)}{W(R,T)}
+  \right].
+  \label{eq:effective-potential-ratio}
+\end{equation}
+If excited-state contributions are negligible, this approaches the desired
+static potential in lattice units:
+\begin{equation}
+  a V_{\mathrm{eff}}(R,T)
+  \xrightarrow[T\to\infty]{}
+  a V(R).
+\end{equation}
+
+In the numerical analysis, $W(R,T)$ denotes the already normalized and spatially
+averaged observable stored as \texttt{W\_temp}. No additional color, volume, or
+spatial-direction normalization is applied during the analysis. The main
+remaining analysis choices are the thermalization cut, the treatment of
+autocorrelations, the temporal range used for the extraction, and the estimation
+of statistical uncertainties.
+
+\subsection{Creutz Ratios}
+\label{subsec:creutz-ratios}
+
+Creutz ratios are combinations of neighboring Wilson loops designed to cancel
+some perimeter and normalization contributions. A common definition is
+\begin{equation}
+  \chi(R,T)
+  =
+  -
+  \ln
+  \left[
+    \frac{
+      W(R,T) W(R-1,T-1)
+    }{
+      W(R,T-1) W(R-1,T)
+    }
+  \right].
+  \label{eq:creutz-ratio}
+\end{equation}
+If large Wilson loops obey an area law,
+\begin{equation}
+  W(R,T)
+  \sim
+  \exp[-\stringtension \latspacing^2 R T
+  - \text{perimeter terms}],
+\end{equation}
+then the Creutz ratio approaches
+\begin{equation}
+  \chi(R,T)
+  \xrightarrow[R,T\to\infty]{}
+  \stringtension \latspacing^2 .
+\end{equation}
+Thus Creutz ratios provide a direct lattice estimator for the string tension in
+lattice units.
+
+At finite $R$ and $T$, Creutz ratios contain corrections from excited states,
+Coulombic contributions, finite-volume effects, and lattice artifacts. They are
+therefore best interpreted either as approximate string-tension estimators at
+large loop sizes or as diagnostic observables for scaling comparisons between
+ensembles.
+
+\subsection{Sommer Scale and String Tension}
+\label{subsec:sommer-scale-string-tension}
+
+The static potential can also be used to set the scale. A common
+phenomenological form is the Cornell-type potential
+\begin{equation}
+  V(r)
+  =
+  V_0
+  -
+  \frac{\alpha}{r}
+  +
+  \stringtension r,
+  \label{eq:cornell-potential}
+\end{equation}
+where $V_0$ is an additive self-energy, $\alpha$ parametrizes the short-distance
+Coulombic part, and $\stringtension$ is the string tension. The corresponding
+force is
+\begin{equation}
+  F(r)
+  =
+  \frac{\dd V}{\dd r}.
+\end{equation}
+The additive constant $V_0$ drops out of the force.
+
+The Sommer scale $\rzero$ is defined implicitly by
+\begin{equation}
+  \rzero^2 F(\rzero) = 1.65 .
+  \label{eq:sommer-scale-definition}
+\end{equation}
+This definition uses the force at intermediate distances, where the potential
+can often be determined more accurately than at very large distances. In lattice
+units, the force is estimated from finite differences of the potential. If
+$\hat V(R)=\latspacing V(R\latspacing)$, then
+\begin{equation}
+  \hat F\left(R+\frac{1}{2}\right)
+  =
+  \hat V(R+1) - \hat V(R)
+\end{equation}
+is a dimensionless estimate of $\latspacing^2 F(r)$ at an intermediate distance.
+The Sommer condition can then be written as
+\begin{equation}
+  \left(\frac{r}{\latspacing}\right)^2
+  \hat F\left(\frac{r}{\latspacing}\right)
+  =
+  1.65 .
+  \label{eq:sommer-scale-lattice-units}
+\end{equation}
+Solving this equation gives $\rzero/\latspacing$.
+
+The ratio $\rzero/\latspacing$ is one of the main scale-setting quantities in
+this thesis. It allows data at different $\beta$ values to be compared in
+approximately physical units and provides the continuum variable
+\begin{equation}
+  \frac{\latspacing}{\rzero}
+  =
+  \left(\frac{\rzero}{\latspacing}\right)^{-1}.
+\end{equation}
+The continuum limit corresponds to
+\begin{equation}
+  \frac{\latspacing}{\rzero}
+  \to 0.
+\end{equation}
+
+The string tension may also be expressed in dimensionless form as
+\begin{equation}
+  \stringtension \rzero^2 .
+\end{equation}
+This quantity is useful because it is independent of the arbitrary choice of
+lattice units. Agreement of such dimensionless quantities along a sequence of
+lattice spacings is a central test of scaling toward a common continuum limit.
+
+\chapter{Small Breaking of Gauge Invariance}
+\section{Definition of the Gauge-Breaking Deformation}
+Define the modified lattice action or update rule used in the simulations. Specify the breaking parameters, for example $\eps_1$ and $\eps_2$, and explain which gauge transformations are no longer exact symmetries.
+
+\section{Symmetry and Scaling Expectations}
+\subsection{Relevant, Marginal, and Irrelevant Breaking Terms}
+\subsection{Possible Restoration of Gauge Invariance}
+\subsection{Expected Dependence on Breaking Strength and Lattice Spacing}
+
+\section{Working Hypotheses}
+List the concrete hypotheses tested numerically:
+\begin{enumerate}
+  \item Gauge-invariant observables approach the same continuum values for sufficiently small $\eps$.
+  \item Gauge-breaking effects scale to zero with a measurable power of $\latspacing$ or $\eps$.
+  \item Above a threshold in $\eps$, continuum extrapolations become unstable or incompatible with the gauge-invariant limit.
+\end{enumerate}
+
+\chapter{Numerical Setup}
+\section{Simulation Parameters}
+Describe the gauge group, lattice volumes, coupling range, update algorithm, thermalization strategy, number of sweeps, and stored observables.
+
+\section{Ensemble Organization}
+Explain how ensembles are grouped by common physical and algorithmic parameters. State which parameters are varied in the continuum study and which are held fixed.
+
+\section{Thermalization and Autocorrelations}
+\subsection{Thermalization Cuts}
+\subsection{Integrated Autocorrelation Time}
+\subsection{Bootstrap Blocking}
+
+\section{Analysis Pipeline}
+Describe the analysis code and reproducibility workflow. Include the path from raw measurements to final observables:
+\begin{enumerate}
+  \item Load simulation metadata from \texttt{input.yaml}.
+  \item Read Wilson-loop and observable measurements.
+  \item Apply thermalization cuts.
+  \item Estimate uncertainties with bootstrap resampling.
+  \item Extract $V(R)$, $\creutz$, $\rzero$, and related quantities.
+  \item Aggregate ensembles for continuum and breaking-strength comparisons.
+\end{enumerate}
+
+\chapter{Extraction of Physical Observables}
+\section{Wilson Loop Analysis}
+\subsection{Effective Mass Plateaus}
+\subsection{Choice of Fit Windows}
+\subsection{Systematic Uncertainty from Fit Ranges}
+
+\section{Static Potential}
+\subsection{Potential Extraction}
+\subsection{Cornell-Type Fits}
+\subsection{Force and Sommer Scale}
+
+\section{Creutz Ratio Analysis}
+\subsection{Definition and Interpretation}
+\subsection{Large-Time Behavior}
+\subsection{Relation to the String Tension}
+
+\section{Scale Setting}
+\subsection{Determination of the Sommer Scale in Lattice Units}
+\subsection{Alternative Scale Estimates}
+\subsection{Consistency Checks}
+
+\chapter{Continuum Extrapolation Method}
+\section{Choice of Continuum Variable}
+Define the extrapolation variable, for example $(\latspacing/\rzero)^2$, $1/\beta$, or another measured scale proxy.
+
+\section{Fixed-Physics Trajectories}
+Explain how ensembles at different $\beta$ and $\eps$ are compared. State whether $\eps$ is held fixed in bare units, scaled with $\latspacing$, or tuned along the trajectory.
+
+\section{Fit Ansatz}
+\subsection{Gauge-Invariant Baseline}
+\subsection{Linear and Quadratic Lattice-Spacing Corrections}
+\subsection{Combined Fits in Lattice Spacing and Breaking Strength}
+
+\section{Uncertainty Budget}
+\subsection{Statistical Errors}
+\subsection{Fit-Window Systematics}
+\subsection{Finite-Volume Effects}
+\subsection{Continuum-Fit Systematics}
+
+\chapter{Results}
+\section{Thermalization and Data Quality}
+Insert representative thermalization histories and autocorrelation estimates.
+
+\section{Gauge-Invariant Baseline}
+Present the $\eps=0$ results for $\wilsonloop$, $V(R)$, $\rzero$, and $\stringtension$. This establishes the reference continuum behavior.
+
+\section{Dependence on Gauge-Breaking Strength}
+\subsection{Observable Shifts at Fixed Coupling}
+\subsection{Scaling of Shifts with Breaking Strength}
+\subsection{Thresholds or Nonlinear Behavior}
+
+\section{Continuum Limit at Fixed Breaking}
+\subsection{Continuum Extrapolations for Each Breaking Strength}
+\subsection{Comparison with the Gauge-Invariant Limit}
+\subsection{Stability Under Fit Variations}
+
+\section{Combined Scaling Analysis}
+Fit the dependence on both lattice spacing and gauge-breaking parameter. State whether the data support restoration of gauge invariance in the continuum limit.
+
+\section{Finite-Volume and Systematic Checks}
+Collect checks that are not part of the primary result but constrain the interpretation.
+
+\chapter{Discussion}
+\section{Interpretation of the Continuum Limit}
+Discuss whether small gauge breaking behaves like an irrelevant lattice artifact, a relevant deformation, or a source of uncontrolled continuum bias.
+
+\section{Comparison with Theoretical Expectations}
+Relate the numerical findings to the hypotheses from Chapter~3.
+
+\section{Limitations}
+Discuss limits from statistics, accessible lattice spacings, finite volume, fit-systematic control, and the specific form of gauge breaking studied.
+
+\section{Implications}
+Explain what the result means for simulations or formulations where gauge invariance is only approximate.
+
+\chapter{Conclusion and Outlook}
+\section{Summary of Findings}
+State the central quantitative conclusions.
+
+\section{Answer to the Research Question}
+Give the direct answer to whether the continuum limit is robust under the investigated small breaking of gauge invariance.
+
+\section{Future Work}
+Possible extensions:
+\begin{itemize}
+  \item Study additional forms of gauge-breaking terms.
+  \item Increase statistics and extend to finer lattice spacings.
+  \item Add gauge-variant diagnostics to directly measure symmetry restoration.
+  \item Compare different gauge groups or dimensions.
+\end{itemize}
+
+\appendix
+
+\chapter{Simulation Tables}
+Provide complete tables of ensembles, including $\beta$, lattice size, breaking parameters, number of sweeps, thermalization cuts, and measured scales.
+
+\chapter{Additional Plots}
+Include supplementary Wilson-loop plateaus, bootstrap block-size scans, potential fits, and continuum-fit variants.
+
+\chapter{Analysis Code and Reproducibility}
+Document the exact command-line workflow, cache version, software environment, and data-selection rules used for the final analysis.
+
+\chapter{Derivations}
+Collect longer derivations that would interrupt the main text, such as Creutz-ratio identities or continuum-scaling arguments.
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

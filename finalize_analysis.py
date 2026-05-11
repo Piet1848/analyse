@@ -11,8 +11,9 @@ import subprocess
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
+from math import ceil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, get_origin, get_type_hints
 
 import numpy as np
 
@@ -30,7 +31,9 @@ from finalized_analysis_helpers import (
     recommend_bootstrap_block_size,
     save_bootstrap_block_size_plot,
     save_cornell_plot,
+    save_creutz_plot,
     save_effective_mass_plot,
+    save_gradient_flow_plot,
     save_json,
     save_thermalization_plot,
     save_r0_stability_plot,
@@ -46,8 +49,10 @@ GROUP_FIELD_ALIASES = {
     "eps1": "epsilon1",
     "eps2": "epsilon2",
 }
+FILTER_FIELD_ALIASES = GROUP_FIELD_ALIASES
 DEFAULT_BLOCK_SIZE_SCAN_MIN = 1
-DEFAULT_BLOCK_SIZE_SCAN_MAX = 16
+DEFAULT_BLOCK_SIZE_SCAN_MAX = None
+DEFAULT_BLOCK_SIZE_SCAN_MAX_FRACTION = 16
 DEFAULT_BLOCK_SIZE_SCAN_STEP = 1
 
 
@@ -59,6 +64,94 @@ def format_token(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:g}"
     return str(value)
+
+
+def format_result_value(value: Any, error: Any = None) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric_value):
+        return str(numeric_value)
+
+    value_text = f"{numeric_value:.6g}"
+    if error is None:
+        return value_text
+    try:
+        numeric_error = float(error)
+    except (TypeError, ValueError):
+        return value_text
+    if not np.isfinite(numeric_error):
+        return value_text
+    return f"{value_text} +/- {numeric_error:.3g}"
+
+
+def build_filter_field_map() -> dict[str, tuple[str, Any]]:
+    field_map: dict[str, tuple[str, Any]] = {}
+    for name, typ in get_type_hints(MetropolisParams).items():
+        field_map[name] = ("metro", typ)
+    for name, typ in get_type_hints(GaugeObservableParams).items():
+        field_map[name] = ("gauge", typ)
+    return field_map
+
+
+FILTER_FIELD_MAP = build_filter_field_map()
+
+
+def parse_bool(value: str) -> bool:
+    lowered = value.lower()
+    if lowered in {"true", "1", "yes", "y", "t"}:
+        return True
+    if lowered in {"false", "0", "no", "n", "f"}:
+        return False
+    raise ValueError(f"Cannot parse boolean from {value!r}")
+
+
+def convert_filter_value(value: str, typ: Any) -> Any:
+    origin = get_origin(typ)
+    if origin in {list, dict} or typ in {list, dict}:
+        return value
+    if typ is bool:
+        return parse_bool(value)
+    if typ is int:
+        return int(value)
+    if typ is float:
+        return float(value)
+    return value
+
+
+def parse_filter_tokens(tokens: list[str] | None) -> dict[str, Any]:
+    criteria: dict[str, Any] = {}
+    for token in tokens or []:
+        if "=" not in token:
+            raise ValueError(f"Filter token must use NAME=VALUE syntax: {token!r}")
+        raw_name, raw_value = token.split("=", 1)
+        name = FILTER_FIELD_ALIASES.get(raw_name.strip(), raw_name.strip())
+        if name not in FILTER_FIELD_MAP:
+            raise ValueError(f"Unknown filter field: {raw_name.strip()!r}")
+        _, typ = FILTER_FIELD_MAP[name]
+        criteria[name] = convert_filter_value(raw_value.strip(), typ)
+    return criteria
+
+
+def run_matches_filter(
+    metro: MetropolisParams,
+    gauge: GaugeObservableParams,
+    criteria: dict[str, Any],
+) -> bool:
+    for name, expected in criteria.items():
+        block_name, _ = FILTER_FIELD_MAP[name]
+        obj = metro if block_name == "metro" else gauge
+        actual = getattr(obj, name)
+        if isinstance(actual, (list, dict)) and isinstance(expected, str):
+            if expected not in str(actual):
+                return False
+            continue
+        if actual != expected:
+            return False
+    return True
 
 
 def normalize_thermalization_steps_by_run(
@@ -106,7 +199,7 @@ def thermalization_preview_filename(run_dir: str) -> str:
     return f"thermalization_{safe_name}_{digest}.html"
 
 
-def parse_bootstrap_block_sizes(args: argparse.Namespace) -> list[int]:
+def parse_bootstrap_block_sizes(args: argparse.Namespace) -> list[int] | None:
     if args.block_sizes:
         values: list[int] = []
         for chunk in args.block_sizes.split(","):
@@ -116,15 +209,19 @@ def parse_bootstrap_block_sizes(args: argparse.Namespace) -> list[int]:
             values.append(int(stripped))
     else:
         min_block = int(args.min_block_size)
-        max_block = int(args.max_block_size)
         step = int(args.block_step)
         if min_block < 1:
             raise ValueError("--min-block-size must be at least 1")
-        if max_block < min_block:
-            raise ValueError("--max-block-size must be greater than or equal to --min-block-size")
         if step < 1:
             raise ValueError("--block-step must be at least 1")
+        if args.max_block_size is None:
+            return None
+        max_block = int(args.max_block_size)
+        if max_block < min_block:
+            raise ValueError("--max-block-size must be greater than or equal to --min-block-size")
         values = list(range(min_block, max_block + 1, step))
+        if values and values[-1] != max_block:
+            values.append(max_block)
 
     block_sizes = sorted({int(value) for value in values if int(value) >= 1})
     if not block_sizes:
@@ -206,6 +303,14 @@ def canonical_group_field(name: str) -> str:
     return GROUP_FIELD_ALIASES.get(name, name)
 
 
+def freeze_group_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple((key, freeze_group_value(val)) for key, val in sorted(value.items()))
+    if isinstance(value, list):
+        return tuple(freeze_group_value(item) for item in value)
+    return value
+
+
 def discover_run_directories(root: str) -> list[str]:
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
@@ -223,6 +328,21 @@ def discover_run_directories(root: str) -> list[str]:
     return run_dirs
 
 
+def filter_run_directories(run_dirs: list[str], criteria: dict[str, Any]) -> list[str]:
+    if not criteria:
+        return sorted(os.path.abspath(path) for path in run_dirs)
+
+    matches: list[str] = []
+    for run_dir in sorted(os.path.abspath(path) for path in run_dirs):
+        yaml_path = Path(run_dir) / "input.yaml"
+        if not yaml_path.exists():
+            continue
+        metro, gauge = load_params(str(yaml_path))
+        if run_matches_filter(metro, gauge, criteria):
+            matches.append(run_dir)
+    return matches
+
+
 def build_group_signature(
     metro: MetropolisParams,
     gauge: GaugeObservableParams,
@@ -237,9 +357,9 @@ def build_group_signature(
         missing = [name for name in requested if name not in combined]
         if missing:
             raise ValueError(f"Unknown grouping field(s): {', '.join(missing)}")
-        return tuple((name, combined[name]) for name in requested)
+        return tuple((name, freeze_group_value(combined[name])) for name in requested)
 
-    return tuple(sorted(combined.items()))
+    return tuple((name, freeze_group_value(value)) for name, value in sorted(combined.items()))
 
 
 def describe_group_signature(signature: tuple[tuple[str, Any], ...]) -> str:
@@ -325,6 +445,10 @@ class FinalizedAnalysisRunner:
         n_bootstrap: int,
         target_force: float,
         block_size_scan_values: list[int] | None = None,
+        block_size_scan_min: int = DEFAULT_BLOCK_SIZE_SCAN_MIN,
+        block_size_scan_max: int | None = DEFAULT_BLOCK_SIZE_SCAN_MAX,
+        block_size_scan_step: int = DEFAULT_BLOCK_SIZE_SCAN_STEP,
+        max_r: int | None = None,
         open_plots: bool = True,
         open_plot_func: Callable[[Path], bool] = open_html_plot,
         input_func: Callable[[str], str] = input,
@@ -340,12 +464,24 @@ class FinalizedAnalysisRunner:
         self.calc_workers = calc_workers
         self.n_bootstrap = int(n_bootstrap)
         self.target_force = float(target_force)
+        self.block_size_scan_min = int(block_size_scan_min)
+        self.block_size_scan_max = int(block_size_scan_max) if block_size_scan_max is not None else None
+        self.block_size_scan_step = int(block_size_scan_step)
+        if self.block_size_scan_min < 1:
+            raise ValueError("--min-block-size must be at least 1")
+        if self.block_size_scan_step < 1:
+            raise ValueError("--block-step must be at least 1")
+        if self.block_size_scan_max is not None and self.block_size_scan_max < self.block_size_scan_min:
+            raise ValueError("--max-block-size must be greater than or equal to --min-block-size")
+        self.max_r = int(max_r) if max_r is not None else None
+        if self.max_r is not None and self.max_r < 0:
+            raise ValueError("--max-r must be non-negative")
         self.block_size_scan_values = (
             sorted({int(value) for value in block_size_scan_values if int(value) >= 1})
             if block_size_scan_values is not None
-            else list(range(DEFAULT_BLOCK_SIZE_SCAN_MIN, DEFAULT_BLOCK_SIZE_SCAN_MAX + 1, DEFAULT_BLOCK_SIZE_SCAN_STEP))
+            else None
         )
-        if not self.block_size_scan_values:
+        if block_size_scan_values is not None and not self.block_size_scan_values:
             raise ValueError("At least one positive bootstrap block size is required.")
         self.open_plots = bool(open_plots)
         self.open_plot_func = open_plot_func
@@ -377,6 +513,10 @@ class FinalizedAnalysisRunner:
         self.r0_bootstrap_dir = self.r0_dir / "bootstrap"
         self.derived_dir = self.analysis_dir / "derived"
         self.derived_bootstrap_dir = self.derived_dir / "bootstrap"
+        self.gradient_flow_dir = self.analysis_dir / "gradient_flow"
+        self.gradient_flow_bootstrap_dir = self.gradient_flow_dir / "bootstrap"
+        self.creutz_dir = self.analysis_dir / "creutz"
+        self.creutz_bootstrap_dir = self.creutz_dir / "bootstrap"
         self.bootstrap_block_size_choice_path = self.analysis_dir / "bootstrap_block_size_choice.json"
 
         self.manifest = self._load_or_init_manifest()
@@ -385,6 +525,8 @@ class FinalizedAnalysisRunner:
         self._write_input_runs()
 
         self.combined_w_temp = None
+        self.combined_gradient_flow = None
+        self.gradient_flow_metadata: dict[str, Any] = {}
         self.aggregation = None
         self.calc: Calculator | None = None
         self.unique_rs: list[int] = []
@@ -629,6 +771,8 @@ class FinalizedAnalysisRunner:
                     "wilsonloop_complete": False,
                     "r0_complete": False,
                     "derived_complete": False,
+                    "gradient_flow_complete": False,
+                    "creutz_complete": False,
                 },
                 "run_evaluation_version": run_evaluation.CALC_VERSION,
                 "calculator_helper": "fit_r0_from_potential_data",
@@ -639,6 +783,9 @@ class FinalizedAnalysisRunner:
                 "target_force": float(self.target_force),
                 "block_size": None,
                 "block_size_scan_values": self.block_size_scan_values,
+                "block_size_scan_min": self.block_size_scan_min,
+                "block_size_scan_max": self.block_size_scan_max,
+                "block_size_scan_step": self.block_size_scan_step,
                 "plot_mode": self.plot_mode,
                 "calc_workers": self.calc_workers,
                 "load_workers": self.load_workers,
@@ -668,6 +815,9 @@ class FinalizedAnalysisRunner:
                 f"Existing analysis uses target_force={manifest.get('target_force')} "
                 f"but this run requested {self.target_force}."
             )
+        status = manifest.setdefault("status", {})
+        status.setdefault("gradient_flow_complete", False)
+        status.setdefault("creutz_complete", False)
         manifest["updated_at"] = utc_now()
         return manifest
 
@@ -682,6 +832,10 @@ class FinalizedAnalysisRunner:
             self.r0_bootstrap_dir,
             self.derived_dir,
             self.derived_bootstrap_dir,
+            self.gradient_flow_dir,
+            self.gradient_flow_bootstrap_dir,
+            self.creutz_dir,
+            self.creutz_bootstrap_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)
         self._save_manifest()
@@ -728,6 +882,52 @@ class FinalizedAnalysisRunner:
                 return float(tau)
         return None
 
+    def _bootstrap_scan_total_length(self, file_data) -> int:
+        n_configurations = getattr(file_data, "n_configurations", None)
+        try:
+            if n_configurations is not None and int(n_configurations) > 0:
+                return int(n_configurations)
+        except (TypeError, ValueError):
+            pass
+
+        wilson_by_pair = getattr(file_data, "wilson_by_pair", None)
+        if wilson_by_pair:
+            first_series = next(iter(wilson_by_pair.values()), None)
+            if first_series is not None:
+                return int(len(first_series))
+        wilson_by_flow_pair = getattr(file_data, "wilson_by_flow_pair", None)
+        if wilson_by_flow_pair:
+            first_series = next(iter(wilson_by_flow_pair.values()), None)
+            if first_series is not None:
+                return int(len(first_series))
+
+        lengths = [len(obs.values) for obs in getattr(file_data, "observables", [])]
+        return int(min(lengths)) if lengths else 0
+
+    def _resolved_bootstrap_block_sizes(self, file_data) -> list[int]:
+        if self.block_size_scan_values is not None:
+            return list(self.block_size_scan_values)
+
+        total_length = self._bootstrap_scan_total_length(file_data)
+        if total_length <= 0:
+            raise ValueError("Cannot infer bootstrap block-size scan range from empty data.")
+
+        max_block = self.block_size_scan_max
+        if max_block is None:
+            max_block = max(
+                self.block_size_scan_min,
+                int(ceil(total_length / DEFAULT_BLOCK_SIZE_SCAN_MAX_FRACTION)),
+            )
+
+        values = list(range(self.block_size_scan_min, int(max_block) + 1, self.block_size_scan_step))
+        if values and values[-1] != int(max_block):
+            values.append(int(max_block))
+
+        block_sizes = sorted({int(value) for value in values if int(value) >= 1})
+        if not block_sizes:
+            raise ValueError("No valid bootstrap block sizes selected.")
+        return block_sizes
+
     def _prompt_bootstrap_block_size(self, recommended_block_size: int) -> int:
         while True:
             response = self.input(
@@ -755,11 +955,14 @@ class FinalizedAnalysisRunner:
             return int(saved_block_size)
 
         self.print("\nBuilding bootstrap block-size diagnostic for representative W(R,T) points...")
+        block_size_scan_values = self._resolved_bootstrap_block_sizes(file_data)
+        self.manifest["block_size_scan_values"] = block_size_scan_values
+        self._save_manifest()
         scan_path = self.scan_dir / "bootstrap_block_size_scan.json"
         plot_path = self.plots_dir / "bootstrap_block_size.html"
         scan_records, selected_pairs = build_bootstrap_block_size_scan(
             file_data,
-            self.block_size_scan_values,
+            block_size_scan_values,
             n_bootstrap=self.n_bootstrap,
         )
         tau_hint = self._compute_tau_hint(file_data)
@@ -772,7 +975,8 @@ class FinalizedAnalysisRunner:
             scan_path,
             {
                 "schema_version": SCHEMA_VERSION,
-                "block_size_scan_values": self.block_size_scan_values,
+                "block_size_scan_values": block_size_scan_values,
+                "block_size_scan_total_length": self._bootstrap_scan_total_length(file_data),
                 "selected_pairs": [{"R": int(r_val), "T": int(t_val)} for r_val, t_val in selected_pairs],
                 "tau_int": tau_hint,
                 "recommended_block_size": int(recommended),
@@ -824,6 +1028,11 @@ class FinalizedAnalysisRunner:
             load_workers=self.load_workers,
             thermalization_steps_by_run=self.thermalization_steps_by_run,
         )
+        combined_gradient_flow, gradient_flow_metadata = run_evaluation._load_combined_gradient_flow_obs(
+            self.run_dirs,
+            load_workers=self.load_workers,
+            thermalization_steps_by_run=self.thermalization_steps_by_run,
+        )
         if combined_w_temp is None:
             raise RuntimeError("No combined W_temp data could be loaded from the selected runs.")
         
@@ -831,6 +1040,8 @@ class FinalizedAnalysisRunner:
 
         block_size = self._select_bootstrap_block_size(combined_w_temp)
         self.combined_w_temp = combined_w_temp
+        self.combined_gradient_flow = combined_gradient_flow
+        self.gradient_flow_metadata = gradient_flow_metadata
         self.aggregation = aggregation
         self.calc = Calculator(
             combined_w_temp,
@@ -845,6 +1056,7 @@ class FinalizedAnalysisRunner:
         self.manifest["block_size"] = block_size
         self.manifest["available_R"] = self.unique_rs
         self.manifest["available_T"] = self.unique_ts
+        self.manifest["gradient_flow_metadata"] = gradient_flow_metadata
         self._save_manifest()
 
     def _build_scan_cache(self) -> None:
@@ -876,6 +1088,45 @@ class FinalizedAnalysisRunner:
         save_json(self.wilson_dir / "choices.json", choices_payload)
         save_json(self.wilson_dir / "V_R_summary.json", summary_payload)
 
+    def _ignored_r_ge(self, choices_payload: dict[str, Any]) -> int | None:
+        ignored = choices_payload.get("ignored_R", {})
+        if isinstance(ignored, dict) and ignored.get("R_ge") is not None:
+            return int(ignored["R_ge"])
+        if choices_payload.get("ignore_R_ge") is not None:
+            return int(choices_payload["ignore_R_ge"])
+        return None
+
+    def _is_v_r_ignored(self, r_value: int, choices_payload: dict[str, Any]) -> bool:
+        if self.max_r is not None and int(r_value) > self.max_r:
+            return True
+        ignored_r_ge = self._ignored_r_ge(choices_payload)
+        return ignored_r_ge is not None and int(r_value) >= ignored_r_ge
+
+    def _save_v_stop(
+        self,
+        choices_payload: dict[str, Any],
+        summary_payload: dict[str, Any],
+        stop_before_r: int,
+        *,
+        source: str,
+    ) -> None:
+        kept_rs = [
+            int(key)
+            for key in choices_payload.get("choices", {})
+            if int(key) < int(stop_before_r)
+        ]
+        max_r = max(kept_rs) if kept_rs else int(stop_before_r) - 1
+        choices_payload["ignored_R"] = {
+            "R_ge": int(stop_before_r),
+            "max_R": int(max_r),
+            "source": source,
+            "saved_at": utc_now(),
+        }
+        # Keep the flat fields for readability and compatibility with older output snapshots.
+        choices_payload["ignore_R_ge"] = int(stop_before_r)
+        choices_payload["max_R"] = int(max_r)
+        self._save_v_state(choices_payload, summary_payload)
+
     def _candidate_windows_for_r(self, r_value: int) -> list[dict[str, Any]]:
         v_scan = load_json(self.scan_dir / "v_r_scan_candidates.json", default=[])
         return [
@@ -889,17 +1140,28 @@ class FinalizedAnalysisRunner:
         r_value: int,
         candidates: list[dict[str, Any]],
         previous_choice: tuple[int, int | None] | None = None,
-    ) -> tuple[int, int | None]:
+    ) -> tuple[int, int | None] | None:
         if not candidates:
-            raise RuntimeError(f"No finite V(R) candidate windows available for R={r_value}.")
+            self.print(f"\nR = {r_value}")
+            self.print(f"No finite V(R) candidate windows are available for R={r_value}.")
+            while True:
+                response = self.input(
+                    f"Type `stop` to ignore R >= {r_value} and continue, or interrupt to abort: "
+                ).strip().lower()
+                if response == "stop":
+                    return None
+                self.print("No fit window can be selected for this R.")
 
         self.print(f"\nR = {r_value}")
         while True:
             prompt = "Enter t_min and optional t_max as `t_min` or `t_min,t_max` (use `none` for no t_max)"
             if previous_choice is not None:
                 prompt += f", or press Enter to reuse {window_label(*previous_choice)}"
+            prompt += f"; type `stop` to ignore R >= {r_value} and continue"
             prompt += ": "
             response = self.input(prompt).strip()
+            if response.lower() == "stop":
+                return None
             if not response:
                 if previous_choice is None:
                     self.print("A t_min selection is required for the first R.")
@@ -938,10 +1200,17 @@ class FinalizedAnalysisRunner:
         plot_path = self.plots_dir / "effective_mass_all_R.html"
         save_effective_mass_plot(plot_path, wrt_records, effective_mass_records)
         self.print(f"\nSaved effective-mass plot with R dropdown: {plot_path}")
+        if self.max_r is not None:
+            self.print(f"Limiting V(R) finalization to R <= {self.max_r}.")
         previous_choice: tuple[int, int | None] | None = None
 
-        for r_value in self.unique_rs:
+        for r_value in sorted(self.unique_rs):
             key = str(int(r_value))
+            if self._is_v_r_ignored(int(r_value), v_choices):
+                self._save_v_stop(v_choices, v_summary, int(r_value), source="max_r" if self.max_r is not None else "interactive")
+                self.print(f"\nIgnoring R >= {int(r_value)} for V(R).")
+                break
+
             bootstrap_path = self.wilson_bootstrap_dir / f"V_R_R_{key}.npy"
             if key in v_choices["choices"] and bootstrap_path.exists():
                 choice = v_choices["choices"][key]
@@ -949,7 +1218,12 @@ class FinalizedAnalysisRunner:
                 continue
 
             candidates = self._candidate_windows_for_r(r_value)
-            t_min, t_max = self._prompt_window_choice(r_value, candidates, previous_choice=previous_choice)
+            window_choice = self._prompt_window_choice(r_value, candidates, previous_choice=previous_choice)
+            if window_choice is None:
+                self._save_v_stop(v_choices, v_summary, int(r_value), source="interactive")
+                self.print(f"Ignoring R >= {int(r_value)} for V(R).")
+                break
+            t_min, t_max = window_choice
             previous_choice = (t_min, t_max)
 
             var = self.calc.get_variable("V_R", R=int(r_value), t_min=int(t_min), t_max=t_max)
@@ -989,6 +1263,9 @@ class FinalizedAnalysisRunner:
         summary_payload = self._load_v_summary()
         results: dict[int, dict[str, Any]] = {}
         for key, choice in choices_payload.get("choices", {}).items():
+            r_value = int(key)
+            if self._is_v_r_ignored(r_value, choices_payload):
+                continue
             summary = summary_payload.get("results", {}).get(key)
             if summary is None:
                 continue
@@ -999,8 +1276,8 @@ class FinalizedAnalysisRunner:
                 bootstrap_path = self.wilson_bootstrap_dir / f"V_R_R_{key}.npy"
             if not bootstrap_path.exists():
                 continue
-            results[int(key)] = {
-                "R": int(key),
+            results[r_value] = {
+                "R": r_value,
                 "t_min": int(choice["t_min"]),
                 "t_max": choice["t_max"],
                 "value": float(summary["value"]),
@@ -1045,12 +1322,16 @@ class FinalizedAnalysisRunner:
         choice_path = self.r0_dir / "choice.json"
         result_path = self.r0_dir / "r0_result.json"
         bootstrap_path = self.r0_bootstrap_dir / "r0.npy"
-        if choice_path.exists() and result_path.exists() and bootstrap_path.exists():
-            self.manifest["status"]["r0_complete"] = True
-            self._save_manifest()
-            return
-
         selected_v = self._load_selected_v_results()
+        if choice_path.exists() and result_path.exists() and bootstrap_path.exists():
+            existing_result = load_json(result_path, default={})
+            existing_fit_rs = [int(r) for r in existing_result.get("fit_rs", [])]
+            if existing_fit_rs and all(r in selected_v for r in existing_fit_rs):
+                self.manifest["status"]["r0_complete"] = True
+                self._save_manifest()
+                return
+            self.print("\nExisting r0 result uses V(R) points outside the active cutoff; recomputing.")
+
         if len(selected_v) < 3:
             raise RuntimeError("At least three finalized V(R) points are required before fitting r0.")
 
@@ -1134,14 +1415,21 @@ class FinalizedAnalysisRunner:
 
     def _finalize_derived(self) -> None:
         summary_path = self.derived_dir / "summary.json"
-        if summary_path.exists():
-            self.manifest["status"]["derived_complete"] = True
-            self._save_manifest()
-            return
-
         r0_result = load_json(self.r0_dir / "r0_result.json", default=None)
         if r0_result is None:
             raise RuntimeError("r0 result is missing; cannot compute derived quantities.")
+        if summary_path.exists():
+            existing_summary = load_json(summary_path, default=None)
+            if (
+                existing_summary is not None
+                and existing_summary.get("r0") is not None
+                and np.isclose(float(existing_summary["r0"]), float(r0_result["r0"]))
+            ):
+                self.manifest["status"]["derived_complete"] = True
+                self._save_manifest()
+                return
+            self.print("\nExisting derived summary is stale relative to the active r0 result; recomputing.")
+
         r0_bootstrap = np.load(self.r0_bootstrap_dir / "r0.npy")
 
         r0_val = float(r0_result["r0"])
@@ -1195,13 +1483,184 @@ class FinalizedAnalysisRunner:
         self.manifest["status"]["derived_complete"] = True
         self._save_manifest()
 
+    def _finalize_gradient_flow(self) -> None:
+        self._load_data()
+        block_size = int(self.manifest.get("block_size") or 1)
+        summary = run_evaluation.summarize_gradient_flow_obs(
+            self.combined_gradient_flow,
+            t0_target=self.gradient_flow_metadata.get("t0_target"),
+            block_size=block_size,
+            n_bootstrap=self.n_bootstrap,
+            include_bootstrap=True,
+        )
+        bootstrap_samples = summary.pop("bootstrap_samples", {}) if summary else {}
+        summary_path = self.gradient_flow_dir / "summary.json"
+        plot_path = self.plots_dir / "gradient_flow_t2E.html"
+
+        if summary:
+            for name, samples in bootstrap_samples.items():
+                np.save(self.gradient_flow_bootstrap_dir / f"{name}.npy", np.asarray(samples, dtype=float))
+            summary["bootstrap_paths"] = {
+                name: str(self.gradient_flow_bootstrap_dir / f"{name}.npy")
+                for name in bootstrap_samples
+            }
+            save_json(summary_path, summary)
+            save_gradient_flow_plot(plot_path, summary)
+            self.manifest["gradient_flow_summary"] = str(summary_path)
+            self.manifest["gradient_flow_plot"] = str(plot_path)
+        else:
+            save_json(summary_path, {"status": "no gradient_flow_obs.dat data available"})
+            self.manifest["gradient_flow_summary"] = str(summary_path)
+
+        self.manifest["status"]["gradient_flow_complete"] = True
+        self._save_manifest()
+
+    def _finalize_creutz(self) -> None:
+        self._load_data()
+        assert self.calc is not None
+        summary_path = self.creutz_dir / "summary.json"
+        plot_path = self.plots_dir / "creutz_ratios.html"
+
+        chi: dict[str, float] = {}
+        chi_err: dict[str, float] = {}
+        chi_boot_paths: dict[str, str] = {}
+        unique_r_set = set(self.unique_rs)
+        unique_t_set = set(self.unique_ts)
+        chi_pairs = [
+            (float(r_val) + 0.5, float(t_val) + 0.5)
+            for r_val in self.unique_rs
+            if r_val + 1 in unique_r_set
+            for t_val in self.unique_ts
+            if t_val + 1 in unique_t_set
+        ]
+        status = "ok" if chi_pairs else "not enough adjacent L values for standard Creutz ratios"
+
+        for r_mid, t_mid in chi_pairs:
+            try:
+                var = self.calc.get_variable("chi", R=r_mid, T=t_mid)
+            except Exception:
+                continue
+            value = var.get()
+            if value is None or not np.isfinite(value):
+                continue
+            key = f"{r_mid:g},{t_mid:g}"
+            chi[key] = float(value)
+            if var.err() is not None and np.isfinite(var.err()):
+                chi_err[key] = float(var.err())
+            boot = var.bootstrap()
+            if boot is not None:
+                filename = f"chi_R_{r_mid:g}_T_{t_mid:g}.npy".replace(".", "p")
+                path = self.creutz_bootstrap_dir / filename
+                np.save(path, np.asarray(boot, dtype=float))
+                chi_boot_paths[key] = str(path)
+
+        creutz_p: dict[str, float] = {}
+        creutz_p_err: dict[str, float] = {}
+        for r_val in [r for r in self.unique_rs if r > 0 and r % 2 == 0]:
+            try:
+                var = self.calc.get_variable("creutz_P", R=int(r_val))
+            except Exception:
+                continue
+            value = var.get()
+            if value is None or not np.isfinite(value):
+                continue
+            key = str(int(r_val))
+            creutz_p[key] = float(value)
+            if var.err() is not None and np.isfinite(var.err()):
+                creutz_p_err[key] = float(var.err())
+
+        payload = {
+            "status": status,
+            "chi": chi,
+            "chi_err": chi_err,
+            "chi_bootstrap_paths": chi_boot_paths,
+            "creutz_P": creutz_p,
+            "creutz_P_err": creutz_p_err,
+        }
+        save_json(summary_path, payload)
+        save_creutz_plot(plot_path, payload)
+        self.manifest["creutz_summary"] = str(summary_path)
+        self.manifest["creutz_plot"] = str(plot_path)
+        self.manifest["status"]["creutz_complete"] = True
+        self._save_manifest()
+
+    def _active_v_result_rs(self) -> list[int]:
+        choices_payload = self._load_v_choices()
+        summary_payload = self._load_v_summary()
+        active_rs: list[int] = []
+        for key in choices_payload.get("choices", {}):
+            r_value = int(key)
+            if self._is_v_r_ignored(r_value, choices_payload):
+                continue
+            if summary_payload.get("results", {}).get(key) is not None:
+                active_rs.append(r_value)
+        return sorted(active_rs)
+
+    def _format_r_list(self, values: list[int]) -> str:
+        if not values:
+            return "n/a"
+        if values == list(range(values[0], values[-1] + 1)):
+            return f"{values[0]}-{values[-1]}" if values[0] != values[-1] else str(values[0])
+        return ", ".join(str(value) for value in values)
+
+    def _print_result_summary(self) -> None:
+        r0_result = load_json(self.r0_dir / "r0_result.json", default={}) or {}
+        r0_choice = load_json(self.r0_dir / "choice.json", default={}) or {}
+        derived_summary = load_json(self.derived_dir / "summary.json", default={}) or {}
+        active_v_rs = self._active_v_result_rs()
+        fit_rs = [int(value) for value in r0_result.get("fit_rs", [])]
+
+        self.print("\nResult summary:")
+        self.print(
+            "  Ensemble: "
+            f"beta={self.metro.beta:g}, "
+            f"L={self.metro.L0}x{self.metro.L1}x{self.metro.L2}x{self.metro.L3}, "
+            f"epsilon1={self.metro.epsilon1:g}, epsilon2={self.metro.epsilon2:g}, "
+            f"runs={len(self.run_dirs)}"
+        )
+        if self.thermalization_steps is not None:
+            thermalization_text = str(self.thermalization_steps)
+        else:
+            cuts = list(self.thermalization_steps_by_run.values())
+            thermalization_text = f"per-run ({min(cuts)}-{max(cuts)})" if cuts else "per-run"
+        self.print(
+            f"  Analysis choices: thermalization={thermalization_text}, "
+            f"block_size={self.manifest.get('block_size', 'n/a')}, "
+            f"bootstrap={self.n_bootstrap}"
+        )
+        self.print(
+            f"  V(R): {len(active_v_rs)} point(s), R={self._format_r_list(active_v_rs)}"
+        )
+        chi2_dof = r0_result.get("chi2_dof")
+        chi2_text = ""
+        if chi2_dof is not None and np.isfinite(float(chi2_dof)):
+            chi2_text = f", chi2/dof={float(chi2_dof):.3g}"
+        self.print(
+            "  r0 fit: "
+            f"r_min={r0_choice.get('r_min', 'n/a')}, "
+            f"fit R={self._format_r_list(fit_rs)}, "
+            f"r0={format_result_value(r0_result.get('r0'), r0_result.get('r0_err'))}"
+            f"{chi2_text}"
+        )
+        self.print(
+            "  Derived: "
+            f"a={format_result_value(derived_summary.get('a'), derived_summary.get('a_err'))}, "
+            f"epsilon_bar={format_result_value(derived_summary.get('epsilon_bar'), derived_summary.get('epsilon_bar_err'))}, "
+            f"length={format_result_value(derived_summary.get('length'), derived_summary.get('length_err'))}, "
+            f"volume_r0={format_result_value(derived_summary.get('volume_r0'), derived_summary.get('volume_r0_err'))}"
+        )
+
     def run(self) -> Path:
         self._finalize_wilsonloop()
-        self.print("\nWilson loop analysis complete. Proceeding to finalize r0 fit...")
+        self.print("\nWilson loop analysis complete. Proceeding to finalize gradient-flow and Creutz summaries...")
+        self._finalize_gradient_flow()
+        self._finalize_creutz()
+        self.print("\nGradient-flow and Creutz summaries complete. Proceeding to finalize r0 fit...")
         self._finalize_r0()
         self.print("\nr0 fit complete. Proceeding to compute derived quantities...")
         self._finalize_derived()
         self.print(f"\nFinalized analysis saved to: {self.analysis_dir}")
+        self._print_result_summary()
         return self.analysis_dir
 
 
@@ -1213,9 +1672,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discover all run directories beneath this root and process them in grouped batches.",
     )
     parser.add_argument(
+        "--filter",
+        nargs="+",
+        metavar="NAME=VALUE",
+        help="Search-data-style YAML parameter filters for --run-root, e.g. beta=2.4 eps1=0.0 L0=24.",
+    )
+    parser.add_argument(
         "--group-by",
         nargs="+",
         help="Optional field names used to split discovered runs, e.g. eps1 beta L0. Defaults to full compatibility.",
+    )
+    parser.add_argument(
+        "--min-group-size",
+        type=int,
+        default=1,
+        help="When using --run-root, skip discovered groups with fewer matching runs than this.",
     )
     parser.add_argument(
         "--list-groups",
@@ -1249,6 +1720,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sommer target force used in the r0 fit.",
     )
     parser.add_argument(
+        "--max-r",
+        type=int,
+        default=None,
+        help="Use only finalized V(R) points with R <= this value and ignore larger R values.",
+    )
+    parser.add_argument(
         "--block-sizes",
         help="Comma-separated bootstrap block sizes to scan. Overrides --min-block-size/--max-block-size.",
     )
@@ -1266,7 +1743,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="max_block_size",
         type=int,
         default=DEFAULT_BLOCK_SIZE_SCAN_MAX,
-        help="Maximum bootstrap block size to scan when using a range.",
+        help=(
+            "Maximum bootstrap block size to scan when using a range. "
+            "Defaults to ceil(total post-cut configurations / 16)."
+        ),
     )
     parser.add_argument(
         "--block-step",
@@ -1292,17 +1772,40 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Use either positional run_dirs or --run-root, not both.")
     if not args.run_root and not args.run_dirs:
         parser.error("Provide run directories or use --run-root.")
+    if args.filter and not args.run_root:
+        parser.error("--filter can only be used with --run-root.")
+    if args.min_group_size < 1:
+        parser.error("--min-group-size must be at least 1.")
 
     try:
         block_size_scan_values = parse_bootstrap_block_sizes(args)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        filter_criteria = parse_filter_tokens(args.filter)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.run_root:
+        run_dirs = discover_run_directories(args.run_root)
+        run_dirs = filter_run_directories(run_dirs, filter_criteria)
+        if not run_dirs:
+            criteria_text = " ".join(args.filter or [])
+            suffix = f" matching filters: {criteria_text}" if criteria_text else ""
+            parser.error(f"No run directories found under {args.run_root}{suffix}.")
         grouped_runs = group_run_directories(
-            discover_run_directories(args.run_root),
+            run_dirs,
             group_by=args.group_by,
         )
+        grouped_runs = [
+            (signature, group_run_dirs)
+            for signature, group_run_dirs in grouped_runs
+            if len(group_run_dirs) >= args.min_group_size
+        ]
+        if not grouped_runs:
+            parser.error(
+                f"No discovered groups have at least {args.min_group_size} matching run(s)."
+            )
     else:
         grouped_runs = [(tuple(), [os.path.abspath(path) for path in args.run_dirs])]
 
@@ -1326,7 +1829,11 @@ def main(argv: list[str] | None = None) -> int:
             calc_workers=args.calc_workers,
             n_bootstrap=args.n_bootstrap,
             target_force=args.target_force,
+            max_r=args.max_r,
             block_size_scan_values=block_size_scan_values,
+            block_size_scan_min=args.min_block_size,
+            block_size_scan_max=args.max_block_size,
+            block_size_scan_step=args.block_step,
             open_plots=args.open_plots,
         )
         runner.run()

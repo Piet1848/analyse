@@ -11,7 +11,9 @@ import yaml
 import finalize_analysis
 import finalized_analysis_helpers as helpers
 import run_evaluation
+import data_organizer
 from calculator import Calculator, fit_r0_from_potential_data
+from load_input_yaml import load_params
 
 
 def write_input_yaml(
@@ -163,6 +165,33 @@ class FinalizeAnalysisTests(unittest.TestCase):
         self.assertTrue(any("Invalid bootstrap block size" in message for message in messages))
         self.assertTrue(any("must be at least 1" in message for message in messages))
 
+    def test_default_bootstrap_scan_extends_to_one_sixteenth_of_total_length(self):
+        runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
+        runner.block_size_scan_values = None
+        runner.block_size_scan_min = 1
+        runner.block_size_scan_max = None
+        runner.block_size_scan_step = 1
+
+        file_data = mock.Mock(n_configurations=80_000)
+
+        block_sizes = runner._resolved_bootstrap_block_sizes(file_data)
+
+        self.assertEqual(block_sizes[0], 1)
+        self.assertEqual(block_sizes[-1], 5_000)
+
+    def test_bootstrap_scan_includes_dynamic_max_with_coarse_step(self):
+        runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
+        runner.block_size_scan_values = None
+        runner.block_size_scan_min = 1
+        runner.block_size_scan_max = None
+        runner.block_size_scan_step = 750
+
+        file_data = mock.Mock(n_configurations=80_000)
+
+        block_sizes = runner._resolved_bootstrap_block_sizes(file_data)
+
+        self.assertEqual(block_sizes[-1], 5_000)
+
     def test_open_html_plot_returns_false_when_linux_openers_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = Path(tmp) / "preview.html"
@@ -217,6 +246,21 @@ class FinalizeAnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"MetropolisParams\.beta"):
                 finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
 
+    def test_filter_run_directories_accepts_search_style_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", beta=2.4, epsilon1=0.0)
+            run_b = make_run(root, "run_b", beta=2.4, epsilon1=0.0, seed=2)
+            make_run(root, "run_c", beta=2.6, epsilon1=0.0)
+
+            criteria = finalize_analysis.parse_filter_tokens(["beta=2.4", "eps1=0.0", "L0=4"])
+            matches = finalize_analysis.filter_run_directories(
+                finalize_analysis.discover_run_directories(str(root)),
+                criteria,
+            )
+
+            self.assertEqual(matches, sorted([str(run_a.resolve()), str(run_b.resolve())]))
+
     def test_custom_thermalization_threads_into_loader(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -265,6 +309,106 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 },
             )
 
+    def test_whitespace_w_temp_loading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "W_temp.out"
+            path.write_text(
+                "# step L T W_temp\n"
+                "0 1 1 0.5\n"
+                "0 1 2 0.25\n"
+                "5 1 1 0.4\n"
+                "5 1 2 0.2\n",
+                encoding="utf-8",
+            )
+
+            fd = data_organizer.FileData(str(path)).read_file()
+            self.assertEqual([obs.name for obs in fd.observables], ["step", "L", "T", "W_temp"])
+            compact = data_organizer.load_compact_wilson_file(str(path), min_step=0)
+
+            self.assertIsNotNone(compact)
+            assert compact is not None
+            self.assertEqual(compact.pair_order, [(1, 1), (1, 2)])
+            self.assertEqual(compact.n_configurations, 2)
+
+    def test_flowed_w_temp_loading_uses_flow_time_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gradient_flow_wtemp.dat"
+            path.write_text(
+                "# conf_id t_over_a2 L T W_temp\n"
+                "0 0.0 1 1 0.5\n"
+                "0 0.25 1 1 0.6\n"
+                "5 0.0 1 1 0.4\n"
+                "5 0.25 1 1 0.55\n",
+                encoding="utf-8",
+            )
+
+            compact = data_organizer.load_compact_wilson_file(str(path), min_step=0)
+
+            self.assertIsNotNone(compact)
+            assert compact is not None
+            self.assertEqual(compact.available_flow_times(), [None] if False else [0.0, 0.25])
+            calc = Calculator(compact, n_bootstrap=8, step_size=1)
+            self.assertAlmostEqual(calc.get_variable("W_R_T", R=1, T=1, flow_time=0.25).get(), 0.575)
+
+    def test_new_input_yaml_defaults_legacy_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            payload = {
+                "MetropolisParams": {
+                    "L0": 4,
+                    "L1": 4,
+                    "L2": 4,
+                    "L3": 4,
+                    "nHits": 10,
+                    "nSweep": 100,
+                    "seed": 1,
+                    "beta": 2.4,
+                    "delta": 0.1,
+                    "epsilon1": 0.0,
+                    "epsilon2": 0.0,
+                },
+                "GaugeObservableParams": {"W_temp_L_T_pairs": [["1:2", "1:2"]]},
+                "GradientFlowParams": {"enabled": True, "t_values": [0.0, 0.25]},
+            }
+            with (run_dir / "input.yaml").open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(payload, handle)
+
+            metro, gauge = load_params(str(run_dir / "input.yaml"))
+
+            self.assertEqual((metro.Ndims, metro.Nd, metro.Nc), (4, 4, 2))
+            self.assertEqual(gauge.W_temp_L_T_pairs, [(1, 1), (1, 2), (2, 1), (2, 2)])
+
+    def test_creutz_chi_uses_standard_adjacent_loop_definition(self):
+        compact = data_organizer.CompactWilsonData(
+            "synthetic",
+            flow_pair_order=[(None, 1, 1), (None, 1, 2), (None, 2, 1), (None, 2, 2)],
+            wilson_by_flow_pair={
+                (None, 1, 1): np.asarray([0.5, 0.5], dtype=np.float32),
+                (None, 1, 2): np.asarray([0.25, 0.25], dtype=np.float32),
+                (None, 2, 1): np.asarray([0.2, 0.2], dtype=np.float32),
+                (None, 2, 2): np.asarray([0.08, 0.08], dtype=np.float32),
+            },
+        )
+        calc = Calculator(compact, n_bootstrap=8, step_size=1)
+
+        chi = calc.get_variable("chi", R=1.5, T=1.5)
+
+        self.assertAlmostEqual(chi.get(), np.log((0.25 * 0.2) / (0.5 * 0.08)), places=7)
+
+    def test_l1_only_data_reports_no_standard_creutz_ratio(self):
+        compact = data_organizer.CompactWilsonData(
+            "synthetic",
+            flow_pair_order=[(None, 1, 1), (None, 1, 2)],
+            wilson_by_flow_pair={
+                (None, 1, 1): np.asarray([0.5, 0.4], dtype=np.float32),
+                (None, 1, 2): np.asarray([0.25, 0.2], dtype=np.float32),
+            },
+        )
+        calc = Calculator(compact, n_bootstrap=8, step_size=1)
+
+        with self.assertRaisesRegex(ValueError, "Not enough adjacent L values"):
+            calc.get_variable("r0_chi")
+
     def test_r0_helper_matches_calculator_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -307,6 +451,8 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 mock.patch.object(finalize_analysis, "save_effective_mass_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_r0_stability_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_cornell_plot", side_effect=write_stub_plot),
+                mock.patch.object(finalize_analysis, "save_gradient_flow_plot", side_effect=write_stub_plot),
+                mock.patch.object(finalize_analysis, "save_creutz_plot", side_effect=write_stub_plot),
             ]
             for patcher in patchers:
                 patcher.start()
@@ -353,6 +499,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     },
                 )
 
+                second_messages = []
                 second_runner = finalize_analysis.FinalizedAnalysisRunner(
                     run_dirs=[str(run_a), str(run_b)],
                     output_root=output_root,
@@ -364,7 +511,9 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     block_size_scan_values=[1, 2],
                     open_plots=False,
                     input_func=InputSequence(["1", "1", "2"]),
-                    print_func=lambda *args, **kwargs: None,
+                    print_func=lambda *args, **kwargs: second_messages.append(
+                        " ".join(str(arg) for arg in args)
+                    ),
                 )
                 second_runner.run()
 
@@ -372,6 +521,8 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue(manifest["status"]["wilsonloop_complete"])
                 self.assertTrue(manifest["status"]["r0_complete"])
                 self.assertTrue(manifest["status"]["derived_complete"])
+                self.assertTrue(manifest["status"]["gradient_flow_complete"])
+                self.assertTrue(manifest["status"]["creutz_complete"])
                 self.assertIn("thermalization_preview_plot", manifest)
                 self.assertEqual(manifest["block_size"], 1)
                 self.assertEqual(second_runner.calc.step_size, 1)
@@ -388,10 +539,15 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue((analysis_dir / "wilsonloop" / "V_R_summary.json").exists())
                 self.assertTrue((analysis_dir / "r0" / "r0_result.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "summary.json").exists())
+                self.assertTrue((analysis_dir / "gradient_flow" / "summary.json").exists())
+                self.assertTrue((analysis_dir / "creutz" / "summary.json").exists())
                 self.assertTrue((analysis_dir / "derived" / "bootstrap" / "volume_r0.npy").exists())
                 self.assertTrue((analysis_dir / "plots" / "bootstrap_block_size.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_preview.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_by_run").exists())
+                self.assertTrue(any("Result summary:" in message for message in second_messages))
+                self.assertTrue(any("  r0 fit:" in message for message in second_messages))
+                self.assertTrue(any("  Derived:" in message for message in second_messages))
             finally:
                 for patcher in reversed(patchers):
                     patcher.stop()

@@ -199,15 +199,18 @@ class Calculator:
 
         # Wilson-loop lookup is built lazily. For compact combined data we can reuse
         # the pre-grouped arrays directly and avoid rebuilding the cache.
-        self._w_rt_cache: dict[tuple[int, int], np.ndarray] | None = None
-        self._pair_order: list[tuple[int, int]] | None = None
+        self._w_rt_cache: dict[data_organizer.FlowKey, np.ndarray] | None = None
+        self._pair_order: list[data_organizer.FlowKey] | None = None
 
-        compact_wilson = getattr(self.file_data, "wilson_by_pair", None)
+        compact_wilson = getattr(self.file_data, "wilson_by_flow_pair", None)
         if compact_wilson is not None:
             self._w_rt_cache = dict(compact_wilson)
-            pair_order = getattr(self.file_data, "pair_order", None)
+            pair_order = getattr(self.file_data, "flow_pair_order", None)
             if pair_order is not None:
-                self._pair_order = [(int(r), int(t)) for r, t in pair_order]
+                self._pair_order = [
+                    (data_organizer._normalize_flow_time(flow_time), int(r), int(t))
+                    for flow_time, r, t in pair_order
+                ]
 
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
         key = make_key(name, params)
@@ -231,7 +234,16 @@ class Calculator:
                 return obs
         raise KeyError(f"Observable '{obs_name}' not found in file data.")
 
-    def _infer_pair_order(self) -> list[tuple[int, int]]:
+    def _flow_key(self, flow_time: float | None, R: int, T: int) -> data_organizer.FlowKey:
+        return (data_organizer._normalize_flow_time(flow_time), int(R), int(T))
+
+    def _cache_params_for_wrt(self, flow_time: float | None, R: int, T: int) -> dict[str, Any]:
+        params = {"R": int(R), "T": int(T)}
+        if flow_time is not None:
+            params["flow_time"] = data_organizer._normalize_flow_time(flow_time)
+        return params
+
+    def _infer_pair_order(self) -> list[data_organizer.FlowKey]:
         if self._pair_order is not None:
             return self._pair_order
 
@@ -242,7 +254,9 @@ class Calculator:
             raise KeyError(f"Missing required columns (L or T) in file: {e}") from e
 
         rows_per_cfg = 0
-        step_obs = next((o for o in self.file_data.observables if o.name in ["# step", "step"]), None)
+        flow_obs = next((o for o in self.file_data.observables if o.name == "t_over_a2"), None)
+        obs_flow = np.asarray(flow_obs.values) if flow_obs is not None else None
+        step_obs = next((o for o in self.file_data.observables if o.name in ["# step", "step", "conf_id"]), None)
         if step_obs is not None:
             steps = np.asarray(step_obs.values)
             if len(steps) > 0:
@@ -250,9 +264,10 @@ class Calculator:
                 rows_per_cfg = int(change_idx[0]) if change_idx.size > 0 else int(len(steps))
 
         if rows_per_cfg <= 0:
-            seen: set[tuple[int, int]] = set()
-            for i, (l_val, t_val) in enumerate(zip(obs_L, obs_T)):
-                pair = (int(l_val), int(t_val))
+            seen: set[data_organizer.FlowKey] = set()
+            flow_iter = obs_flow if obs_flow is not None else [None] * len(obs_L)
+            for i, (flow_time, l_val, t_val) in enumerate(zip(flow_iter, obs_L, obs_T)):
+                pair = self._flow_key(flow_time, int(l_val), int(t_val))
                 if pair in seen:
                     rows_per_cfg = i
                     break
@@ -260,7 +275,16 @@ class Calculator:
             if rows_per_cfg <= 0:
                 rows_per_cfg = int(len(obs_L))
 
-        self._pair_order = [(int(l_val), int(t_val)) for l_val, t_val in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
+        if obs_flow is None:
+            self._pair_order = [
+                self._flow_key(None, int(l_val), int(t_val))
+                for l_val, t_val in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])
+            ]
+        else:
+            self._pair_order = [
+                self._flow_key(flow_time, int(l_val), int(t_val))
+                for flow_time, l_val, t_val in zip(obs_flow[:rows_per_cfg], obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])
+            ]
         return self._pair_order
 
     def _ensure_w_rt_cache(self):
@@ -285,28 +309,41 @@ class Calculator:
         except ValueError as e:
             raise KeyError(f"Missing required columns (L or T) in file: {e}") from e
 
+        flow_obs = next((o for o in self.file_data.observables if o.name == "t_over_a2"), None)
+        obs_flow = np.asarray(flow_obs.values) if flow_obs is not None else None
+        flow_iter = obs_flow if obs_flow is not None else [None] * len(obs_L)
         cache = collections.defaultdict(list)
-        for l_val, t_val, val in zip(obs_L, obs_T, obs_val):
-            cache[(int(l_val), int(t_val))].append(val)
+        for flow_time, l_val, t_val, val in zip(flow_iter, obs_L, obs_T, obs_val):
+            cache[self._flow_key(flow_time, int(l_val), int(t_val))].append(val)
         self._w_rt_cache = {k: np.asarray(v, dtype=np.float32) for k, v in cache.items()}
         self._pair_order = sorted(self._w_rt_cache)
 
-    def get_available_pairs(self) -> list[tuple[int, int]]:
+    def get_available_flow_times(self) -> list[float | None]:
+        self._ensure_w_rt_cache()
+        if self._w_rt_cache is None:
+            return []
+        return sorted(
+            {flow_time for flow_time, _, _ in self._w_rt_cache},
+            key=lambda value: -1.0 if value is None else float(value),
+        )
+
+    def get_available_pairs(self, flow_time: float | None = None) -> list[tuple[int, int]]:
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         if self._pair_order is not None:
-            return list(self._pair_order)
+            return [(r, t) for current_flow, r, t in self._pair_order if current_flow == normalized_flow]
         if self._w_rt_cache is not None:
             self._pair_order = sorted(self._w_rt_cache)
-            return list(self._pair_order)
-        return list(self._infer_pair_order())
+            return [(r, t) for current_flow, r, t in self._pair_order if current_flow == normalized_flow]
+        return [(r, t) for current_flow, r, t in self._infer_pair_order() if current_flow == normalized_flow]
 
-    def get_unique_Rs(self, r_min: int | None = None) -> list[int]:
-        rs = sorted({r for r, _ in self.get_available_pairs()})
+    def get_unique_Rs(self, r_min: int | None = None, flow_time: float | None = None) -> list[int]:
+        rs = sorted({r for r, _ in self.get_available_pairs(flow_time=flow_time)})
         if r_min is not None:
             rs = [r for r in rs if r >= r_min]
         return rs
 
-    def get_unique_Ts(self, R: int | None = None) -> list[int]:
-        pairs = self.get_available_pairs()
+    def get_unique_Ts(self, R: int | None = None, flow_time: float | None = None) -> list[int]:
+        pairs = self.get_available_pairs(flow_time=flow_time)
         if R is None:
             return sorted({t for _, t in pairs})
         return sorted({t for r, t in pairs if r == R})
@@ -355,7 +392,7 @@ class Calculator:
 
     def _build_compact_block_sums(
         self,
-        pairs: list[tuple[int, int]],
+        pairs: list[data_organizer.FlowKey],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         self._ensure_w_rt_cache()
         if self._w_rt_cache is None:
@@ -380,7 +417,7 @@ class Calculator:
         for idx, pair in enumerate(pairs):
             series = self._w_rt_cache.get(pair)
             if series is None:
-                raise ValueError(f"No data found for R={pair[0]}, T={pair[1]}")
+                raise ValueError(f"No data found for flow_time={pair[0]}, R={pair[1]}, T={pair[2]}")
             series_arr = np.asarray(series, dtype=np.float32)
             if len(series_arr) != n_samples:
                 raise ValueError("Compact Wilson data must have a consistent number of samples per pair.")
@@ -392,16 +429,18 @@ class Calculator:
     def prime_w_rt_cache(
         self,
         pairs: list[tuple[int, int]] | None = None,
+        flow_time: float | None = None,
         bootstrap_chunk_size: int = 32,
     ) -> None:
-        compact_wilson = getattr(self.file_data, "wilson_by_pair", None)
+        compact_wilson = getattr(self.file_data, "wilson_by_flow_pair", None)
         if compact_wilson is None:
             return
 
         if bootstrap_chunk_size < 1:
             raise ValueError("bootstrap_chunk_size must be at least 1")
 
-        available_pairs = self.get_available_pairs()
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
+        available_pairs = self.get_available_pairs(flow_time=normalized_flow)
         if pairs is None:
             target_pairs = available_pairs
         else:
@@ -415,13 +454,14 @@ class Calculator:
                 seen.add(pair)
             target_pairs = deduped_pairs
 
-        pending_pairs: list[tuple[int, int]] = []
+        pending_pairs: list[data_organizer.FlowKey] = []
         for pair in target_pairs:
-            if pair not in compact_wilson:
+            key = self._flow_key(normalized_flow, pair[0], pair[1])
+            if key not in compact_wilson:
                 raise ValueError(f"No data found for R={pair[0]}, T={pair[1]}")
-            cache_key = make_key("W_R_T", {"R": pair[0], "T": pair[1]})
+            cache_key = make_key("W_R_T", self._cache_params_for_wrt(normalized_flow, pair[0], pair[1]))
             if cache_key not in self.variables:
-                pending_pairs.append(pair)
+                pending_pairs.append(key)
 
         if not pending_pairs:
             return
@@ -442,26 +482,28 @@ class Calculator:
             ).astype(np.float32, copy=False)
 
         for idx, pair in enumerate(pending_pairs):
-            cache_key = make_key("W_R_T", {"R": pair[0], "T": pair[1]})
+            flow_val, r_val, t_val = pair
+            cache_key = make_key("W_R_T", self._cache_params_for_wrt(flow_val, r_val, t_val))
             var_data = data_organizer.VariableData("W_R_T")
             var_data.set_value(
                 mean_values[idx],
                 bootstrap_samples=bootstrap_matrix[:, idx],
-                R=pair[0],
-                T=pair[1],
+                R=r_val,
+                T=t_val,
+                flow_time=flow_val,
             )
             self.variables[cache_key] = var_data
     
     ### Variable implementations ###
 
     @register("W_R_T")
-    def _calc_W_R_T(self, R: int, T: int) -> data_organizer.VariableData: #marker wrt
-        key = (int(R), int(T))
+    def _calc_W_R_T(self, R: int, T: int, flow_time: float | None = None) -> data_organizer.VariableData: #marker wrt
+        key = self._flow_key(flow_time, int(R), int(T))
         self._ensure_w_rt_cache()
         selected_values = self._w_rt_cache.get(key) if self._w_rt_cache is not None else None
 
         if selected_values is None:
-            raise ValueError(f"No data found for R={R}, T={T}")
+            raise ValueError(f"No data found for flow_time={key[0]}, R={R}, T={T}")
 
         selected_values = np.asarray(selected_values, dtype=np.float32)
         n_samples = len(selected_values)
@@ -487,16 +529,23 @@ class Calculator:
             block_lengths[sampled_blocks].sum(axis=1)
         ).astype(np.float32, copy=False)
 
-        var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T)
+        var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T, flow_time=key[0])
         return var_data
     
     @register("V_R")
-    def _calc_V_R(self, R: int, t_min: int = 1, t_max: int = None) -> data_organizer.VariableData:
+    def _calc_V_R(
+        self,
+        R: int,
+        t_min: int = 1,
+        t_max: int = None,
+        flow_time: float | None = None,
+    ) -> data_organizer.VariableData:
         """
         Calculates V(R) and its error by fitting W(R,T).
         Includes robust handling for negative signal and array shape mismatches.
         """
-        unique_ts = self.get_unique_Ts(R=R)
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
+        unique_ts = self.get_unique_Ts(R=R, flow_time=normalized_flow)
 
         # Filter T >= t_min and T <= t_max (if provided)
         if t_max is not None:
@@ -505,7 +554,10 @@ class Calculator:
             ts_to_fit = sorted([t for t in unique_ts if t >= t_min])
         
         # W_R_T Variables
-        w_vars = [self.get_variable("W_R_T", R=R, T=t) for t in ts_to_fit]
+        w_vars = [
+            self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R, t))
+            for t in ts_to_fit
+        ]
         
         ws_main = np.asarray([v.get() for v in w_vars], dtype=float)
         ts_fit  = np.asarray(ts_to_fit, dtype=float)
@@ -525,7 +577,7 @@ class Calculator:
         if len(ts_fit) < 3:
             # Signal lost (values became negative) too early.
             var_data = data_organizer.VariableData("V_R")
-            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R)
+            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R, flow_time=normalized_flow)
             return var_data
 
         # Store the valid length to slice bootstrap samples later
@@ -575,7 +627,7 @@ class Calculator:
         if np.isnan(V_main):
             # If the main fit fails, return NaN immediately
             var_data = data_organizer.VariableData("V_R")
-            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R)
+            var_data.set_value(np.nan, bootstrap_samples=self._nan_bootstrap_array(), R=R, flow_time=normalized_flow)
             return var_data
 
         # Bootstrap Fits
@@ -609,7 +661,15 @@ class Calculator:
                 bootstrap_Vs[i] = V_main
 
         var_data = data_organizer.VariableData("V_R")
-        var_data.set_value(V_main, bootstrap_samples=bootstrap_Vs, R=R, t_min=t_min, t_max=t_max, fit_C=C_main)
+        var_data.set_value(
+            V_main,
+            bootstrap_samples=bootstrap_Vs,
+            R=R,
+            t_min=t_min,
+            t_max=t_max,
+            fit_C=C_main,
+            flow_time=normalized_flow,
+        )
         return var_data
     
     @register("tau_int")
@@ -669,7 +729,14 @@ class Calculator:
         return var_data
 
     @register("r0")
-    def _calc_r0(self, t_min: int = 5, t_max: int = None, target_force: float = 1.65, r_min: int = 2) -> data_organizer.VariableData:
+    def _calc_r0(
+        self,
+        t_min: int = 5,
+        t_max: int = None,
+        target_force: float = 1.65,
+        r_min: int = 2,
+        flow_time: float | None = None,
+    ) -> data_organizer.VariableData:
         """
         Calculates the Sommer parameter r0/a by fitting the Cornell potential to V(R).
         Replaces analyze_wilson.fit_sommer_parameter.
@@ -683,8 +750,9 @@ class Calculator:
             )
 
         # 1. Identify available R values
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         try:
-            unique_Rs = self.get_unique_Rs(r_min=r_min)
+            unique_Rs = self.get_unique_Rs(r_min=r_min, flow_time=normalized_flow)
         except KeyError:
              raise KeyError("Could not determine available R (L) values from file data.")
 
@@ -700,7 +768,7 @@ class Calculator:
         for r in unique_Rs:
             try:
                 # Reuse the existing V_R calculator
-                v_var = self.get_variable("V_R", R=int(r), t_min=t_min, t_max=t_max)
+                v_var = self.get_variable("V_R", R=int(r), t_min=t_min, t_max=t_max, flow_time=normalized_flow)
                 
                 val = v_var.get()
                 boot_samples = v_var.bootstrap()
@@ -778,6 +846,7 @@ class Calculator:
             t_max=t_max,
             r_min=r_min,
             cornell_params=fit_result["cornell_params"],
+            flow_time=normalized_flow,
         )
         return var_data
 
@@ -794,7 +863,12 @@ class Calculator:
     # precision for the calculated force and the resulting lattice scale r0.
 
     @register("chi")
-    def _calc_chi(self, R: float, T: float) -> data_organizer.VariableData:
+    def _calc_chi(
+        self,
+        R: float,
+        T: float,
+        flow_time: float | None = None,
+    ) -> data_organizer.VariableData:
         """
         Calculates the Creutz ratio chi(R, T) using Wilson loops.
         R and T are the half-integer coordinates of the center of the Creutz plaquette.
@@ -804,13 +878,14 @@ class Calculator:
         # chi(t + a/2, r + a/2), so r_int = r - 0.5, t_int = t - 0.5
         r_int = int(R - 0.5)
         t_int = int(T - 0.5)
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         
         try:
             # Get the four Wilson loops needed for the ratio
-            w_tr   = self.get_variable("W_R_T", R=r_int,     T=t_int)
-            w_t1_r = self.get_variable("W_R_T", R=r_int,     T=t_int + 1)
-            w_t_r1 = self.get_variable("W_R_T", R=r_int + 1, T=t_int)
-            w_t1_r1= self.get_variable("W_R_T", R=r_int + 1, T=t_int + 1)
+            w_tr = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, r_int, t_int))
+            w_t1_r = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, r_int, t_int + 1))
+            w_t_r1 = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, r_int + 1, t_int))
+            w_t1_r1 = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, r_int + 1, t_int + 1))
         except (ValueError, KeyError) as e:
             raise ValueError(f"Could not get required Wilson loops for chi({R}, {T}): {e}")
 
@@ -852,11 +927,16 @@ class Calculator:
         chi_boots = calculate_log_ratio_array(b_t1_r, b_t_r1, b_tr, b_t1_r1)
         
         var_data = data_organizer.VariableData("chi")
-        var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T)
+        var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T, flow_time=normalized_flow)
         return var_data
 
     @register("F_chi")
-    def _calc_F_chi(self, R: float, t_large: int) -> data_organizer.VariableData:
+    def _calc_F_chi(
+        self,
+        R: float,
+        t_large: int,
+        flow_time: float | None = None,
+    ) -> data_organizer.VariableData:
         """
         Extracts the static force F(R) from Creutz ratios chi(R, T)
         by taking the value at a large time extent, T = t_large.
@@ -864,17 +944,24 @@ class Calculator:
         t_large is an integer, so T for chi will be t_large + 0.5.
         """
         T = float(t_large) + 0.5
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         try:
-            chi_var = self.get_variable("chi", R=R, T=T)
+            chi_var = self.get_variable("chi", R=R, T=T, flow_time=normalized_flow)
             var_data = data_organizer.VariableData("F_chi")
             # The value and bootstrap samples are directly from chi(R, t_large)
-            var_data.set_value(chi_var.get(), bootstrap_samples=chi_var.bootstrap(), R=R, t_large=t_large)
+            var_data.set_value(
+                chi_var.get(),
+                bootstrap_samples=chi_var.bootstrap(),
+                R=R,
+                t_large=t_large,
+                flow_time=normalized_flow,
+            )
             return var_data
         except (ValueError, KeyError) as e:
             raise ValueError(f"Could not calculate F_chi for R={R} at t_large={t_large}: {e}")
 
     @register("r0_chi")
-    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2, discard_negative: bool = True, r_min: int = 1) -> data_organizer.VariableData:
+    def _calc_r0_chi(self, t_large: int = 4, target_force: float = 1.65, max_rel_err: float = 0.5, use_weighted_fit: bool = True, fit_window: int = 2, discard_negative: bool = True, r_min: int = 1, flow_time: float | None = None) -> data_organizer.VariableData:
         """
         Calculates Sommer parameter r0/a from Creutz ratios.
         It interpolates r^2 * F(r) to find where it equals target_force.
@@ -891,18 +978,22 @@ class Calculator:
             r_min: Minimum R value to include in the fit (default 1).
         """
         # 1. Identify available R values from data.
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         try:
-            unique_Ls = self.get_unique_Rs(r_min=r_min)
+            unique_Ls = self.get_unique_Rs(r_min=r_min, flow_time=normalized_flow)
             unique_Rs = [float(L) + 0.5 for L in unique_Ls if L + 1 in unique_Ls]
         except KeyError:
              raise KeyError("Could not determine available R (L) values from file data for r0_chi.")
+
+        if not unique_Rs:
+            raise ValueError("Not enough adjacent L values for standard Creutz ratios.")
 
         # 2. Gather F_chi(R) for all available R at a fixed large T.
         rs, fs, errs, bootstrap_rows = [], [], [], []
         
         for r_val in unique_Rs:
             try:
-                f_var = self.get_variable("F_chi", R=r_val, t_large=t_large)
+                f_var = self.get_variable("F_chi", R=r_val, t_large=t_large, flow_time=normalized_flow)
                 val, err = f_var.get(), f_var.err()
 
                 if np.isnan(val) or np.isinf(val) or np.isnan(err) or np.isinf(err):
@@ -929,7 +1020,7 @@ class Calculator:
             # But returning a VariableData with None value is safer than crashing
             # if we just filtered everything out.
             var_data = data_organizer.VariableData("r0_chi")
-            var_data.set_value(None, t_large=t_large)
+            var_data.set_value(None, t_large=t_large, flow_time=normalized_flow)
             return var_data
         
         rs = np.asarray(rs, dtype=float)
@@ -1070,11 +1161,11 @@ class Calculator:
             r0_bootstraps = np.full(self.n_bootstrap, r0_val, dtype=float)
 
         var_data = data_organizer.VariableData("r0_chi")
-        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min)
+        var_data.set_value(r0_val, bootstrap_samples=r0_bootstraps, t_large=t_large, r_min=r_min, flow_time=normalized_flow)
         return var_data
     
     @register("creutz_P")
-    def _calc_creutz_P(self, R: int) -> data_organizer.VariableData:
+    def _calc_creutz_P(self, R: int, flow_time: float | None = None) -> data_organizer.VariableData:
         """
         Calculates the physical ratio P(R) defined by Creutz (1981):
         P(R) = 1 - [W(R,R) * W(R/2,R/2)] / [W(R,R/2)]^2
@@ -1086,18 +1177,19 @@ class Calculator:
             raise ValueError(f"R must be even for Creutz P-ratio calculation (got {R}).")
         
         R_half = R // 2
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         
         try:
             # Retrieve required Wilson loops: W(R,R), W(R/2,R/2), and W(R, R/2)
-            w_large = self.get_variable("W_R_T", R=R, T=R)           # W(R, R)
-            w_small = self.get_variable("W_R_T", R=R_half, T=R_half) # W(R/2, R/2)
+            w_large = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R, R))
+            w_small = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R_half, R_half))
             
             # Try getting rectangular loop W(R, R/2). 
             # If not found, check for the symmetric W(R/2, R).
             try:
-                w_rect = self.get_variable("W_R_T", R=R, T=R_half)
+                w_rect = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R, R_half))
             except (ValueError, KeyError):
-                w_rect = self.get_variable("W_R_T", R=R_half, T=R)
+                w_rect = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R_half, R))
                 
         except (ValueError, KeyError) as e:
             raise ValueError(f"Required Wilson loops for creutz_P({R}) not found: {e}")
@@ -1140,18 +1232,19 @@ class Calculator:
             P_boots = self._nan_bootstrap_array()
 
         var_data = data_organizer.VariableData("creutz_P")
-        var_data.set_value(val_P, bootstrap_samples=P_boots, R=R)
+        var_data.set_value(val_P, bootstrap_samples=P_boots, R=R, flow_time=normalized_flow)
         return var_data
     
     @register("a_creutz")
-    def _calc_a_creutz(self, R: int, sigma_sqrt_MeV: float = 440.0) -> data_organizer.VariableData:
+    def _calc_a_creutz(self, R: int, sigma_sqrt_MeV: float = 440.0, flow_time: float | None = None) -> data_organizer.VariableData:
         """
         Calculates lattice spacing 'a' in fm from Creutz ratio P(R).
         Assumes Area Law dominance: P(R) = 1 - exp(-1/4 * sigma * a^2 * R^2).
         sigma_sqrt_MeV: Physical string tension sqrt(sigma) in MeV (default 440).
         """
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         try:
-            p_var = self.get_variable("creutz_P", R=R)
+            p_var = self.get_variable("creutz_P", R=R, flow_time=normalized_flow)
         except (ValueError, KeyError) as e:
              raise ValueError(f"Could not calculate a_creutz({R}): {e}")
 
@@ -1189,7 +1282,7 @@ class Calculator:
              a_boots = self._nan_bootstrap_array()
              
         var_data = data_organizer.VariableData("a_creutz")
-        var_data.set_value(val_a, bootstrap_samples=a_boots, R=R, sigma_sqrt=sigma_sqrt_MeV)
+        var_data.set_value(val_a, bootstrap_samples=a_boots, R=R, sigma_sqrt=sigma_sqrt_MeV, flow_time=normalized_flow)
         return var_data
     
     @register("volume_r0")
@@ -1373,15 +1466,21 @@ class Calculator:
         return var_data
 
     @register("effective_mass")
-    def _calc_effective_mass(self, R: int, T: int = 1) -> data_organizer.VariableData:
+    def _calc_effective_mass(
+        self,
+        R: int,
+        T: int = 1,
+        flow_time: float | None = None,
+    ) -> data_organizer.VariableData:
         """
         Calculates the effective mass m_eff(R) from Wilson loops W(R,T).
         m_eff(R) = ln[W(R,T)/W(R,T+1)] for a fixed R and large T.
         """
+        normalized_flow = data_organizer._normalize_flow_time(flow_time)
         try:
             # Get W(R,T) for T and T+1
-            w_t   = self.get_variable("W_R_T", R=R, T=T) # Start with T
-            w_t1  = self.get_variable("W_R_T", R=R, T=T+1) # And T+1 for the ratio
+            w_t = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R, T))
+            w_t1 = self.get_variable("W_R_T", **self._cache_params_for_wrt(normalized_flow, R, T + 1))
         except (ValueError, KeyError) as e:
             raise ValueError(f"Could not get required Wilson loops for effective mass at R={R}: {e}")
 
@@ -1411,5 +1510,5 @@ class Calculator:
              m_eff_boots = self._nan_bootstrap_array()
 
         var_data = data_organizer.VariableData("effective_mass")
-        var_data.set_value(m_eff_val, bootstrap_samples=m_eff_boots, R=R, T=T)
+        var_data.set_value(m_eff_val, bootstrap_samples=m_eff_boots, R=R, T=T, flow_time=normalized_flow)
         return var_data

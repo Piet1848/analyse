@@ -46,6 +46,14 @@ CALCULATED_FIELDS = {
     "creutz_P_err": dict,
     "a_creutz": dict,
     "a_creutz_err": dict,
+    "creutz_status": str,
+    "gradient_flow": dict,
+    "Ehat_clover": dict,
+    "Ehat_clover_err": dict,
+    "t2E_clover": dict,
+    "t2E_clover_err": dict,
+    "t0": float,
+    "t0_err": float,
 }
 
 CALCULATED_FIELD_ALIASES = {
@@ -117,6 +125,14 @@ def parse_dynamic_token(tok: str):
     m = re.fullmatch(r"a_creutz(\d+)", check_tok)
     if m:
         return ("a_creutz_err" if is_err else "a_creutz"), {"R": int(m.group(1))}
+
+    m = re.fullmatch(r"Ehat_clover(.+)", check_tok)
+    if m:
+        return ("Ehat_clover_err" if is_err else "Ehat_clover"), {"flow_time": m.group(1).replace("p", ".")}
+
+    m = re.fullmatch(r"t2E_clover(.+)", check_tok)
+    if m:
+        return ("t2E_clover_err" if is_err else "t2E_clover"), {"flow_time": m.group(1).replace("p", ".")}
 
     return None, None
 
@@ -243,6 +259,8 @@ def _extract_calculated_value(name: str, calc_data: Optional[Dict[str, Any]]) ->
     canonical_name = CALCULATED_FIELD_ALIASES.get(name, name)
     if canonical_name in calc_data:
         return calc_data[canonical_name]
+    if canonical_name in {"Ehat_clover", "Ehat_clover_err", "t2E_clover", "t2E_clover_err", "t0", "t0_err"}:
+        return calc_data.get("gradient_flow", {}).get(canonical_name)
 
     base, params = parse_dynamic_token(name)
     if not base:
@@ -250,6 +268,15 @@ def _extract_calculated_value(name: str, calc_data: Optional[Dict[str, Any]]) ->
 
     if base in ["V_R", "V_R_err", "creutz_P", "creutz_P_err", "a_creutz", "a_creutz_err"]:
         return calc_data.get(base, {}).get(str(params["R"]))
+
+    if base in ["Ehat_clover", "Ehat_clover_err", "t2E_clover", "t2E_clover_err"]:
+        flow_dict = calc_data.get("gradient_flow", {}).get(base, {})
+        key = str(params["flow_time"])
+        try:
+            key = f"{float(key):.12g}"
+        except (TypeError, ValueError):
+            pass
+        return flow_dict.get(key)
 
     if base.startswith("W_R_T"):
         w_dict = calc_data.get(base, {})

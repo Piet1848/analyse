@@ -784,6 +784,87 @@ def save_bootstrap_block_size_plot(
     _write_figure_html(fig, path)
 
 
+def save_gradient_flow_plot(path: Path, flow_summary: dict[str, Any]) -> None:
+    go = _get_plotly()
+    times = [float(value) for value in flow_summary.get("available_flow_times", [])]
+    t2e = flow_summary.get("t2E_clover", {})
+    t2e_err = flow_summary.get("t2E_clover_err", {})
+    values = [t2e.get(f"{time:.12g}") for time in times]
+    errors = [t2e_err.get(f"{time:.12g}") for time in times]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=values,
+            error_y={"type": "data", "array": errors, "visible": True},
+            mode="lines+markers",
+            name="t2E_clover",
+        )
+    )
+    target = flow_summary.get("t0_target")
+    if target is not None:
+        fig.add_hline(y=float(target), line_dash="dash", line_color="firebrick")
+    t0 = flow_summary.get("t0")
+    if t0 is not None:
+        fig.add_vline(x=float(t0), line_dash="dot", line_color="seagreen")
+    fig.update_layout(
+        title="Gradient-flow energy observable",
+        template="plotly_white",
+        xaxis_title="t/a^2",
+        yaxis_title="t^2 E_clover",
+    )
+    _write_figure_html(fig, path)
+
+
+def save_creutz_plot(path: Path, creutz_summary: dict[str, Any]) -> None:
+    go = _get_plotly()
+    chi = creutz_summary.get("chi", {})
+    chi_err = creutz_summary.get("chi_err", {})
+    rows = []
+    for key, value in chi.items():
+        try:
+            r_text, t_text = key.split(",", 1)
+            rows.append((float(r_text), float(t_text), float(value), chi_err.get(key)))
+        except (TypeError, ValueError):
+            continue
+
+    fig = go.Figure()
+    if rows:
+        rows = sorted(rows)
+        fig.add_trace(
+            go.Scatter(
+                x=[row[0] for row in rows],
+                y=[row[2] for row in rows],
+                error_y={
+                    "type": "data",
+                    "array": [row[3] for row in rows],
+                    "visible": True,
+                },
+                mode="markers",
+                marker={"color": [row[1] for row in rows], "colorscale": "Viridis", "showscale": True},
+                name="chi",
+                text=[f"T={row[1]:g}" for row in rows],
+            )
+        )
+    else:
+        fig.add_annotation(
+            text=creutz_summary.get("status", "No Creutz-ratio data available"),
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+    fig.update_layout(
+        title="Creutz ratios",
+        template="plotly_white",
+        xaxis_title="R + 1/2",
+        yaxis_title="chi",
+    )
+    _write_figure_html(fig, path)
+
+
 def save_effective_mass_plot(
     path: Path,
     wrt_records: list[dict[str, Any]],
