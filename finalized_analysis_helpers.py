@@ -819,15 +819,7 @@ def save_gradient_flow_plot(path: Path, flow_summary: dict[str, Any]) -> None:
 
 def save_creutz_plot(path: Path, creutz_summary: dict[str, Any]) -> None:
     go = _get_plotly()
-    chi = creutz_summary.get("chi", {})
-    chi_err = creutz_summary.get("chi_err", {})
-    rows = []
-    for key, value in chi.items():
-        try:
-            r_text, t_text = key.split(",", 1)
-            rows.append((float(r_text), float(t_text), float(value), chi_err.get(key)))
-        except (TypeError, ValueError):
-            continue
+    rows = _creutz_rows(creutz_summary)
 
     fig = go.Figure()
     if rows:
@@ -861,6 +853,69 @@ def save_creutz_plot(path: Path, creutz_summary: dict[str, Any]) -> None:
         template="plotly_white",
         xaxis_title="R + 1/2",
         yaxis_title="chi",
+    )
+    _write_figure_html(fig, path)
+
+
+def _creutz_rows(creutz_summary: dict[str, Any]) -> list[tuple[float, float, float, float | None]]:
+    chi = creutz_summary.get("chi", {})
+    chi_err = creutz_summary.get("chi_err", {})
+    rows = []
+    for key, value in chi.items():
+        try:
+            r_text, t_text = key.split(",", 1)
+            err = chi_err.get(key)
+            rows.append(
+                (
+                    float(r_text),
+                    float(t_text),
+                    float(value),
+                    float(err) if err is not None else None,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def save_creutz_diagonal_plot(path: Path, creutz_summary: dict[str, Any]) -> None:
+    go = _get_plotly()
+    rows = [
+        row
+        for row in _creutz_rows(creutz_summary)
+        if np.isclose(row[0], row[1])
+    ]
+
+    fig = go.Figure()
+    if rows:
+        rows = sorted(rows)
+        fig.add_trace(
+            go.Scatter(
+                x=[row[0] for row in rows],
+                y=[row[2] for row in rows],
+                error_y={
+                    "type": "data",
+                    "array": [row[3] for row in rows],
+                    "visible": True,
+                },
+                mode="lines+markers",
+                name="chi(R,R)",
+            )
+        )
+    else:
+        fig.add_annotation(
+            text="No diagonal Creutz-ratio data available",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+    fig.update_layout(
+        title="Creutz ratios on R = T",
+        template="plotly_white",
+        xaxis_title="R = T midpoint",
+        yaxis_title="chi(R,T)",
     )
     _write_figure_html(fig, path)
 

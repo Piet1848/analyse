@@ -31,6 +31,7 @@ from finalized_analysis_helpers import (
     recommend_bootstrap_block_size,
     save_bootstrap_block_size_plot,
     save_cornell_plot,
+    save_creutz_diagonal_plot,
     save_creutz_plot,
     save_effective_mass_plot,
     save_gradient_flow_plot,
@@ -1520,6 +1521,7 @@ class FinalizedAnalysisRunner:
         assert self.calc is not None
         summary_path = self.creutz_dir / "summary.json"
         plot_path = self.plots_dir / "creutz_ratios.html"
+        diagonal_plot_path = self.plots_dir / "creutz_ratios_R_eq_T.html"
 
         chi: dict[str, float] = {}
         chi_err: dict[str, float] = {}
@@ -1579,8 +1581,10 @@ class FinalizedAnalysisRunner:
         }
         save_json(summary_path, payload)
         save_creutz_plot(plot_path, payload)
+        save_creutz_diagonal_plot(diagonal_plot_path, payload)
         self.manifest["creutz_summary"] = str(summary_path)
         self.manifest["creutz_plot"] = str(plot_path)
+        self.manifest["creutz_diagonal_plot"] = str(diagonal_plot_path)
         self.manifest["status"]["creutz_complete"] = True
         self._save_manifest()
 

@@ -534,6 +534,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 mock.patch.object(finalize_analysis, "save_cornell_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_gradient_flow_plot", side_effect=write_stub_plot),
                 mock.patch.object(finalize_analysis, "save_creutz_plot", side_effect=write_stub_plot),
+                mock.patch.object(finalize_analysis, "save_creutz_diagonal_plot", side_effect=write_stub_plot),
             ]
             for patcher in patchers:
                 patcher.start()
@@ -625,6 +626,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue((analysis_dir / "derived" / "bootstrap" / "volume_r0.npy").exists())
                 self.assertTrue((analysis_dir / "plots" / "bootstrap_block_size.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_preview.html").exists())
+                self.assertTrue((analysis_dir / "plots" / "creutz_ratios_R_eq_T.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_by_run").exists())
                 self.assertTrue(any("Result summary:" in message for message in second_messages))
                 self.assertTrue(any("  r0 fit:" in message for message in second_messages))
