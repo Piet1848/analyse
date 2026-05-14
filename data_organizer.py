@@ -1,11 +1,31 @@
 from __future__ import annotations
+
+import csv
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from collections import defaultdict
+
 import numpy as np
-import pandas as pd
 
 FlowKey = Tuple[Optional[float], int, int]
+
+
+class EmptyNumericDataError(ValueError):
+    pass
+
+
+class _NumericSeries:
+    def __init__(self, values: np.ndarray):
+        self.values = values
+
+
+class _NumericTable:
+    def __init__(self, columns: List[str], data: Dict[str, np.ndarray]):
+        self.columns = columns
+        self._data = data
+
+    def __getitem__(self, name: str) -> _NumericSeries:
+        return _NumericSeries(self._data[name])
 
 
 class VariableData:
@@ -127,7 +147,7 @@ class FileData:
 
         try:
             df = _read_numeric_table(self.path)
-        except (pd.errors.EmptyDataError, ValueError):
+        except (EmptyNumericDataError, ValueError):
             return self
 
         self.observables = []
@@ -288,9 +308,11 @@ def _normalize_flow_time(value: Any) -> Optional[float]:
     return round(flow_time, 12)
 
 
-def _read_numeric_table(path: Path) -> pd.DataFrame:
-    first_data_line = ""
+def _read_numeric_table(path: Path) -> _NumericTable:
+    delimiter: str | None = None
     header_tokens: list[str] | None = None
+    rows: list[list[float]] = []
+    expected_width: int | None = None
 
     with path.open("r", encoding="utf-8-sig") as handle:
         for line in handle:
@@ -302,31 +324,50 @@ def _read_numeric_table(path: Path) -> pd.DataFrame:
                 if tokens and "=" not in stripped and all(_looks_like_column_name(token) for token in tokens):
                     header_tokens = tokens
                 continue
-            first_data_line = stripped
-            break
 
-    if not first_data_line:
-        raise pd.errors.EmptyDataError("no numeric data")
+            if delimiter is None:
+                delimiter = "," if "," in stripped else None
+            tokens = _split_table_line(stripped, delimiter)
+            if not tokens:
+                continue
 
-    if "," in first_data_line:
-        return pd.read_csv(
-            path,
-            delimiter=",",
-            encoding="utf-8-sig",
-            dtype=np.float32,
-            skipinitialspace=True,
-            on_bad_lines="skip",
-        )
+            if header_tokens is None and all(_looks_like_column_name(token) for token in tokens):
+                header_tokens = tokens
+                continue
 
-    return pd.read_csv(
-        path,
-        sep=r"\s+",
-        comment="#",
-        names=header_tokens,
-        encoding="utf-8-sig",
-        dtype=np.float32,
-        on_bad_lines="skip",
-    )
+            try:
+                values = [float(token) for token in tokens]
+            except ValueError:
+                continue
+
+            if expected_width is None:
+                expected_width = len(values)
+                if header_tokens is None:
+                    header_tokens = [f"col{idx}" for idx in range(expected_width)]
+                elif len(header_tokens) != expected_width:
+                    raise ValueError(
+                        f"{path}: header has {len(header_tokens)} columns but first data row has {expected_width}"
+                    )
+            elif len(values) != expected_width:
+                continue
+
+            rows.append(values)
+
+    if not rows or header_tokens is None:
+        raise EmptyNumericDataError("no numeric data")
+
+    matrix = np.asarray(rows, dtype=np.float32)
+    data = {
+        name: matrix[:, idx]
+        for idx, name in enumerate(header_tokens)
+    }
+    return _NumericTable(header_tokens, data)
+
+
+def _split_table_line(line: str, delimiter: str | None) -> list[str]:
+    if delimiter == ",":
+        return [token.strip() for token in next(csv.reader([line], skipinitialspace=True))]
+    return line.split()
 
 
 def _looks_like_column_name(token: str) -> bool:

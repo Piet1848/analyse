@@ -41,7 +41,9 @@ CALCULATED_FIELDS = {
     "r0_chi": float,
     "r0_chi_err": float,
     "chi": dict,
+    "chi_err": dict,
     "F_chi": dict,
+    "F_chi_err": dict,
     "creutz_P": dict,
     "creutz_P_err": dict,
     "a_creutz": dict,
@@ -97,8 +99,16 @@ def parse_bool(s: str) -> bool:
     raise ValueError(f"Cannot parse boolean from '{s}'")
 
 
+def _parse_numeric_selector(token: str) -> float:
+    return float(token.replace("p", "."))
+
+
+def _format_numeric_key(value: Any) -> str:
+    return f"{float(value):.12g}"
+
+
 def parse_dynamic_token(tok: str):
-    """Parses tokens like V_R5, W_R5_T3, W_R5_T, or W_R_T4. Handles _err suffix."""
+    """Parses tokens like V_R5, W_R5_T3, chi_R1p5_T1p5, or F_chi_R1p5. Handles _err suffix."""
     is_err = tok.endswith("_err")
     check_tok = tok[:-4] if is_err else tok
 
@@ -126,6 +136,17 @@ def parse_dynamic_token(tok: str):
     if m:
         return ("a_creutz_err" if is_err else "a_creutz"), {"R": int(m.group(1))}
 
+    m = re.fullmatch(r"chi_R([^_]+)_T([^_]+)", check_tok)
+    if m:
+        return ("chi_err" if is_err else "chi"), {
+            "R": _parse_numeric_selector(m.group(1)),
+            "T": _parse_numeric_selector(m.group(2)),
+        }
+
+    m = re.fullmatch(r"F_chi_R([^_]+)", check_tok)
+    if m:
+        return ("F_chi_err" if is_err else "F_chi"), {"R": _parse_numeric_selector(m.group(1))}
+
     m = re.fullmatch(r"Ehat_clover(.+)", check_tok)
     if m:
         return ("Ehat_clover_err" if is_err else "Ehat_clover"), {"flow_time": m.group(1).replace("p", ".")}
@@ -142,9 +163,13 @@ def get_field_info(name: str):
     name = FIELD_ALIASES.get(name, name)
     if name in FIELD_MAP:
         return FIELD_MAP[name]
-    base, _ = parse_dynamic_token(name)
+    base, params = parse_dynamic_token(name)
     if base:
-        return ("calc", Any)
+        if base in {"W_R_T", "W_R_T_err"} and (
+            params.get("R") is None or params.get("T") is None
+        ):
+            return ("calc", dict)
+        return ("calc", float)
     return None
 
 
@@ -178,10 +203,11 @@ def parse_tokens(tokens: list[str]) -> tuple[Dict[str, Any], list[str]]:
             name, value_str = tok.split("=", 1)
             name = FIELD_ALIASES.get(name.strip(), name.strip())
             value_str = value_str.strip()
-            if name not in FIELD_MAP:
+            info = get_field_info(name)
+            if not info:
                 raise KeyError(f"Unknown parameter '{name}'")
-            _, typ = FIELD_MAP[name]
-            if FIELD_MAP[name][0] == "calc":
+            block_name, typ = info
+            if block_name == "calc":
                 print(
                     f"Warning: Filtering by calculated field '{name}' triggers calculation.",
                     file=sys.stderr,
@@ -205,20 +231,29 @@ def matches_criteria(
     criteria: Dict[str, Any],
 ) -> bool:
     for name, expected in criteria.items():
-        block_name, _ = FIELD_MAP[name]
+        block_name, _ = get_field_info(name)
         if block_name == "calc":
             continue
         obj = metro if block_name == "metro" else gauge
         actual = getattr(obj, name)
 
-        if isinstance(actual, (list, dict)) and isinstance(expected, str):
-            if expected not in str(actual):
-                return False
-            continue
-
-        if actual != expected:
+        if not _value_matches(actual, expected):
             return False
     return True
+
+
+def _value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, (list, dict)) and isinstance(expected, str):
+        return expected in str(actual)
+
+    if isinstance(expected, float):
+        try:
+            actual_float = float(actual)
+        except (TypeError, ValueError):
+            return False
+        return bool(np.isclose(actual_float, expected, rtol=1e-12, atol=1e-12))
+
+    return actual == expected
 
 
 def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
@@ -268,6 +303,13 @@ def _extract_calculated_value(name: str, calc_data: Optional[Dict[str, Any]]) ->
 
     if base in ["V_R", "V_R_err", "creutz_P", "creutz_P_err", "a_creutz", "a_creutz_err"]:
         return calc_data.get(base, {}).get(str(params["R"]))
+
+    if base in ["chi", "chi_err"]:
+        key = f"{_format_numeric_key(params['R'])},{_format_numeric_key(params['T'])}"
+        return calc_data.get(base, {}).get(key)
+
+    if base in ["F_chi", "F_chi_err"]:
+        return calc_data.get(base, {}).get(_format_numeric_key(params["R"]))
 
     if base in ["Ehat_clover", "Ehat_clover_err", "t2E_clover", "t2E_clover_err"]:
         flow_dict = calc_data.get("gradient_flow", {}).get(base, {})
@@ -372,6 +414,21 @@ def _extract_row_field(
         return _extract_calculated_value(field_name, calc_data)
     obj = metro if block == "metro" else gauge
     return getattr(obj, FIELD_ALIASES.get(field_name, field_name))
+
+
+def _matches_calculated_criteria(
+    row_spec: RowSpec,
+    criteria: Dict[str, Any],
+    calc_data: Optional[Dict[str, Any]],
+) -> bool:
+    for name, expected in criteria.items():
+        block, _ = get_field_info(name)
+        if block != "calc":
+            continue
+        actual = _extract_calculated_value(name, calc_data)
+        if not _value_matches(actual, expected):
+            return False
+    return True
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -684,8 +741,9 @@ def main() -> None:
         print("  python search_data.py ROOT --show-analysis-settings")
         print()
         print("Examples:")
-        print("  python search_data.py ../data beta=2.4 lattice_size")
+        print("  python search_data.py ../data beta=2.4 L0 L1 L2 L3")
         print("  python search_data.py ../data W_R_T --workers 4 --calc-workers 2 --load-workers 4")
+        print("  python search_data.py ../data chi_R1p5_T1p5 chi_R1p5_T1p5_err F_chi_R1p5")
         print("  python search_data.py ../data beta=2.4 --show-analysis-settings")
         print()
         print("Options:")
@@ -786,7 +844,11 @@ def main() -> None:
         return
 
     n_combined_groups = sum(1 for p in groups.values() if len(p) > 1)
-    needs_calc = args.force_calculate or any(get_field_info(out)[0] == "calc" for out in outputs)
+    needs_calc = (
+        args.force_calculate
+        or any(get_field_info(out)[0] == "calc" for out in outputs)
+        or any(get_field_info(name)[0] == "calc" for name in criteria)
+    )
     calc_results: Dict[str, Dict[str, Any]] = {}
     analysis_options: Dict[str, Any] = {}
     if args.r0_t_min is not None:
@@ -841,6 +903,20 @@ def main() -> None:
             f"without calculated fields...",
             file=sys.stderr,
         )
+
+    if any(get_field_info(name)[0] == "calc" for name in criteria):
+        row_specs = [
+            row_spec
+            for row_spec in row_specs
+            if _matches_calculated_criteria(
+                row_spec,
+                criteria,
+                calc_results.get(row_spec.calc_key) if row_spec.calc_key else None,
+            )
+        ]
+        if not row_specs:
+            print("No rows match calculated-field filters.")
+            return
 
     if outputs == ["analysis_settings"]:
         _print_analysis_settings(row_specs, calc_results)

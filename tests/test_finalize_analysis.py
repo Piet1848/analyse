@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,8 +13,9 @@ import yaml
 import finalize_analysis
 import finalized_analysis_helpers as helpers
 import run_evaluation
+import search_data
 import data_organizer
-from calculator import Calculator, fit_r0_from_potential_data
+from calculator import Calculator, creutz_chi_from_wilson, fit_r0_from_potential_data
 from load_input_yaml import load_params
 
 
@@ -309,6 +312,31 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 },
             )
 
+    def test_gradient_flow_summary_trims_unequal_flow_time_lengths(self):
+        flow_data = {
+            0.0: {
+                "Ehat_clover": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.1, 0.2, 0.3], dtype=np.float32),
+            },
+            0.5: {
+                "Ehat_clover": np.asarray([2.0, 4.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.2, 0.4], dtype=np.float32),
+            },
+        }
+
+        summary = run_evaluation.summarize_gradient_flow_obs(
+            flow_data,
+            t0_target=0.3,
+            block_size=1,
+            n_bootstrap=8,
+            include_bootstrap=True,
+        )
+
+        self.assertEqual(summary["n_configurations_used"], 2)
+        self.assertTrue(summary["truncated_to_common_length"])
+        self.assertAlmostEqual(summary["Ehat_clover"]["0"], 1.5)
+        self.assertEqual(summary["bootstrap_samples"]["t2E_clover"].shape, (2, 8))
+
     def test_whitespace_w_temp_loading(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "W_temp.out"
@@ -383,17 +411,70 @@ class FinalizeAnalysisTests(unittest.TestCase):
             "synthetic",
             flow_pair_order=[(None, 1, 1), (None, 1, 2), (None, 2, 1), (None, 2, 2)],
             wilson_by_flow_pair={
-                (None, 1, 1): np.asarray([0.5, 0.5], dtype=np.float32),
-                (None, 1, 2): np.asarray([0.25, 0.25], dtype=np.float32),
-                (None, 2, 1): np.asarray([0.2, 0.2], dtype=np.float32),
-                (None, 2, 2): np.asarray([0.08, 0.08], dtype=np.float32),
+                (None, 1, 1): np.asarray([0.5, 0.6], dtype=np.float32),
+                (None, 1, 2): np.asarray([0.25, 0.35], dtype=np.float32),
+                (None, 2, 1): np.asarray([0.2, 0.3], dtype=np.float32),
+                (None, 2, 2): np.asarray([0.08, 0.12], dtype=np.float32),
             },
         )
         calc = Calculator(compact, n_bootstrap=8, step_size=1)
 
         chi = calc.get_variable("chi", R=1.5, T=1.5)
+        loop_means = {
+            pair: float(np.mean(values))
+            for pair, values in compact.wilson_by_flow_pair.items()
+        }
+        expected = creutz_chi_from_wilson(
+            loop_means[(None, 1, 1)],
+            loop_means[(None, 1, 2)],
+            loop_means[(None, 2, 1)],
+            loop_means[(None, 2, 2)],
+        )
 
-        self.assertAlmostEqual(chi.get(), np.log((0.25 * 0.2) / (0.5 * 0.08)), places=7)
+        self.assertAlmostEqual(chi.get(), expected, places=7)
+
+    def test_calculator_normalizes_equivalent_flow_time_cache_keys(self):
+        compact = data_organizer.CompactWilsonData(
+            "synthetic",
+            flow_pair_order=[(None, 1, 1), (None, 1, 2), (None, 2, 1), (None, 2, 2)],
+            wilson_by_flow_pair={
+                (None, 1, 1): np.asarray([0.5, 0.6], dtype=np.float32),
+                (None, 1, 2): np.asarray([0.25, 0.35], dtype=np.float32),
+                (None, 2, 1): np.asarray([0.2, 0.3], dtype=np.float32),
+                (None, 2, 2): np.asarray([0.08, 0.12], dtype=np.float32),
+            },
+        )
+        calc = Calculator(compact, n_bootstrap=8, step_size=1)
+
+        implicit = calc.get_variable("chi", R=1.5, T=1.5)
+        explicit = calc.get_variable("chi", R=np.float64(1.5), T=1.5, flow_time=None)
+
+        self.assertIs(implicit, explicit)
+
+    def test_search_data_extracts_dynamic_creutz_fields(self):
+        calc_data = {
+            "chi": {"1.5,2.5": 0.12},
+            "chi_err": {"1.5,2.5": 0.03},
+            "F_chi": {"1.5": 0.22},
+            "F_chi_err": {"1.5": 0.04},
+        }
+
+        self.assertEqual(search_data._extract_calculated_value("chi_R1p5_T2p5", calc_data), 0.12)
+        self.assertEqual(search_data._extract_calculated_value("chi_R1p5_T2p5_err", calc_data), 0.03)
+        self.assertEqual(search_data._extract_calculated_value("F_chi_R1p5", calc_data), 0.22)
+        self.assertEqual(search_data._extract_calculated_value("F_chi_R1p5_err", calc_data), 0.04)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            criteria, outputs = search_data.parse_tokens(["chi_R1p5_T2p5=0.12", "F_chi_R1p5_err"])
+        self.assertEqual(criteria, {"chi_R1p5_T2p5": 0.12})
+        self.assertEqual(outputs, ["F_chi_R1p5_err"])
+        self.assertTrue(
+            search_data._matches_calculated_criteria(
+                search_data.RowSpec("row", ".", None, False),
+                criteria,
+                calc_data,
+            )
+        )
 
     def test_l1_only_data_reports_no_standard_creutz_ratio(self):
         compact = data_organizer.CompactWilsonData(

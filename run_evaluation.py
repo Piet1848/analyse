@@ -23,7 +23,7 @@ from calculator import Calculator, make_key
 DATA_ROOT = Path("../data").resolve()
 CALC_RESULT_BASE = DATA_ROOT / "calcResult"
 THERMALIZATION_STEPS = 1500
-CALC_VERSION = "5.0"
+CALC_VERSION = "5.1"
 GROUP_IGNORE_METRO_FIELDS = {"seed", "nSweep"}
 
 DEFAULT_N_BOOTSTRAP = 200
@@ -120,6 +120,10 @@ def _build_analysis_settings(
             "use_weighted_fit": DEFAULT_R0_CHI_USE_WEIGHTED_FIT,
             "fit_window": DEFAULT_R0_CHI_FIT_WINDOW,
             "discard_negative": DEFAULT_R0_CHI_DISCARD_NEGATIVE,
+        },
+        "creutz_ratio": {
+            "definition": "log(W(R,T+1)*W(R+1,T)/(W(R,T)*W(R+1,T+1)))",
+            "estimator": "ratio of Wilson-loop means with block-bootstrap errors",
         },
     }
 
@@ -385,11 +389,11 @@ def _bootstrap_series_matrix(
 ) -> np.ndarray:
     if not series_by_row:
         return np.empty((0, n_bootstrap), dtype=float)
-    n_samples = len(series_by_row[0])
+    n_samples = min(len(row) for row in series_by_row)
     if n_samples <= 0:
         return np.empty((len(series_by_row), n_bootstrap), dtype=float)
     if any(len(row) != n_samples for row in series_by_row):
-        raise ValueError("Gradient-flow observable series must have matching lengths")
+        series_by_row = [np.asarray(row, dtype=float)[:n_samples] for row in series_by_row]
 
     block_size = max(1, int(block_size))
     starts = np.arange(0, n_samples, block_size, dtype=np.int64)
@@ -405,6 +409,16 @@ def _bootstrap_series_matrix(
         sampled = rng.integers(0, n_blocks, size=n_blocks)
         out[:, boot_idx] = sums[sampled].sum(axis=0) / lengths[sampled].sum()
     return out
+
+
+def _trim_series_to_common_length(series_by_row: list[np.ndarray]) -> tuple[list[np.ndarray], int, list[int]]:
+    lengths = [int(len(row)) for row in series_by_row]
+    if not lengths:
+        return [], 0, []
+    common_length = min(lengths)
+    if common_length <= 0:
+        return [np.asarray(row, dtype=float)[:0] for row in series_by_row], 0, lengths
+    return [np.asarray(row, dtype=float)[:common_length] for row in series_by_row], common_length, lengths
 
 
 def _interpolate_t0(flow_times: np.ndarray, t2e_values: np.ndarray, target: float) -> float:
@@ -442,6 +456,15 @@ def summarize_gradient_flow_obs(
     times = np.asarray(sorted(flow_data), dtype=float)
     e_series = [np.asarray(flow_data[float(t)]["Ehat_clover"], dtype=float) for t in times]
     t2e_series = [np.asarray(flow_data[float(t)]["t2E_clover"], dtype=float) for t in times]
+    e_series, n_common_e, e_lengths = _trim_series_to_common_length(e_series)
+    t2e_series, n_common_t2e, t2e_lengths = _trim_series_to_common_length(t2e_series)
+    n_common = min(n_common_e, n_common_t2e)
+    if n_common <= 0:
+        return {}
+    if n_common_e != n_common:
+        e_series = [row[:n_common] for row in e_series]
+    if n_common_t2e != n_common:
+        t2e_series = [row[:n_common] for row in t2e_series]
     e_means = np.asarray([np.mean(row) for row in e_series], dtype=float)
     t2e_means = np.asarray([np.mean(row) for row in t2e_series], dtype=float)
     e_boot = _bootstrap_series_matrix(e_series, block_size, n_bootstrap)
@@ -456,6 +479,18 @@ def summarize_gradient_flow_obs(
 
     payload: Dict[str, Any] = {
         "available_flow_times": [float(t) for t in times],
+        "n_configurations_used": int(n_common),
+        "n_configurations_by_flow_time": {
+            f"{float(t):.12g}": {
+                "Ehat_clover": int(e_len),
+                "t2E_clover": int(t2e_len),
+            }
+            for t, e_len, t2e_len in zip(times, e_lengths, t2e_lengths)
+        },
+        "truncated_to_common_length": bool(
+            any(length != n_common for length in e_lengths)
+            or any(length != n_common for length in t2e_lengths)
+        ),
         "Ehat_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, e_means)},
         "Ehat_clover_err": {
             f"{float(t):.12g}": float(np.std(e_boot[idx][np.isfinite(e_boot[idx])]))
@@ -906,7 +941,9 @@ def evaluate_run(
 
     vprint("Calculating chi and F_chi...")
     all_chi = {}
+    all_chi_err = {}
     all_f_chi = {}
+    all_f_chi_err = {}
     r0_chi = None
     r0_chi_err = None
     creutz_status = "ok"
@@ -930,7 +967,11 @@ def evaluate_run(
                 chi_var = calc.get_variable("chi", R=r_p, T=t_p)
                 chi_val = chi_var.get()
                 if chi_val is not None and not np.isnan(chi_val):
-                    all_chi[f"{r_p},{t_p}"] = float(chi_val)
+                    key = f"{float(r_p):g},{float(t_p):g}"
+                    all_chi[key] = float(chi_val)
+                    chi_err = chi_var.err()
+                    if chi_err is not None and np.isfinite(chi_err):
+                        all_chi_err[key] = float(chi_err)
             except Exception:
                 continue
 
@@ -940,7 +981,11 @@ def evaluate_run(
                 f_var = calc.get_variable("F_chi", R=r_p, t_large=chi_t_large)
                 f_val = f_var.get()
                 if f_val is not None and not np.isnan(f_val):
-                    all_f_chi[f"{r_p}"] = float(f_val)
+                    key = f"{float(r_p):g}"
+                    all_f_chi[key] = float(f_val)
+                    f_err = f_var.err()
+                    if f_err is not None and np.isfinite(f_err):
+                        all_f_chi_err[key] = float(f_err)
             except Exception:
                 continue
 
@@ -1048,7 +1093,9 @@ def evaluate_run(
         "r0_chi": float(r0_chi) if r0_chi is not None else None,
         "r0_chi_err": float(r0_chi_err) if r0_chi_err is not None else None,
         "chi": all_chi,
+        "chi_err": all_chi_err,
         "F_chi": all_f_chi,
+        "F_chi_err": all_f_chi_err,
         "creutz_P": all_creutz_P,
         "creutz_P_err": all_creutz_P_err,
         "a_creutz": all_a_creutz,
@@ -1061,7 +1108,9 @@ def evaluate_run(
             "potential_errors": potential_errors,
             "cornell_params": cornell_params,
             "chi": all_chi,
+            "chi_err": all_chi_err,
             "F_chi": all_f_chi,
+            "F_chi_err": all_f_chi_err,
             "gradient_flow": flow_summary,
         },
     }

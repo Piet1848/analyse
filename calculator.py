@@ -23,6 +23,41 @@ def cornell_potential_ansatz(r, A, sigma, B):
     return A + sigma * r - B / r
 
 
+def _positive_log_ratio(numerator, denominator):
+    numerator_arr, denominator_arr = np.broadcast_arrays(
+        np.asarray(numerator, dtype=float),
+        np.asarray(denominator, dtype=float),
+    )
+    valid = (
+        np.isfinite(numerator_arr)
+        & np.isfinite(denominator_arr)
+        & (numerator_arr > 0)
+        & (denominator_arr > 0)
+    )
+
+    if numerator_arr.ndim == 0:
+        if bool(valid):
+            return float(np.log(float(numerator_arr) / float(denominator_arr)))
+        return np.nan
+
+    result = np.full(numerator_arr.shape, np.nan, dtype=float)
+    result[valid] = np.log(numerator_arr[valid] / denominator_arr[valid])
+    return result
+
+
+def creutz_chi_from_wilson(w_rt, w_rt1, w_r1t, w_r1t1):
+    """
+    Standard adjacent-loop Creutz ratio.
+
+    Callers pass Wilson-loop means or bootstrap means, matching the
+    example_analysis convention of first grouping W_temp by (flow_time, L, T).
+    """
+    return _positive_log_ratio(
+        np.asarray(w_rt1, dtype=float) * np.asarray(w_r1t, dtype=float),
+        np.asarray(w_rt, dtype=float) * np.asarray(w_r1t1, dtype=float),
+    )
+
+
 def fit_r0_from_potential_data(
     rs,
     vs,
@@ -212,7 +247,24 @@ class Calculator:
                     for flow_time, r, t in pair_order
                 ]
 
+    def _canonicalize_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        canonical: dict[str, Any] = {}
+        for name, value in params.items():
+            if name == "flow_time":
+                normalized_flow = data_organizer._normalize_flow_time(value)
+                if normalized_flow is None:
+                    continue
+                canonical[name] = normalized_flow
+            elif isinstance(value, np.integer):
+                canonical[name] = int(value)
+            elif isinstance(value, np.floating):
+                canonical[name] = float(value)
+            else:
+                canonical[name] = value
+        return canonical
+
     def get_variable(self, name: str, **params) -> data_organizer.VariableData:
+        params = self._canonicalize_params(params)
         key = make_key(name, params)
         if key in self.variables:
             return self.variables[key]
@@ -889,29 +941,13 @@ class Calculator:
         except (ValueError, KeyError) as e:
             raise ValueError(f"Could not get required Wilson loops for chi({R}, {T}): {e}")
 
-        def calculate_log_ratio(w1, w2, w3, w4):
-            # w1 = W(t+a, r), w2 = W(t, r+a), w3 = W(t,r), w4 = W(t+a, r+a)
-            # Formula is ln( (w1 * w2) / (w3 * w4) ) assuming a=1
-            num = w1 * w2
-            den = w3 * w4
-            if num > 0 and den > 0:
-                return np.log(num / den)
-            return np.nan
-
-        def calculate_log_ratio_array(w1, w2, w3, w4):
-            w1_arr = np.asarray(w1, dtype=float)
-            w2_arr = np.asarray(w2, dtype=float)
-            w3_arr = np.asarray(w3, dtype=float)
-            w4_arr = np.asarray(w4, dtype=float)
-            numer = w1_arr * w2_arr
-            denom = w3_arr * w4_arr
-            result = np.full(numer.shape, np.nan, dtype=float)
-            valid = np.isfinite(numer) & np.isfinite(denom) & (numer > 0) & (denom > 0)
-            result[valid] = np.log(numer[valid] / denom[valid])
-            return result
-
         # Main value
-        chi_val = calculate_log_ratio(w_t1_r.get(), w_t_r1.get(), w_tr.get(), w_t1_r1.get())
+        chi_val = creutz_chi_from_wilson(
+            w_tr.get(),
+            w_t1_r.get(),
+            w_t_r1.get(),
+            w_t1_r1.get(),
+        )
         
         # Bootstrap values
         # Get bootstrap samples for all 4 loops
@@ -924,7 +960,7 @@ class Calculator:
         if b_t1_r is None or b_t_r1 is None or b_tr is None or b_t1_r1 is None:
              raise ValueError(f"Bootstrap samples not available for one of the Wilson loops for chi({R},{T})")
 
-        chi_boots = calculate_log_ratio_array(b_t1_r, b_t_r1, b_tr, b_t1_r1)
+        chi_boots = creutz_chi_from_wilson(b_tr, b_t1_r, b_t_r1, b_t1_r1)
         
         var_data = data_organizer.VariableData("chi")
         var_data.set_value(chi_val, bootstrap_samples=chi_boots, R=R, T=T, flow_time=normalized_flow)
