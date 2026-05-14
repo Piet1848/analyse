@@ -154,7 +154,7 @@ def load_gradient_flow_params(yaml_path: str) -> GradientFlowParams:
         measure_wilson_loop_temporal=raw.get("measure_wilson_loop_temporal", False),
         measure_wilson_loop_mu_nu=raw.get("measure_wilson_loop_mu_nu", False),
         extract_t0=raw.get("extract_t0", False),
-        t0_target=float(raw.get("t0_target", 0.3)),
+        t0_target=float(raw.get("t0_target", 0.1)),
         obs_filename=raw.get("obs_filename", "gradient_flow_obs.dat"),
         W_temp_filename=raw.get("W_temp_filename", "gradient_flow_wtemp.dat"),
         W_mu_nu_filename=raw.get("W_mu_nu_filename", "gradient_flow_w_mu_nu.dat"),

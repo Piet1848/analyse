@@ -469,7 +469,7 @@ def summarize_gradient_flow_obs(
     t2e_means = np.asarray([np.mean(row) for row in t2e_series], dtype=float)
     e_boot = _bootstrap_series_matrix(e_series, block_size, n_bootstrap)
     t2e_boot = _bootstrap_series_matrix(t2e_series, block_size, n_bootstrap)
-    target = 0.3 if t0_target is None else float(t0_target)
+    target = 0.1 if t0_target is None else float(t0_target)
     t0 = _interpolate_t0(times, t2e_means, target)
     t0_boot = np.asarray([
         _interpolate_t0(times, t2e_boot[:, idx], target)
