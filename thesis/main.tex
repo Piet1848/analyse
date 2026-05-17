@@ -443,6 +443,19 @@ as fits in
 \end{equation}
 or another measured dimensionless lattice-spacing proxy.
 
+Continuum extrapolations should compare observables at fixed physical
+conditions, not merely at fixed lattice indices. For observables derived from
+Wilson loops this means that a loop size $R$ on a coarse ensemble and the same
+integer $R$ on a fine ensemble do not represent the same physical distance.
+One should instead compare at fixed ratios such as $r/\rzero$ or fixed
+dimensionless distances built from another reference scale. If the measured
+data only exist at discrete lattice separations, an interpolation in the
+dimensionless observable, for example in $\chi a^2$ as a function of $r/a$, is
+needed before fitting the continuum limit. This point is emphasized in recent
+work on controlled continuum extrapolations of Wilson-loop observables, where
+Creutz ratios are used as finite continuum quantities and fitted at fixed
+physical distance \cite{Risch2024SmearingContinuum}.
+
 The renormalization-group interpretation is central for the present thesis.
 Different lattice actions can lead to the same continuum theory if they differ
 only by irrelevant operators. In that case they lie in the same universality
@@ -603,7 +616,33 @@ of statistical uncertainties.
 \label{subsec:creutz-ratios}
 
 Creutz ratios are combinations of neighboring Wilson loops designed to cancel
-some perimeter and normalization contributions. A common definition is
+some perimeter and normalization contributions. In the continuum they can be
+viewed as the mixed derivative
+\begin{equation}
+  \chi(r,t)
+  =
+  -
+  \frac{\partial^2}{\partial r\,\partial t}
+  \ln W(r,t),
+  \label{eq:continuum-creutz-ratio}
+\end{equation}
+where $W(r,t)$ is a rectangular Wilson loop of physical spatial extent $r$ and
+Euclidean time extent $t$. A central finite-difference discretization gives a
+lattice Creutz ratio located at half-integer separations,
+\begin{equation}
+  \chi\left(R+\frac{1}{2},T+\frac{1}{2}\right)
+  =
+  \ln
+  \left[
+    \frac{
+      W(R+1,T) W(R,T+1)
+    }{
+      W(R,T) W(R+1,T+1)
+    }
+  \right],
+  \label{eq:creutz-ratio-central-difference}
+\end{equation}
+or, equivalently after a shift of indices,
 \begin{equation}
   \chi(R,T)
   =
@@ -618,6 +657,27 @@ some perimeter and normalization contributions. A common definition is
   \right].
   \label{eq:creutz-ratio}
 \end{equation}
+The normalization of the Wilson loop, including the factor $1/N_c$, cancels in
+this ratio. This is useful for the present $\SU(2)$ analysis because the same
+formula can be applied directly to the normalized Wilson-loop output described
+above.
+
+The central-difference form approximates the continuum mixed derivative with
+cutoff effects of order $\latspacing^2$ when the underlying Wilson loop is
+smooth. This makes Creutz ratios particularly useful for continuum studies:
+they are finite observables, their leading normalization and perimeter
+contributions cancel, and they are closely related to the static force. In the
+large-time limit,
+\begin{equation}
+  \frac{\chi(R,T)}{\latspacing^2}
+  \xrightarrow[T\to\infty]{}
+  F(r)
+\end{equation}
+up to the usual distinction between the discrete lattice midpoint and the
+physical distance $r$. Diagonal ratios $\chi(R,R)$ are also useful summary
+observables because they probe the same spatial and temporal scale and are
+straightforward to compare across ensembles \cite{Creutz1980,Risch2024SmearingContinuum}.
+
 If large Wilson loops obey an area law,
 \begin{equation}
   W(R,T)
@@ -639,6 +699,20 @@ Coulombic contributions, finite-volume effects, and lattice artifacts. They are
 therefore best interpreted either as approximate string-tension estimators at
 large loop sizes or as diagnostic observables for scaling comparisons between
 ensembles.
+
+For continuum extrapolations the important distinction is between fixed lattice
+separation and fixed physical distance. Holding $R$ fixed while taking
+$\latspacing\to0$ drives the physical distance $r=R\latspacing$ to zero and
+therefore probes the short-distance limit rather than the same physical force.
+The continuum comparison should instead use a dimensionless distance such as
+\begin{equation}
+  \hat r = \frac{r}{\rzero}
+\end{equation}
+and interpolate the measured Creutz ratios to common $\hat r$ values before
+fitting in $\latspacing/\rzero$. This is also where gauge-breaking effects are
+expected to be most visible: short-distance Wilson-loop observables are
+sensitive to ultraviolet deformations, while large loops suffer from rapidly
+increasing statistical noise.
 
 \subsection{Sommer Scale and String Tension}
 \label{subsec:sommer-scale-string-tension}
@@ -775,21 +849,150 @@ Describe the analysis code and reproducibility workflow. Include the path from r
 
 \chapter{Continuum Extrapolation Method}
 \section{Choice of Continuum Variable}
-Define the extrapolation variable, for example $(\latspacing/\rzero)^2$, $1/\beta$, or another measured scale proxy.
+The primary continuum variable is chosen to be the measured dimensionless
+lattice spacing
+\begin{equation}
+  \hat a
+  =
+  \frac{\latspacing}{\rzero}.
+\end{equation}
+For observables that are expected to have leading even-power cutoff effects
+with the Wilson gauge action, the default horizontal axis is therefore
+$\hat a^2=(\latspacing/\rzero)^2$. Using the measured scale rather than the bare
+coupling makes the extrapolation closer to a fixed-physics comparison and
+reduces the risk of interpreting changes in scale setting as physical changes
+in the observable itself.
+
+For Creutz-ratio observables the quantity to extrapolate should be
+dimensionless. Convenient choices are
+\begin{equation}
+  \hat\chi(\hat r)
+  =
+  \rzero^2
+  \frac{\chi(r,t)}{\latspacing^2},
+  \qquad
+  \hat r = \frac{r}{\rzero},
+\end{equation}
+or, for large loops where the string-tension interpretation is appropriate,
+$\stringtension\rzero^2$. The measured lattice ratio $\chi(R,T)$ is
+dimensionless and approaches $\stringtension\latspacing^2$ in the area-law
+regime; division by $\latspacing^2$ and multiplication by $\rzero^2$ converts it
+to a quantity with a finite physical continuum limit. The same logic applies to
+the force extracted from the static potential.
 
 \section{Fixed-Physics Trajectories}
-Explain how ensembles at different $\beta$ and $\eps$ are compared. State whether $\eps$ is held fixed in bare units, scaled with $\latspacing$, or tuned along the trajectory.
+Ensembles at different $\beta$ values are compared along trajectories where the
+physical volume and the dimensionless analysis point are kept as fixed as the
+available data allow. In practice this means comparing observables at common
+$\hat r=r/\rzero$ and using only ensembles whose volumes are large enough that
+finite-volume corrections are not expected to dominate the Wilson-loop signal.
+When exact matching is not possible, the mismatch is included as a systematic
+effect or avoided by restricting the fit range.
+
+The gauge-breaking parameters are treated as additional bare deformation
+parameters. If they are held fixed while $\latspacing$ changes, the continuum
+fit tests whether their effect vanishes dynamically or survives in the
+continuum intercept. If a theoretical scaling prescription for $\eps$ is used,
+for example $\eps\propto \latspacing^q$, the fit must instead include this
+scaling explicitly. The central diagnostic is whether the broken and unbroken
+data approach a common continuum value.
 
 \section{Fit Ansatz}
 \subsection{Gauge-Invariant Baseline}
-\subsection{Linear and Quadratic Lattice-Spacing Corrections}
-\subsection{Combined Fits in Lattice Spacing and Breaking Strength}
+For the gauge-invariant ensembles, a minimal continuum ansatz for a
+dimensionless observable $\hat O$ is
+\begin{equation}
+  \hat O(\hat a)
+  =
+  O_0
+  +
+  c_a \hat a^2
+  +
+  c_{a4} \hat a^4
+  +
+  \cdots .
+  \label{eq:gauge-invariant-continuum-fit}
+\end{equation}
+The $\hat a^4$ term is included only when the data support it or when it is used
+as a fit-systematic variation. The default fit should be stable under removing
+the coarsest lattice spacing and under modest changes of the physical-distance
+range used for the observable.
+
+\subsection{Combined Lattice-Spacing and Breaking Dependence}
+A useful shared-intercept test is
+\begin{equation}
+  \hat O(\hat a,\eps)
+  =
+  O_0
+  +
+  c_a \hat a^2
+  +
+  c_\eps \eps \hat a^p
+  +
+  c_{a\eps} \eps \hat a^{p+2}
+  +
+  \cdots ,
+  \label{eq:shared-intercept-breaking-fit}
+\end{equation}
+with $p>0$. This ansatz encodes the hypothesis that gauge breaking is an
+irrelevant cutoff effect: for any fixed small $\eps$ the breaking terms vanish
+as $\hat a\to0$, and all data share the same continuum intercept $O_0$.
+
+The competing separate-intercept test is
+\begin{equation}
+  \hat O(\hat a,\eps)
+  =
+  O_0
+  +
+  c_\eps \eps
+  +
+  c_a \hat a^2
+  +
+  c_{a\eps} \eps \hat a^2
+  +
+  \cdots .
+  \label{eq:separate-intercept-breaking-fit}
+\end{equation}
+Here a statistically significant $c_\eps$ indicates that the breaking
+deformation changes the continuum value of the observable rather than merely
+changing cutoff effects. If the deformation can enter symmetrically in the sign
+of $\eps$, a quadratic term $c_{\eps2}\eps^2$ should be included as a systematic
+variant.
+
+This structure follows the same logic used in controlled continuum
+extrapolations with smearing or flow: one separates changes in the path toward
+the continuum from changes in the continuum observable itself
+\cite{Risch2024SmearingContinuum}. In that setting, fixed smearing in lattice
+units can share the same continuum intercept if it remains in the controlled
+expansion regime, while a fixed physical smoothing radius defines a different
+continuum observable. In the present gauge-breaking problem there is no
+guarantee of a shared intercept, so Eqs.~\eqref{eq:shared-intercept-breaking-fit}
+and \eqref{eq:separate-intercept-breaking-fit} are both part of the analysis.
 
 \section{Uncertainty Budget}
 \subsection{Statistical Errors}
-\subsection{Fit-Window Systematics}
-\subsection{Finite-Volume Effects}
-\subsection{Continuum-Fit Systematics}
+Statistical errors are obtained from blocked bootstrap samples. The block size
+is chosen large enough to reduce residual autocorrelation effects in the saved
+Markov-chain history. Derived observables such as Creutz ratios, Sommer scales,
+and continuum-fit parameters are recomputed inside the bootstrap whenever
+possible, so nonlinear error propagation is captured by the resampling.
+
+\subsection{Fit-Window and Interpolation Systematics}
+Wilson-loop observables depend on analysis choices: the temporal range used for
+effective-potential plateaus, the loop sizes included in Creutz-ratio summaries,
+and the interpolation used to compare fixed physical distances. These choices
+are varied to estimate systematic effects. For Creutz ratios, short distances
+are most vulnerable to cutoff and breaking artifacts, while long distances are
+most vulnerable to statistical noise.
+
+\subsection{Finite-Volume and Continuum-Fit Systematics}
+Finite-volume effects are monitored by comparing ensembles with similar
+$\hat a$ and $\eps$ but different physical volumes when available. Continuum-fit
+systematics are estimated by changing the fit ansatz, removing the coarsest
+lattice spacing, and checking whether the extrapolation remains monotonic over
+the fitted range. Non-monotonic behavior or strong shifts of the intercept under
+reasonable fit variations are treated as evidence that the available lattice
+spacings are not yet in a controlled scaling regime.
 
 \chapter{Results}
 \section{Thermalization and Data Quality}
