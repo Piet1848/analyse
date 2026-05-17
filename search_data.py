@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Tuple, List, Optional, get_type_hints, get_origin
 import concurrent.futures
 
@@ -71,6 +72,28 @@ FIELD_ALIASES = {
     "eps1": "epsilon1",
     "eps2": "epsilon2",
 }
+
+DEFAULT_FINALIZED_ANALYSIS_ROOT = Path("../data/finalized_analysis")
+FINALIZED_SUMMARY_COLUMNS = [
+    "analysis_id",
+    "beta",
+    "L",
+    "epsilon1",
+    "epsilon2",
+    "n_runs",
+    "r0",
+    "r0_err",
+    "a",
+    "a_err",
+    "length",
+    "length_err",
+    "epsilon_bar",
+    "epsilon_bar_err",
+    "gf_t_over_a2",
+    "gf_t_over_a2_err",
+    "gf_t_over_a2_weighted_fit",
+    "gf_t_over_a2_weighted_fit_err",
+]
 
 
 def build_field_map() -> Dict[str, Tuple[str, Any]]:
@@ -258,6 +281,321 @@ def _value_matches(actual: Any, expected: Any) -> bool:
         return bool(np.isclose(actual_float, expected, rtol=1e-12, atol=1e-12))
 
     return actual == expected
+
+
+def _load_json_file(path: Path, default: Any = None) -> Any:
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _coerce_int_if_whole(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _format_lattice_size(params: Dict[str, Any]) -> str:
+    dims = [params.get(f"L{i}") for i in range(4)]
+    if all(value is not None for value in dims):
+        return "x".join(str(_coerce_int_if_whole(value)) for value in dims)
+    return ""
+
+
+def _parse_finalized_dir_name(path: Path) -> Dict[str, Any]:
+    parsed: Dict[str, Any] = {}
+    for part in path.name.split("__"):
+        if part.startswith("beta_"):
+            try:
+                parsed["beta"] = float(part.removeprefix("beta_"))
+            except ValueError:
+                parsed["beta"] = part.removeprefix("beta_")
+        elif part.startswith("L_"):
+            parsed["L"] = part.removeprefix("L_")
+        elif part.startswith("eps1_"):
+            try:
+                parsed["epsilon1"] = float(part.removeprefix("eps1_"))
+            except ValueError:
+                parsed["epsilon1"] = part.removeprefix("eps1_")
+        elif part.startswith("eps2_"):
+            try:
+                parsed["epsilon2"] = float(part.removeprefix("eps2_"))
+            except ValueError:
+                parsed["epsilon2"] = part.removeprefix("eps2_")
+        elif part.startswith("nrun_"):
+            try:
+                parsed["n_runs"] = int(part.removeprefix("nrun_"))
+            except ValueError:
+                parsed["n_runs"] = part.removeprefix("nrun_")
+    return parsed
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _creutz_diagonal_positive_within_errors(creutz_summary: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    chi = creutz_summary.get("chi", {}) if isinstance(creutz_summary, dict) else {}
+    chi_err = creutz_summary.get("chi_err", {}) if isinstance(creutz_summary, dict) else {}
+    selected: Dict[str, Dict[str, float]] = {}
+
+    for key, raw_value in chi.items():
+        try:
+            r_str, t_str = key.split(",", 1)
+            r_val = float(r_str)
+            t_val = float(t_str)
+        except (AttributeError, ValueError):
+            continue
+        if not np.isclose(r_val, t_val, rtol=1e-12, atol=1e-12):
+            continue
+
+        value = _finite_float(raw_value)
+        err = _finite_float(chi_err.get(key))
+        if value is None or err is None:
+            continue
+        if value - err <= 0.0:
+            continue
+
+        label = f"{r_val:g}"
+        selected[label] = {"value": value, "err": err}
+
+    return dict(sorted(selected.items(), key=lambda item: float(item[0])))
+
+
+def _read_finalized_analysis_row(analysis_dir: Path) -> Optional[Dict[str, Any]]:
+    manifest = _load_json_file(analysis_dir / "manifest.json")
+    if not isinstance(manifest, dict):
+        return None
+
+    input_runs = _load_json_file(analysis_dir / "input_runs.json", default={}) or {}
+    compatibility = input_runs.get("compatibility_summary", {}) if isinstance(input_runs, dict) else {}
+    metro = compatibility.get("metropolis_common", {}) if isinstance(compatibility, dict) else {}
+    parsed_name = _parse_finalized_dir_name(analysis_dir)
+    r0_result = _load_json_file(analysis_dir / "r0" / "r0_result.json", default={}) or {}
+    derived = _load_json_file(analysis_dir / "derived" / "summary.json", default={}) or {}
+    gradient = _load_json_file(analysis_dir / "gradient_flow" / "summary.json", default={}) or {}
+    creutz = _load_json_file(analysis_dir / "creutz" / "summary.json", default={}) or {}
+
+    run_dirs = input_runs.get("run_dirs", []) if isinstance(input_runs, dict) else []
+    n_runs = len(run_dirs) if isinstance(run_dirs, list) and run_dirs else parsed_name.get("n_runs")
+
+    row: Dict[str, Any] = {
+        "analysis_id": manifest.get("analysis_id") or parsed_name.get("analysis_id") or analysis_dir.name,
+        "analysis_dir": str(analysis_dir),
+        "created_at": manifest.get("created_at"),
+        "updated_at": manifest.get("updated_at"),
+        "status": manifest.get("status", {}),
+        "n_runs": n_runs,
+        "beta": metro.get("beta", parsed_name.get("beta")),
+        "L": _format_lattice_size(metro) or parsed_name.get("L", ""),
+        "L0": metro.get("L0"),
+        "L1": metro.get("L1"),
+        "L2": metro.get("L2"),
+        "L3": metro.get("L3"),
+        "epsilon1": metro.get("epsilon1", parsed_name.get("epsilon1")),
+        "epsilon2": metro.get("epsilon2", parsed_name.get("epsilon2")),
+        "block_size": manifest.get("block_size"),
+        "thermalization_steps": manifest.get("thermalization_steps"),
+        "target_force": manifest.get("target_force"),
+        "r0": derived.get("r0", r0_result.get("r0")),
+        "r0_err": derived.get("r0_err", r0_result.get("r0_err")),
+        "a": derived.get("a"),
+        "a_err": derived.get("a_err"),
+        "length": derived.get("length"),
+        "length_err": derived.get("length_err"),
+        "epsilon_bar": derived.get("epsilon_bar"),
+        "epsilon_bar_err": derived.get("epsilon_bar_err"),
+        "gf_t_over_a2": gradient.get("t_over_a2_at_t2E_clover_0p1", gradient.get("t0")),
+        "gf_t_over_a2_err": gradient.get("t_over_a2_at_t2E_clover_0p1_err", gradient.get("t0_err")),
+        "gf_t_over_a2_weighted_fit": gradient.get("t_over_a2_at_t2E_clover_0p1_weighted_fit"),
+        "gf_t_over_a2_weighted_fit_err": gradient.get("t_over_a2_at_t2E_clover_0p1_weighted_fit_err"),
+        "creutz_R_eq_T": _creutz_diagonal_positive_within_errors(creutz),
+    }
+    return row
+
+
+def _finalized_matches(row: Dict[str, Any], criteria: Dict[str, Any], query: Optional[str]) -> bool:
+    for name, expected in criteria.items():
+        canonical = FIELD_ALIASES.get(name, name)
+        if not _value_matches(row.get(canonical), expected):
+            return False
+
+    if query:
+        haystack = json.dumps(row, sort_keys=True, default=str).lower()
+        return all(part.lower() in haystack for part in query.split())
+
+    return True
+
+
+def _format_table_value(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, float):
+        return f"{value:.8g}"
+    if isinstance(value, dict):
+        if not value:
+            return ""
+        if all(isinstance(item, dict) and "value" in item and "err" in item for item in value.values()):
+            return "; ".join(
+                f"{key}: {_format_table_value(item['value'])} +/- {_format_table_value(item.get('err'))}"
+                for key, item in value.items()
+            )
+        return json.dumps(value, sort_keys=True)
+    return str(value)
+
+
+def _print_table(rows: List[Dict[str, Any]], columns: List[str]) -> None:
+    table = [[_format_table_value(row.get(column)) for column in columns] for row in rows]
+    widths = [len(column) for column in columns]
+    for table_row in table:
+        for idx, value in enumerate(table_row):
+            widths[idx] = max(widths[idx], len(value))
+
+    fmt = "  ".join(f"{{:<{width}}}" for width in widths)
+    print(fmt.format(*columns))
+    for table_row in table:
+        print(fmt.format(*table_row))
+
+
+def _finalized_summary_columns(rows: List[Dict[str, Any]]) -> List[str]:
+    columns = list(FINALIZED_SUMMARY_COLUMNS)
+    creutz_labels = sorted(
+        {
+            label
+            for row in rows
+            for label in row.get("creutz_R_eq_T", {}).keys()
+        },
+        key=float,
+    )
+    for label in creutz_labels:
+        value_column = f"chi_R=T_{label}"
+        err_column = f"chi_R=T_{label}_err"
+        columns.extend([value_column, err_column])
+        for row in rows:
+            item = row.get("creutz_R_eq_T", {}).get(label)
+            row[value_column] = item.get("value") if item else None
+            row[err_column] = item.get("err") if item else None
+    return columns
+
+
+def search_data(
+    root: str | Path = DEFAULT_FINALIZED_ANALYSIS_ROOT,
+    *,
+    mode: str = "quick",
+    criteria: Optional[Dict[str, Any]] = None,
+    query: Optional[str] = None,
+    include_creutz: bool = True,
+    output: bool = True,
+) -> List[Dict[str, Any]]:
+    """Search finalized analysis output without reading raw run data or calculating values.
+
+    Parameters
+    ----------
+    root:
+        Directory containing finalized analysis folders. Defaults to
+        ``../data/finalized_analysis`` relative to this script's working directory.
+    mode:
+        ``"quick"`` prints compact run metadata. ``"summary"`` prints the requested
+        observables and errors in a table, including positive-within-error Creutz
+        ratios on the R=T diagonal.
+    criteria:
+        Exact-match filters against finalized metadata/result fields, for example
+        ``{"beta": 2.4, "eps1": 0.0}``.
+    query:
+        Optional whitespace-separated substring search across each finalized row.
+    include_creutz:
+        Include positive-within-error Creutz ratios on the R=T diagonal in
+        summary tables.
+    output:
+        When false, return rows without printing.
+    """
+    if mode not in {"quick", "summary"}:
+        raise ValueError("mode must be 'quick' or 'summary'")
+
+    root_path = Path(root).expanduser()
+    criteria = criteria or {}
+    rows: List[Dict[str, Any]] = []
+
+    if not root_path.exists():
+        if output:
+            print(f"No finalized analysis directory found: {root_path}")
+        return rows
+
+    for analysis_dir in sorted(path for path in root_path.iterdir() if path.is_dir()):
+        row = _read_finalized_analysis_row(analysis_dir)
+        if row is None:
+            continue
+        if _finalized_matches(row, criteria, query):
+            rows.append(row)
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("beta")),
+            str(row.get("L")),
+            str(row.get("epsilon1")),
+            str(row.get("analysis_id")),
+        )
+    )
+
+    if output:
+        if not rows:
+            print("No finalized analyses found.")
+        elif mode == "quick":
+            _print_table(
+                rows,
+                [
+                    "analysis_id",
+                    "beta",
+                    "L",
+                    "epsilon1",
+                    "epsilon2",
+                    "n_runs",
+                    "updated_at",
+                    "analysis_dir",
+                ],
+            )
+        else:
+            columns = (
+                _finalized_summary_columns(rows)
+                if include_creutz
+                else list(FINALIZED_SUMMARY_COLUMNS)
+            )
+            _print_table(rows, columns)
+
+    return rows
+
+
+def _parse_finalized_tokens(tokens: List[str]) -> Tuple[Dict[str, Any], Optional[str]]:
+    criteria: Dict[str, Any] = {}
+    query_parts: List[str] = []
+    for token in tokens:
+        if "=" not in token:
+            query_parts.append(token)
+            continue
+        name, raw_value = token.split("=", 1)
+        name = name.strip()
+        raw_value = raw_value.strip()
+        try:
+            value: Any = int(raw_value)
+        except ValueError:
+            try:
+                value = float(raw_value)
+            except ValueError:
+                value = parse_bool(raw_value) if raw_value.lower() in {"true", "false", "yes", "no", "1", "0"} else raw_value
+        criteria[FIELD_ALIASES.get(name, name)] = value
+    return criteria, " ".join(query_parts) if query_parts else None
 
 
 def find_matching_runs(root: str, criteria: Dict[str, Any]) -> list[str]:
@@ -748,11 +1086,44 @@ def main() -> None:
         metavar="Y",
         help="After --fit-linear, invert the fitted relation and estimate X for one or more Y values.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--finalized-only",
+        action="store_true",
+        help="Search only finalized analysis JSON under ROOT; never calculate or read raw run data.",
+    )
+    parser.add_argument(
+        "--finalized-mode",
+        choices=["quick", "summary"],
+        default="quick",
+        help="Display mode for --finalized-only (default: quick).",
+    )
+    parser.add_argument(
+        "--no-creutz",
+        action="store_true",
+        help="Omit chi_R=T Creutz-ratio columns from finalized summary output.",
+    )
+    args, extra_args = parser.parse_known_args()
+    if args.finalized_only:
+        args.tokens.extend(extra_args)
+    elif extra_args:
+        parser.error(f"unrecognized arguments: {' '.join(extra_args)}")
+
+    if args.finalized_only:
+        criteria, query = _parse_finalized_tokens(args.tokens)
+        search_data(
+            args.root,
+            mode=args.finalized_mode,
+            criteria=criteria,
+            query=query,
+            include_creutz=not args.no_creutz,
+            output=True,
+        )
+        return
 
     if not args.tokens and not args.show_analysis_settings:
         print("Usage:")
         print("  python search_data.py ROOT [TOKENS ...] [--workers N] [--calc-workers N] [--load-workers N]")
+        print("  python search_data.py ROOT --finalized-only [--finalized-mode quick|summary] [NAME=VALUE ...]")
         print("  python search_data.py ROOT --show-analysis-settings")
         print()
         print("Examples:")
@@ -760,6 +1131,7 @@ def main() -> None:
         print("  python search_data.py ../data W_R_T --workers 4 --calc-workers 2 --load-workers 4")
         print("  python search_data.py ../data chi_R1p5_T1p5 chi_R1p5_T1p5_err F_chi_R1p5")
         print("  python search_data.py ../data beta=2.4 --show-analysis-settings")
+        print("  python search_data.py ../data/finalized_analysis --finalized-only --finalized-mode summary beta=2.4")
         print()
         print("Options:")
         print("  --workers N         Number of runs to calculate in parallel (default: 1)")
@@ -775,6 +1147,9 @@ def main() -> None:
         print("  --fit-exclude-origin  Exclude rows where X=0 and Y=0 from the fit")
         print("  --predict-y X ...   Evaluate fitted Y values for one or more X inputs")
         print("  --predict-x Y ...   Invert fitted relation for one or more Y inputs")
+        print("  --finalized-only    Search finalized analysis JSON only")
+        print("  --finalized-mode MODE  quick or summary output for finalized analysis")
+        print("  --no-creutz         Omit chi_R=T columns from finalized summary output")
         print()
         print("Available Parameters:")
         for k, v in FIELD_MAP.items():

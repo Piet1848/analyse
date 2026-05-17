@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -109,6 +110,11 @@ def make_run(
 def write_stub_plot(path: Path, *args, **kwargs) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("<html><body>stub</body></html>", encoding="utf-8")
+
+
+def write_json(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 class InputSequence:
@@ -532,6 +538,109 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 calc_data,
             )
         )
+
+    def test_finalized_search_summary_uses_only_finalized_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis_dir = root / "beta_2.4__L_24x24x24x64__eps1_0__eps2_0__nrun_2__abc123"
+            write_json(
+                analysis_dir / "manifest.json",
+                {
+                    "analysis_id": "abc123",
+                    "updated_at": "2026-05-17T00:00:00+00:00",
+                    "status": {"derived_complete": True, "gradient_flow_complete": True, "creutz_complete": True},
+                    "block_size": 400,
+                    "thermalization_steps": 800,
+                    "target_force": 1.65,
+                },
+            )
+            write_json(
+                analysis_dir / "input_runs.json",
+                {
+                    "run_dirs": ["/not/read/run_a", "/not/read/run_b"],
+                    "compatibility_summary": {
+                        "metropolis_common": {
+                            "beta": 2.4,
+                            "L0": 24,
+                            "L1": 24,
+                            "L2": 24,
+                            "L3": 64,
+                            "epsilon1": 0.0,
+                            "epsilon2": 0.0,
+                        }
+                    },
+                },
+            )
+            write_json(
+                analysis_dir / "derived" / "summary.json",
+                {
+                    "r0": 4.0,
+                    "r0_err": 0.1,
+                    "a": 0.125,
+                    "a_err": 0.003,
+                    "length": 3.0,
+                    "length_err": 0.2,
+                    "epsilon_bar": 0.0,
+                    "epsilon_bar_err": 0.0,
+                },
+            )
+            write_json(
+                analysis_dir / "gradient_flow" / "summary.json",
+                {
+                    "t_over_a2_at_t2E_clover_0p1": 0.96,
+                    "t_over_a2_at_t2E_clover_0p1_err": 0.02,
+                    "t_over_a2_at_t2E_clover_0p1_weighted_fit": 0.95,
+                    "t_over_a2_at_t2E_clover_0p1_weighted_fit_err": 0.03,
+                },
+            )
+            write_json(
+                analysis_dir / "creutz" / "summary.json",
+                {
+                    "chi": {
+                        "1.5,1.5": 0.20,
+                        "2.5,2.5": 0.01,
+                        "3.5,2.5": 0.50,
+                    },
+                    "chi_err": {
+                        "1.5,1.5": 0.02,
+                        "2.5,2.5": 0.02,
+                        "3.5,2.5": 0.01,
+                    },
+                },
+            )
+
+            rows = search_data.search_data(root, mode="summary", criteria={"eps1": 0.0}, output=False)
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["analysis_id"], "abc123")
+            self.assertEqual(row["L"], "24x24x24x64")
+            self.assertEqual(row["n_runs"], 2)
+            self.assertEqual(row["r0"], 4.0)
+            self.assertEqual(row["r0_err"], 0.1)
+            self.assertEqual(row["gf_t_over_a2"], 0.96)
+            self.assertEqual(row["gf_t_over_a2_err"], 0.02)
+            self.assertEqual(list(row["creutz_R_eq_T"]), ["1.5"])
+            self.assertEqual(row["creutz_R_eq_T"]["1.5"]["err"], 0.02)
+
+    def test_finalized_search_quick_filters_by_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "beta_2.4__L_24x24x24x64__eps1_0__eps2_0__nrun_1__first"
+            second = root / "beta_2.5__L_32x32x32x64__eps1_0__eps2_0__nrun_1__second"
+            write_json(first / "manifest.json", {"analysis_id": "first", "status": {}})
+            write_json(second / "manifest.json", {"analysis_id": "second", "status": {}})
+
+            rows = search_data.search_data(root, mode="quick", query="second", output=False)
+
+            self.assertEqual([row["analysis_id"] for row in rows], ["second"])
+
+    def test_finalized_summary_can_omit_creutz_columns(self):
+        rows = [{"analysis_id": "abc", "creutz_R_eq_T": {"1.5": {"value": 0.2, "err": 0.01}}}]
+
+        columns = search_data._finalized_summary_columns(rows)
+        self.assertIn("chi_R=T_1.5", columns)
+        self.assertNotIn("chi_R=T_1.5", search_data.FINALIZED_SUMMARY_COLUMNS)
 
     def test_l1_only_data_reports_no_standard_creutz_ratio(self):
         compact = data_organizer.CompactWilsonData(
