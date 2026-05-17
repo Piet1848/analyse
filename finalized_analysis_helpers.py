@@ -805,9 +805,17 @@ def save_gradient_flow_plot(path: Path, flow_summary: dict[str, Any]) -> None:
     target = flow_summary.get("t0_target")
     if target is not None:
         fig.add_hline(y=float(target), line_dash="dash", line_color="firebrick")
+    if target is None or not np.isclose(float(target), 0.1):
+        fig.add_hline(y=0.1, line_dash="dash", line_color="darkorange")
     t0 = flow_summary.get("t0")
     if t0 is not None:
         fig.add_vline(x=float(t0), line_dash="dot", line_color="seagreen")
+    t2e_0p1 = flow_summary.get("t_over_a2_at_t2E_clover_0p1")
+    if t2e_0p1 is not None:
+        fig.add_vline(x=float(t2e_0p1), line_dash="dot", line_color="darkorange")
+    t2e_0p1_fit = flow_summary.get("t_over_a2_at_t2E_clover_0p1_weighted_fit")
+    if t2e_0p1_fit is not None:
+        fig.add_vline(x=float(t2e_0p1_fit), line_dash="dashdot", line_color="purple")
     fig.update_layout(
         title="Gradient-flow energy observable",
         template="plotly_white",

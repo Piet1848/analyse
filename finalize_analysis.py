@@ -618,14 +618,18 @@ class FinalizedAnalysisRunner:
         except Exception:
             return False
 
-    def _prompt_single_run_thermalization(self, run_dir: str, suggested_cut: int) -> int:
+    def _prompt_single_run_thermalization(self, run_dir: str, suggested_cut: int) -> tuple[int, bool]:
         run_name = Path(run_dir).name
         while True:
             response = self.input(
-                f"Thermalization cut for {run_name} is {int(suggested_cut)}. Press Enter to accept, or type a new integer: "
+                f"Thermalization cut for {run_name} is {int(suggested_cut)}. "
+                "Press Enter to accept, type a new integer, or append * to apply to all runs: "
             ).strip()
             if response == "" or response.lower() in {"y", "yes"}:
-                return int(suggested_cut)
+                return int(suggested_cut), False
+            apply_to_all = response.endswith("*")
+            if apply_to_all:
+                response = response[:-1].strip()
             try:
                 value = int(response)
             except ValueError:
@@ -634,7 +638,7 @@ class FinalizedAnalysisRunner:
             if value < 0:
                 self.print("Thermalization cut must be non-negative.")
                 continue
-            return value
+            return value, apply_to_all
 
     def _prompt_thermalization_by_run(self) -> dict[str, int]:
         default_cut = int(run_evaluation.THERMALIZATION_STEPS)
@@ -662,7 +666,12 @@ class FinalizedAnalysisRunner:
             else:
                 self.print("No thermalization preview data was available for this run.")
 
-            cut = self._prompt_single_run_thermalization(run_dir, default_cut)
+            cut, apply_to_all = self._prompt_single_run_thermalization(run_dir, default_cut)
+            if apply_to_all:
+                cuts_by_run = {path: int(cut) for path in self.run_dirs}
+                self._save_thermalization_selection_state(cuts_by_run)
+                self.print(f"Saved thermalization cut {cut} for all runs.")
+                break
             cuts_by_run[run_dir] = int(cut)
             self._save_thermalization_selection_state(cuts_by_run)
             self.print(f"Saved thermalization cut {cut} for {Path(run_dir).name}.")
@@ -1611,6 +1620,7 @@ class FinalizedAnalysisRunner:
         r0_result = load_json(self.r0_dir / "r0_result.json", default={}) or {}
         r0_choice = load_json(self.r0_dir / "choice.json", default={}) or {}
         derived_summary = load_json(self.derived_dir / "summary.json", default={}) or {}
+        gradient_summary = load_json(self.gradient_flow_dir / "summary.json", default={}) or {}
         active_v_rs = self._active_v_result_rs()
         fit_rs = [int(value) for value in r0_result.get("fit_rs", [])]
 
@@ -1653,6 +1663,16 @@ class FinalizedAnalysisRunner:
             f"length={format_result_value(derived_summary.get('length'), derived_summary.get('length_err'))}, "
             f"volume_r0={format_result_value(derived_summary.get('volume_r0'), derived_summary.get('volume_r0_err'))}"
         )
+        t2e_0p1 = gradient_summary.get("t_over_a2_at_t2E_clover_0p1")
+        t2e_0p1_fit = gradient_summary.get("t_over_a2_at_t2E_clover_0p1_weighted_fit")
+        if t2e_0p1 is not None or t2e_0p1_fit is not None:
+            self.print(
+                "  Gradient flow: "
+                "t/a^2 at t^2E_clover=0.1="
+                f"{format_result_value(t2e_0p1, gradient_summary.get('t_over_a2_at_t2E_clover_0p1_err'))}, "
+                "weighted four-point fit="
+                f"{format_result_value(t2e_0p1_fit, gradient_summary.get('t_over_a2_at_t2E_clover_0p1_weighted_fit_err'))}"
+            )
 
     def run(self) -> Path:
         self._finalize_wilsonloop()

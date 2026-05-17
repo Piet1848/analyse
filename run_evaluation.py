@@ -443,6 +443,93 @@ def _interpolate_t0(flow_times: np.ndarray, t2e_values: np.ndarray, target: floa
     return np.nan
 
 
+def _interpolate_nearest_target_crossing(flow_times: np.ndarray, t2e_values: np.ndarray, target: float) -> float:
+    valid = np.isfinite(flow_times) & np.isfinite(t2e_values)
+    x = np.asarray(flow_times, dtype=float)[valid]
+    y = np.asarray(t2e_values, dtype=float)[valid]
+    if len(x) < 1:
+        return np.nan
+
+    exact = np.flatnonzero(y == float(target))
+    if exact.size > 0:
+        return float(x[exact[0]])
+
+    below = np.flatnonzero(y < float(target))
+    above = np.flatnonzero(y > float(target))
+    if below.size == 0 or above.size == 0:
+        return np.nan
+
+    below_idx = below[np.argmin(np.abs(y[below] - float(target)))]
+    above_idx = above[np.argmin(np.abs(y[above] - float(target)))]
+    y1 = y[below_idx]
+    y2 = y[above_idx]
+    if y2 == y1:
+        return np.nan
+    return float(x[below_idx] + (float(target) - y1) * (x[above_idx] - x[below_idx]) / (y2 - y1))
+
+
+def _std_finite(values: np.ndarray) -> float:
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    return float(np.std(finite)) if finite.size > 0 else np.nan
+
+
+def _weighted_linear_crossing_for_indices(
+    flow_times: np.ndarray,
+    t2e_values: np.ndarray,
+    t2e_errors: np.ndarray,
+    target: float,
+    indices: np.ndarray,
+) -> float:
+    idx = np.asarray(indices, dtype=int)
+    if idx.size < 2:
+        return np.nan
+
+    x = np.asarray(flow_times, dtype=float)[idx]
+    y = np.asarray(t2e_values, dtype=float)[idx]
+    err = np.asarray(t2e_errors, dtype=float)[idx]
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = y[valid]
+    err = err[valid]
+    if x.size < 2:
+        return np.nan
+
+    weights = None
+    if err.size == x.size and np.all(np.isfinite(err)) and np.all(err > 0):
+        weights = 1.0 / err
+    try:
+        slope, intercept = np.polyfit(x, y, deg=1, w=weights)
+    except (ValueError, np.linalg.LinAlgError):
+        return np.nan
+    if not np.isfinite(slope) or abs(float(slope)) <= np.finfo(float).eps:
+        return np.nan
+    return float((float(target) - float(intercept)) / float(slope))
+
+
+def _weighted_linear_crossing(
+    flow_times: np.ndarray,
+    t2e_values: np.ndarray,
+    t2e_errors: np.ndarray,
+    target: float,
+    points_per_side: int = 2,
+) -> tuple[float, np.ndarray]:
+    y = np.asarray(t2e_values, dtype=float)
+    valid = np.isfinite(flow_times) & np.isfinite(y)
+    below = np.flatnonzero(valid & (y < float(target)))
+    above = np.flatnonzero(valid & (y > float(target)))
+    if below.size == 0 or above.size == 0:
+        return np.nan, np.asarray([], dtype=int)
+
+    below = below[np.argsort(np.abs(y[below] - float(target)))[:points_per_side]]
+    above = above[np.argsort(np.abs(y[above] - float(target)))[:points_per_side]]
+    indices = np.asarray(sorted(np.concatenate([below, above]).tolist()), dtype=int)
+    return (
+        _weighted_linear_crossing_for_indices(flow_times, y, t2e_errors, target, indices),
+        indices,
+    )
+
+
 def summarize_gradient_flow_obs(
     flow_data: Optional[Dict[float, Dict[str, np.ndarray]]],
     *,
@@ -469,6 +556,8 @@ def summarize_gradient_flow_obs(
     t2e_means = np.asarray([np.mean(row) for row in t2e_series], dtype=float)
     e_boot = _bootstrap_series_matrix(e_series, block_size, n_bootstrap)
     t2e_boot = _bootstrap_series_matrix(t2e_series, block_size, n_bootstrap)
+    e_errs = np.asarray([_std_finite(e_boot[idx]) for idx in range(e_boot.shape[0])], dtype=float)
+    t2e_errs = np.asarray([_std_finite(t2e_boot[idx]) for idx in range(t2e_boot.shape[0])], dtype=float)
     target = 0.1 if t0_target is None else float(t0_target)
     t0 = _interpolate_t0(times, t2e_means, target)
     t0_boot = np.asarray([
@@ -476,6 +565,24 @@ def summarize_gradient_flow_obs(
         for idx in range(t2e_boot.shape[1])
     ], dtype=float)
     finite_t0 = t0_boot[np.isfinite(t0_boot)]
+    fixed_target = 0.1
+    t2e_0p1 = _interpolate_nearest_target_crossing(times, t2e_means, fixed_target)
+    t2e_0p1_boot = np.asarray([
+        _interpolate_nearest_target_crossing(times, t2e_boot[:, idx], fixed_target)
+        for idx in range(t2e_boot.shape[1])
+    ], dtype=float)
+    finite_t2e_0p1 = t2e_0p1_boot[np.isfinite(t2e_0p1_boot)]
+    t2e_0p1_fit, fit_indices = _weighted_linear_crossing(
+        times,
+        t2e_means,
+        t2e_errs,
+        fixed_target,
+    )
+    t2e_0p1_fit_boot = np.asarray([
+        _weighted_linear_crossing_for_indices(times, t2e_boot[:, idx], t2e_errs, fixed_target, fit_indices)
+        for idx in range(t2e_boot.shape[1])
+    ], dtype=float)
+    finite_t2e_0p1_fit = t2e_0p1_fit_boot[np.isfinite(t2e_0p1_fit_boot)]
 
     payload: Dict[str, Any] = {
         "available_flow_times": [float(t) for t in times],
@@ -493,23 +600,43 @@ def summarize_gradient_flow_obs(
         ),
         "Ehat_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, e_means)},
         "Ehat_clover_err": {
-            f"{float(t):.12g}": float(np.std(e_boot[idx][np.isfinite(e_boot[idx])]))
+            f"{float(t):.12g}": float(e_errs[idx]) if np.isfinite(e_errs[idx]) else None
             for idx, t in enumerate(times)
         },
         "t2E_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, t2e_means)},
         "t2E_clover_err": {
-            f"{float(t):.12g}": float(np.std(t2e_boot[idx][np.isfinite(t2e_boot[idx])]))
+            f"{float(t):.12g}": float(t2e_errs[idx]) if np.isfinite(t2e_errs[idx]) else None
             for idx, t in enumerate(times)
         },
         "t0_target": target,
         "t0": float(t0) if np.isfinite(t0) else None,
         "t0_err": float(np.std(finite_t0)) if finite_t0.size > 0 else None,
+        "t_over_a2_at_t2E_clover_0p1": float(t2e_0p1) if np.isfinite(t2e_0p1) else None,
+        "t_over_a2_at_t2E_clover_0p1_err": (
+            float(np.std(finite_t2e_0p1)) if finite_t2e_0p1.size > 0 else None
+        ),
+        "t_over_a2_at_t2E_clover_0p1_weighted_fit": (
+            float(t2e_0p1_fit) if np.isfinite(t2e_0p1_fit) else None
+        ),
+        "t_over_a2_at_t2E_clover_0p1_weighted_fit_err": (
+            float(np.std(finite_t2e_0p1_fit)) if finite_t2e_0p1_fit.size > 0 else None
+        ),
+        "t_over_a2_at_t2E_clover_0p1_weighted_fit_points": [
+            {
+                "t_over_a2": float(times[idx]),
+                "t2E_clover": float(t2e_means[idx]),
+                "t2E_clover_err": float(t2e_errs[idx]) if np.isfinite(t2e_errs[idx]) else None,
+            }
+            for idx in fit_indices
+        ],
     }
     if include_bootstrap:
         payload["bootstrap_samples"] = {
             "Ehat_clover": e_boot,
             "t2E_clover": t2e_boot,
             "t0": t0_boot,
+            "t_over_a2_at_t2E_clover_0p1": t2e_0p1_boot,
+            "t_over_a2_at_t2E_clover_0p1_weighted_fit": t2e_0p1_fit_boot,
         }
     return payload
 

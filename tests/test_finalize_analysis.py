@@ -168,6 +168,30 @@ class FinalizeAnalysisTests(unittest.TestCase):
         self.assertTrue(any("Invalid bootstrap block size" in message for message in messages))
         self.assertTrue(any("must be at least 1" in message for message in messages))
 
+    def test_prompt_thermalization_star_applies_to_all_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a")
+            run_b = make_run(root, "run_b", seed=2, n_sweep=200)
+
+            runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
+            runner.run_dirs = [str(run_a.resolve()), str(run_b.resolve())]
+            runner.input = InputSequence(["2200*"])
+            runner.print = lambda *args, **kwargs: None
+            runner._load_saved_thermalization_cuts = lambda: {}
+            runner._save_selection_thermalization_preview = lambda run_dir, suggested_cut: None
+            runner._save_thermalization_selection_state = lambda cuts_by_run: None
+
+            cuts = runner._prompt_thermalization_by_run()
+
+            self.assertEqual(
+                cuts,
+                {
+                    str(run_a.resolve()): 2200,
+                    str(run_b.resolve()): 2200,
+                },
+            )
+
     def test_default_bootstrap_scan_extends_to_one_sixteenth_of_total_length(self):
         runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
         runner.block_size_scan_values = None
@@ -336,6 +360,39 @@ class FinalizeAnalysisTests(unittest.TestCase):
         self.assertTrue(summary["truncated_to_common_length"])
         self.assertAlmostEqual(summary["Ehat_clover"]["0"], 1.5)
         self.assertEqual(summary["bootstrap_samples"]["t2E_clover"].shape, (2, 8))
+
+    def test_gradient_flow_summary_reports_fixed_0p1_crossing_and_weighted_fit(self):
+        flow_data = {
+            0.0: {
+                "Ehat_clover": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.040, 0.042, 0.044], dtype=np.float32),
+            },
+            0.5: {
+                "Ehat_clover": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.070, 0.072, 0.074], dtype=np.float32),
+            },
+            1.0: {
+                "Ehat_clover": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.120, 0.122, 0.124], dtype=np.float32),
+            },
+            1.5: {
+                "Ehat_clover": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "t2E_clover": np.asarray([0.160, 0.162, 0.164], dtype=np.float32),
+            },
+        }
+
+        summary = run_evaluation.summarize_gradient_flow_obs(
+            flow_data,
+            t0_target=0.3,
+            block_size=1,
+            n_bootstrap=8,
+            include_bootstrap=True,
+        )
+
+        self.assertAlmostEqual(summary["t_over_a2_at_t2E_clover_0p1"], 0.78, places=6)
+        self.assertIsNotNone(summary["t_over_a2_at_t2E_clover_0p1_weighted_fit"])
+        self.assertEqual(len(summary["t_over_a2_at_t2E_clover_0p1_weighted_fit_points"]), 4)
+        self.assertEqual(summary["bootstrap_samples"]["t_over_a2_at_t2E_clover_0p1"].shape, (8,))
 
     def test_whitespace_w_temp_loading(self):
         with tempfile.TemporaryDirectory() as tmp:

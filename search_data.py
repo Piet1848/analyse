@@ -56,6 +56,10 @@ CALCULATED_FIELDS = {
     "t2E_clover_err": dict,
     "t0": float,
     "t0_err": float,
+    "t_over_a2_at_t2E_clover_0p1": float,
+    "t_over_a2_at_t2E_clover_0p1_err": float,
+    "t_over_a2_at_t2E_clover_0p1_weighted_fit": float,
+    "t_over_a2_at_t2E_clover_0p1_weighted_fit_err": float,
 }
 
 CALCULATED_FIELD_ALIASES = {
@@ -294,7 +298,18 @@ def _extract_calculated_value(name: str, calc_data: Optional[Dict[str, Any]]) ->
     canonical_name = CALCULATED_FIELD_ALIASES.get(name, name)
     if canonical_name in calc_data:
         return calc_data[canonical_name]
-    if canonical_name in {"Ehat_clover", "Ehat_clover_err", "t2E_clover", "t2E_clover_err", "t0", "t0_err"}:
+    if canonical_name in {
+        "Ehat_clover",
+        "Ehat_clover_err",
+        "t2E_clover",
+        "t2E_clover_err",
+        "t0",
+        "t0_err",
+        "t_over_a2_at_t2E_clover_0p1",
+        "t_over_a2_at_t2E_clover_0p1_err",
+        "t_over_a2_at_t2E_clover_0p1_weighted_fit",
+        "t_over_a2_at_t2E_clover_0p1_weighted_fit_err",
+    }:
         return calc_data.get("gradient_flow", {}).get(canonical_name)
 
     base, params = parse_dynamic_token(name)
