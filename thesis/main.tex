@@ -44,7 +44,9 @@
 \maketitle
 
 \begin{abstract}
-This thesis investigates whether and how the continuum limit of a lattice gauge theory is affected by small explicit violations of gauge invariance. The study combines theoretical expectations from lattice regularization and symmetry restoration with numerical measurements of Wilson loops, Creutz ratios, the static potential, the Sommer scale, and related scaling observables. The central goal is to determine whether gauge-breaking effects vanish, persist, or modify the extrapolation toward the continuum limit as the lattice spacing is reduced.
+This thesis investigates whether and how the continuum limit of a lattice gauge theory is affected by small explicit violations of gauge invariance. The study [...] numerical measurements of Wilson loops, Creutz ratios,
+ the static potential, the Sommer scale, and related scaling observables. The central goal is to determine
+ whether gauge-breaking effects vanish, persist, or modify the extrapolation toward the continuum limit as the lattice spacing is reduced.
 \end{abstract}
 
 \tableofcontents
@@ -245,7 +247,7 @@ where $N_\mu$ is the number of lattice points in direction $\mu$. Therefore two
 limits are conceptually distinct: the continuum limit $\latspacing \to 0$ and
 the infinite-volume limit $L_\mu \to \infty$. In practice, one tries to choose
 volumes large enough that finite-volume effects are smaller than the statistical
-and systematic errors relevant for the analysis.
+and systematic errors relevant for the analysis. [in simulations in this thesis I use Lµ=const for the space directions and Nµ const for time direction]
 
 \subsection{Link Variables and Plaquettes}
 \label{subsec:link-variables-plaquettes}
@@ -304,7 +306,7 @@ For smooth fields, the plaquette has the continuum expansion
   \right].
 \end{equation}
 Thus the plaquette is the lattice object from which the continuum field
-strength is recovered.
+strength is recovered. [but not really used in this thesis, so maybe remove this point]
 
 \subsection{Wilson Gauge Action}
 \label{subsec:wilson-gauge-action}
@@ -368,12 +370,6 @@ leading gauge-invariant lattice artifacts in many on-shell quantities are of
 order $\latspacing^2$, although the actual scaling observed in numerical data
 can be affected by statistics, finite-volume effects, operator definitions, and
 the accessible range of lattice spacings.
-
-In this thesis the precise normalization convention used in the simulation must
-be stated explicitly in the numerical setup. Additive constants in the action do
-not affect expectation values, because they cancel between numerator and
-denominator in normalized path-integral averages and do not change Metropolis
-acceptance probabilities.
 
 \subsection{Path Integral and Expectation Values}
 \label{subsec:lattice-path-integral}
@@ -443,15 +439,13 @@ as fits in
 \end{equation}
 or another measured dimensionless lattice-spacing proxy.
 
-Continuum extrapolations should compare observables at fixed physical
+Continuum extrapolations compare observables at fixed physical
 conditions, not merely at fixed lattice indices. For observables derived from
 Wilson loops this means that a loop size $R$ on a coarse ensemble and the same
 integer $R$ on a fine ensemble do not represent the same physical distance.
-One should instead compare at fixed ratios such as $r/\rzero$ or fixed
-dimensionless distances built from another reference scale. If the measured
-data only exist at discrete lattice separations, an interpolation in the
-dimensionless observable, for example in $\chi a^2$ as a function of $r/a$, is
-needed before fitting the continuum limit. This point is emphasized in recent
+Therefor instead compare at fixed ratios such as $r/\rzero$ or fixed
+dimensionless distances, a reference scale is used.
+[This point is emphasized in recent]
 work on controlled continuum extrapolations of Wilson-loop observables, where
 Creutz ratios are used as finite continuum quantities and fitted at fixed
 physical distance \cite{Risch2024SmearingContinuum}.
@@ -460,9 +454,9 @@ The renormalization-group interpretation is central for the present thesis.
 Different lattice actions can lead to the same continuum theory if they differ
 only by irrelevant operators. In that case they lie in the same universality
 class. By contrast, a relevant deformation changes the long-distance theory
-unless its coefficient is tuned to zero. A gauge-breaking term must therefore be
+unless its coefficient is tuned to zero. [A gauge-breaking term must therefore be
 classified by its effect on long-distance, gauge-invariant observables as
-$\latspacing \to 0$. The numerical analysis in later chapters tests this
+$\latspacing \to 0$. (not written well yet)] The numerical analysis in later chapters tests this
 question directly.
 
 \section{Static Potential and Confinement}
