@@ -28,6 +28,7 @@ def write_input_yaml(
     epsilon2: float = 0.0,
     seed: int = 1,
     n_sweep: int = 100,
+    gradient_dt: float = 0.05,
 ) -> None:
     payload = {
         "MetropolisParams": {
@@ -61,6 +62,21 @@ def write_input_yaml(
             "RetraceU_filename": "RetraceU.out",
             "write_to_file": True,
         },
+        "GradientFlowParams": {
+            "enabled": True,
+            "integrator": "rk3",
+            "dt": gradient_dt,
+            "t_values": [0.0, 0.25],
+            "measure_energy_clover": True,
+            "measure_wilson_loop_temporal": False,
+            "measure_wilson_loop_mu_nu": False,
+            "extract_t0": False,
+            "t0_target": 0.1,
+            "obs_filename": "gradient_flow_obs.dat",
+            "W_temp_filename": "gradient_flow_wtemp.dat",
+            "W_mu_nu_filename": "gradient_flow_w_mu_nu.dat",
+            "t0_filename": "gradient_flow_t0.dat",
+        },
     }
     with (run_dir / "input.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False)
@@ -92,6 +108,7 @@ def make_run(
     seed: int = 1,
     n_sweep: int = 100,
     run_offset: float = 0.0,
+    gradient_dt: float = 0.05,
 ) -> Path:
     run_dir = base_dir / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +119,7 @@ def make_run(
         epsilon2=epsilon2,
         seed=seed,
         n_sweep=n_sweep,
+        gradient_dt=gradient_dt,
     )
     write_w_temp(run_dir, run_offset=run_offset)
     return run_dir
@@ -278,6 +296,42 @@ class FinalizeAnalysisTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, r"MetropolisParams\.beta"):
                 finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
+
+    def test_validate_run_directories_rejects_gradient_flow_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_dt=0.05)
+            run_b = make_run(root, "run_b", seed=2, gradient_dt=0.25)
+
+            with self.assertRaisesRegex(ValueError, r"GradientFlowParams\.dt"):
+                finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
+
+    def test_group_run_directories_splits_by_gradient_flow_dt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_dt=0.05)
+            run_b = make_run(root, "run_b", seed=2, gradient_dt=0.05)
+            run_c = make_run(root, "run_c", seed=3, gradient_dt=0.25)
+
+            groups = finalize_analysis.group_run_directories(
+                finalize_analysis.discover_run_directories(str(root)),
+            )
+
+            grouped_paths = [paths for _, paths in groups]
+            self.assertEqual(len(grouped_paths), 2)
+            self.assertIn(sorted([str(run_a.resolve()), str(run_b.resolve())]), grouped_paths)
+            self.assertIn([str(run_c.resolve())], grouped_paths)
+
+    def test_run_evaluation_group_key_includes_gradient_flow_dt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_dt=0.05)
+            run_b = make_run(root, "run_b", seed=2, gradient_dt=0.25)
+
+            self.assertNotEqual(
+                run_evaluation._group_key_for_run(str(run_a)),
+                run_evaluation._group_key_for_run(str(run_b)),
+            )
 
     def test_filter_run_directories_accepts_search_style_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -557,7 +611,10 @@ class FinalizeAnalysisTests(unittest.TestCase):
             write_json(
                 analysis_dir / "input_runs.json",
                 {
-                    "run_dirs": ["/not/read/run_a", "/not/read/run_b"],
+                    "run_dirs": [
+                        "/home/pietl/masterarbeit/data/20260514/1",
+                        "/home/pietl/masterarbeit/data/20260514/2",
+                    ],
                     "compatibility_summary": {
                         "metropolis_common": {
                             "beta": 2.4,
@@ -614,6 +671,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             row = rows[0]
             self.assertEqual(row["analysis_id"], "abc123")
+            self.assertEqual(row["source_path"], "~/masterarbeit/data/20260514/1-2")
             self.assertEqual(row["L"], "24x24x24x64")
             self.assertEqual(row["n_runs"], 2)
             self.assertEqual(row["r0"], 4.0)
@@ -641,6 +699,49 @@ class FinalizeAnalysisTests(unittest.TestCase):
         columns = search_data._finalized_summary_columns(rows)
         self.assertIn("chi_R=T_1.5", columns)
         self.assertNotIn("chi_R=T_1.5", search_data.FINALIZED_SUMMARY_COLUMNS)
+        self.assertIn("source_path", search_data.FINALIZED_SUMMARY_COLUMNS)
+        self.assertNotIn("epsilon2", search_data.FINALIZED_SUMMARY_COLUMNS)
+        self.assertNotIn("n_runs", search_data.FINALIZED_SUMMARY_COLUMNS)
+
+    def test_finalized_table_rounds_values_to_uncertainties(self):
+        row = {
+            "r0": 4.3991963,
+            "r0_err": 0.017930627,
+            "a": 0.11360924,
+            "a_err": 0.00046252487,
+            "gf_t_over_a2": 0.968204,
+            "gf_t_over_a2_err": 0.00014875497,
+            "epsilon_bar": 0.0,
+            "epsilon_bar_err": 0.0,
+        }
+
+        formatted = search_data._format_table_row(
+            row,
+            [
+                "r0",
+                "r0_err",
+                "a",
+                "a_err",
+                "gf_t_over_a2",
+                "gf_t_over_a2_err",
+                "epsilon_bar",
+                "epsilon_bar_err",
+            ],
+        )
+
+        self.assertEqual(
+            formatted,
+            [
+                "4.399",
+                "0.018",
+                "0.1136",
+                "0.0005",
+                "0.96820",
+                "0.00015",
+                "0",
+                "0",
+            ],
+        )
 
     def test_l1_only_data_reports_no_standard_creutz_ratio(self):
         compact = data_organizer.CompactWilsonData(

@@ -41,7 +41,13 @@ from finalized_analysis_helpers import (
     summarize_bootstrap,
     window_label,
 )
-from load_input_yaml import GaugeObservableParams, MetropolisParams, load_params
+from load_input_yaml import (
+    GaugeObservableParams,
+    GradientFlowParams,
+    MetropolisParams,
+    load_gradient_flow_params,
+    load_params,
+)
 
 
 SCHEMA_VERSION = 1
@@ -49,6 +55,9 @@ IGNORED_METRO_FIELDS = {"seed", "nSweep"}
 GROUP_FIELD_ALIASES = {
     "eps1": "epsilon1",
     "eps2": "epsilon2",
+    "gf.dt": "gradient_flow.dt",
+    "gradient.dt": "gradient_flow.dt",
+    "gradient_flow_dt": "gradient_flow.dt",
 }
 FILTER_FIELD_ALIASES = GROUP_FIELD_ALIASES
 DEFAULT_BLOCK_SIZE_SCAN_MIN = 1
@@ -95,6 +104,11 @@ def build_filter_field_map() -> dict[str, tuple[str, Any]]:
         field_map[name] = ("metro", typ)
     for name, typ in get_type_hints(GaugeObservableParams).items():
         field_map[name] = ("gauge", typ)
+    for name, typ in get_type_hints(GradientFlowParams).items():
+        prefixed_name = f"gradient_flow.{name}"
+        field_map[prefixed_name] = ("gradient_flow", typ)
+        if name not in field_map:
+            field_map[name] = ("gradient_flow", typ)
     return field_map
 
 
@@ -140,12 +154,21 @@ def parse_filter_tokens(tokens: list[str] | None) -> dict[str, Any]:
 def run_matches_filter(
     metro: MetropolisParams,
     gauge: GaugeObservableParams,
+    gradient_flow: GradientFlowParams | None,
     criteria: dict[str, Any],
 ) -> bool:
     for name, expected in criteria.items():
         block_name, _ = FILTER_FIELD_MAP[name]
-        obj = metro if block_name == "metro" else gauge
-        actual = getattr(obj, name)
+        if block_name == "metro":
+            obj = metro
+        elif block_name == "gauge":
+            obj = gauge
+        else:
+            obj = gradient_flow
+        if obj is None:
+            return False
+        attr_name = name.split(".", 1)[1] if block_name == "gradient_flow" and "." in name else name
+        actual = getattr(obj, attr_name)
         if isinstance(actual, (list, dict)) and isinstance(expected, str):
             if expected not in str(actual):
                 return False
@@ -339,7 +362,8 @@ def filter_run_directories(run_dirs: list[str], criteria: dict[str, Any]) -> lis
         if not yaml_path.exists():
             continue
         metro, gauge = load_params(str(yaml_path))
-        if run_matches_filter(metro, gauge, criteria):
+        gradient_flow = load_gradient_flow_params(str(yaml_path))
+        if run_matches_filter(metro, gauge, gradient_flow, criteria):
             matches.append(run_dir)
     return matches
 
@@ -347,11 +371,17 @@ def filter_run_directories(run_dirs: list[str], criteria: dict[str, Any]) -> lis
 def build_group_signature(
     metro: MetropolisParams,
     gauge: GaugeObservableParams,
+    gradient_flow: GradientFlowParams | None = None,
     group_by: list[str] | None = None,
 ) -> tuple[tuple[str, Any], ...]:
     metro_fields = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
     gauge_fields = asdict(gauge)
-    combined = {**metro_fields, **gauge_fields}
+    gradient_flow_fields = (
+        {f"gradient_flow.{key}": value for key, value in asdict(gradient_flow).items()}
+        if gradient_flow is not None
+        else {}
+    )
+    combined = {**metro_fields, **gauge_fields, **gradient_flow_fields}
 
     if group_by:
         requested = [canonical_group_field(name) for name in group_by]
@@ -378,7 +408,8 @@ def group_run_directories(
         if not yaml_path.exists():
             raise ValueError(f"Missing input.yaml in {run_dir}")
         metro, gauge = load_params(str(yaml_path))
-        signature = build_group_signature(metro, gauge, group_by=group_by)
+        gradient_flow = load_gradient_flow_params(str(yaml_path))
+        signature = build_group_signature(metro, gauge, gradient_flow, group_by=group_by)
         grouped.setdefault(signature, []).append(run_dir)
 
     return sorted(grouped.items(), key=lambda item: (describe_group_signature(item[0]), item[1]))
@@ -395,25 +426,28 @@ def validate_run_directories(
     if missing:
         raise ValueError(f"Run directories not found: {missing}")
 
-    loaded: list[tuple[str, MetropolisParams, GaugeObservableParams]] = []
+    loaded: list[tuple[str, MetropolisParams, GaugeObservableParams, GradientFlowParams]] = []
     for path in normalized:
         yaml_path = Path(path) / "input.yaml"
         if not yaml_path.exists():
             raise ValueError(f"Missing input.yaml in {path}")
         metro, gauge = load_params(str(yaml_path))
-        loaded.append((path, metro, gauge))
+        gradient_flow = load_gradient_flow_params(str(yaml_path))
+        loaded.append((path, metro, gauge, gradient_flow))
 
-    ref_path, ref_metro, ref_gauge = loaded[0]
+    ref_path, ref_metro, ref_gauge, ref_gradient_flow = loaded[0]
     ref_metro_dict = asdict(ref_metro)
     ref_gauge_dict = asdict(ref_gauge)
+    ref_gradient_flow_dict = asdict(ref_gradient_flow)
     ref_metro_cmp = {k: v for k, v in ref_metro_dict.items() if k not in IGNORED_METRO_FIELDS}
 
     mismatches: list[str] = []
-    for path, metro, gauge in loaded[1:]:
+    for path, metro, gauge, gradient_flow in loaded[1:]:
         metro_cmp = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
         metro_diff = compare_dataclass_dicts(ref_metro_cmp, metro_cmp)
         gauge_diff = compare_dataclass_dicts(ref_gauge_dict, asdict(gauge))
-        if not metro_diff and not gauge_diff:
+        gradient_flow_diff = compare_dataclass_dicts(ref_gradient_flow_dict, asdict(gradient_flow))
+        if not metro_diff and not gauge_diff and not gradient_flow_diff:
             continue
 
         parts = [f"Compatibility mismatch for {path} compared to {ref_path}:"]
@@ -421,6 +455,8 @@ def validate_run_directories(
             parts.append(f"  MetropolisParams.{field}: expected {expected!r}, got {got!r}")
         for field, (expected, got) in gauge_diff.items():
             parts.append(f"  GaugeObservableParams.{field}: expected {expected!r}, got {got!r}")
+        for field, (expected, got) in gradient_flow_diff.items():
+            parts.append(f"  GradientFlowParams.{field}: expected {expected!r}, got {got!r}")
         mismatches.append("\n".join(parts))
 
     if mismatches:
@@ -431,6 +467,7 @@ def validate_run_directories(
         "ignored_metropolis_fields": sorted(IGNORED_METRO_FIELDS),
         "metropolis_common": ref_metro_cmp,
         "gauge_common": ref_gauge_dict,
+        "gradient_flow_common": ref_gradient_flow_dict,
     }
     return ref_metro, ref_gauge, summary
 

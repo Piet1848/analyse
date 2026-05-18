@@ -11,6 +11,7 @@ import numpy as np
 
 from load_input_yaml import (
     GaugeObservableParams,
+    GradientFlowParams,
     MetropolisParams,
     load_gradient_flow_params,
     load_params,
@@ -159,14 +160,35 @@ def save_result(cache_id: str, data: Dict[str, Any]):
         json.dump(data, f, indent=2)
 
 
-def _group_key_from_params(metro: MetropolisParams, gauge: GaugeObservableParams) -> str:
+def _group_key_from_params(
+    metro: MetropolisParams,
+    gauge: GaugeObservableParams,
+    gradient_flow: GradientFlowParams | None = None,
+) -> str:
     metro_dict = asdict(metro)
     for key in GROUP_IGNORE_METRO_FIELDS:
         metro_dict.pop(key, None)
+    if gradient_flow is None:
+        gradient_flow = GradientFlowParams(
+            enabled=False,
+            integrator="",
+            dt=0.0,
+            t_values=[],
+            measure_energy_clover=False,
+            measure_wilson_loop_temporal=False,
+            measure_wilson_loop_mu_nu=False,
+            extract_t0=False,
+            t0_target=0.1,
+            obs_filename="gradient_flow_obs.dat",
+            W_temp_filename="gradient_flow_wtemp.dat",
+            W_mu_nu_filename="gradient_flow_w_mu_nu.dat",
+            t0_filename="gradient_flow_t0.dat",
+        )
 
     payload = {
         "metro": metro_dict,
         "gauge": asdict(gauge),
+        "gradient_flow": asdict(gradient_flow),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
@@ -178,9 +200,10 @@ def _group_key_for_run(path: str) -> Optional[str]:
         return None
     try:
         metro, gauge = load_params(str(yaml_path))
+        gradient_flow = load_gradient_flow_params(str(yaml_path))
     except Exception:
         return None
-    return _group_key_from_params(metro, gauge)
+    return _group_key_from_params(metro, gauge, gradient_flow)
 
 
 def _build_group_index(root: Path) -> Dict[str, List[str]]:

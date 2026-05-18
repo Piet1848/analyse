@@ -5,6 +5,7 @@ Search lattice runs by YAML parameters AND calculated results.
 from __future__ import annotations
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -76,11 +77,10 @@ FIELD_ALIASES = {
 DEFAULT_FINALIZED_ANALYSIS_ROOT = Path("../data/finalized_analysis")
 FINALIZED_SUMMARY_COLUMNS = [
     "analysis_id",
+    "source_path",
     "beta",
     "L",
     "epsilon1",
-    "epsilon2",
-    "n_runs",
     "r0",
     "r0_err",
     "a",
@@ -334,6 +334,45 @@ def _parse_finalized_dir_name(path: Path) -> Dict[str, Any]:
     return parsed
 
 
+def _compact_home(path_text: str) -> str:
+    home = str(Path.home())
+    if path_text == home:
+        return "~"
+    if path_text.startswith(f"{home}/"):
+        return f"~/{path_text[len(home) + 1:]}"
+    return path_text
+
+
+def _format_source_path(run_dirs: Any) -> str:
+    if not isinstance(run_dirs, list) or not run_dirs:
+        return ""
+
+    paths = [Path(str(run_dir)) for run_dir in run_dirs]
+    parents = {path.parent for path in paths}
+    if len(parents) != 1:
+        return ", ".join(_compact_home(str(path)) for path in paths)
+
+    parent = next(iter(parents))
+    names = [path.name for path in paths]
+    numeric_names: list[int] = []
+    for name in names:
+        try:
+            numeric_names.append(int(name))
+        except ValueError:
+            return f"{_compact_home(str(parent))}/{{{','.join(sorted(names))}}}"
+
+    unique_numbers = sorted(set(numeric_names))
+    if len(unique_numbers) != len(numeric_names):
+        return f"{_compact_home(str(parent))}/{{{','.join(str(value) for value in sorted(numeric_names))}}}"
+
+    is_consecutive = unique_numbers == list(range(unique_numbers[0], unique_numbers[-1] + 1))
+    if is_consecutive and len(unique_numbers) > 1:
+        suffix = f"{unique_numbers[0]}-{unique_numbers[-1]}"
+    else:
+        suffix = ",".join(str(value) for value in unique_numbers)
+    return f"{_compact_home(str(parent))}/{suffix}"
+
+
 def _finite_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -394,6 +433,7 @@ def _read_finalized_analysis_row(analysis_dir: Path) -> Optional[Dict[str, Any]]
     row: Dict[str, Any] = {
         "analysis_id": manifest.get("analysis_id") or parsed_name.get("analysis_id") or analysis_dir.name,
         "analysis_dir": str(analysis_dir),
+        "source_path": _format_source_path(run_dirs),
         "created_at": manifest.get("created_at"),
         "updated_at": manifest.get("updated_at"),
         "status": manifest.get("status", {}),
@@ -456,8 +496,69 @@ def _format_table_value(value: Any) -> str:
     return str(value)
 
 
+def _uncertainty_decimal_places(error: float) -> Optional[int]:
+    if not math.isfinite(error) or error <= 0:
+        return None
+
+    exponent = math.floor(math.log10(abs(error)))
+    leading_digit = int(abs(error) / (10 ** exponent))
+    significant_digits = 2 if leading_digit == 1 else 1
+    decimal_places = significant_digits - 1 - exponent
+    if abs(round(error, decimal_places)) >= 10 ** (exponent + 1):
+        decimal_places -= 1
+    return decimal_places
+
+
+def _format_rounded_to_decimal_places(value: float, decimal_places: int) -> str:
+    rounded = round(value, decimal_places)
+    if rounded == 0:
+        rounded = 0.0
+
+    if decimal_places > 0:
+        return f"{rounded:.{decimal_places}f}"
+    return f"{rounded:.0f}"
+
+
+def _format_value_error_pair(value: Any, error: Any) -> Optional[Tuple[str, str]]:
+    if not isinstance(value, (float, int)) or not isinstance(error, (float, int)):
+        return None
+
+    value_float = float(value)
+    error_float = float(error)
+    if not math.isfinite(value_float):
+        return None
+
+    decimal_places = _uncertainty_decimal_places(error_float)
+    if decimal_places is None:
+        return None
+
+    return (
+        _format_rounded_to_decimal_places(value_float, decimal_places),
+        _format_rounded_to_decimal_places(error_float, decimal_places),
+    )
+
+
+def _format_table_row(row: Dict[str, Any], columns: List[str]) -> List[str]:
+    formatted: Dict[str, str] = {}
+    column_set = set(columns)
+
+    for column in columns:
+        if not column.endswith("_err"):
+            continue
+
+        value_column = column[:-4]
+        if value_column not in column_set:
+            continue
+
+        pair = _format_value_error_pair(row.get(value_column), row.get(column))
+        if pair is not None:
+            formatted[value_column], formatted[column] = pair
+
+    return [formatted.get(column, _format_table_value(row.get(column))) for column in columns]
+
+
 def _print_table(rows: List[Dict[str, Any]], columns: List[str]) -> None:
-    table = [[_format_table_value(row.get(column)) for column in columns] for row in rows]
+    table = [_format_table_row(row, columns) for row in rows]
     widths = [len(column) for column in columns]
     for table_row in table:
         for idx, value in enumerate(table_row):
@@ -557,11 +658,10 @@ def search_data(
                 rows,
                 [
                     "analysis_id",
+                    "source_path",
                     "beta",
                     "L",
                     "epsilon1",
-                    "epsilon2",
-                    "n_runs",
                     "updated_at",
                     "analysis_dir",
                 ],
