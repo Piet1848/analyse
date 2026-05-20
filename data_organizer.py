@@ -288,8 +288,11 @@ class CompactWilsonData(FileData):
             for (flow_time, r, t), values in self.wilson_by_flow_pair.items()
             if flow_time is None
         }
-        first = next(iter(self.wilson_by_flow_pair.values()), np.array([], dtype=np.float32))
-        self.n_configurations = int(len(first))
+        lengths = [len(values) for values in self.wilson_by_flow_pair.values()]
+        self.pair_sample_counts = {
+            key: int(len(values)) for key, values in self.wilson_by_flow_pair.items()
+        }
+        self.n_configurations = int(max(lengths, default=0))
 
     def available_flow_times(self) -> list[Optional[float]]:
         return sorted(
@@ -468,32 +471,25 @@ def combine_compact_wilson_data(
     source_name: str = "combined",
 ) -> CompactWilsonData | None:
     flow_pair_order: Optional[List[FlowKey]] = None
-    common_pairs: Optional[set[FlowKey]] = None
+    seen_pairs: set[FlowKey] = set()
     chunks_by_pair: Dict[FlowKey, List[np.ndarray]] = defaultdict(list)
 
     for fd in files:
         if not fd.wilson_by_flow_pair:
             continue
         current_pairs = list(fd.flow_pair_order)
-        current_set = set(current_pairs)
         if flow_pair_order is None:
-            flow_pair_order = current_pairs
-            common_pairs = set(current_pairs)
-        else:
-            previous_common = set(common_pairs)
-            common_pairs &= current_set
-            for pair in previous_common - common_pairs:
-                chunks_by_pair.pop(pair, None)
-
-        active_pairs = common_pairs if common_pairs is not None else current_set
+            flow_pair_order = []
         for pair in current_pairs:
-            if pair in active_pairs:
-                chunks_by_pair[pair].append(fd.wilson_by_flow_pair[pair])
+            if pair not in seen_pairs:
+                flow_pair_order.append(pair)
+                seen_pairs.add(pair)
+            chunks_by_pair[pair].append(fd.wilson_by_flow_pair[pair])
 
-    if not flow_pair_order or not common_pairs:
+    if not flow_pair_order or not chunks_by_pair:
         return None
 
-    final_order = [pair for pair in flow_pair_order if pair in common_pairs]
+    final_order = [pair for pair in flow_pair_order if pair in chunks_by_pair]
     if not final_order:
         return None
 

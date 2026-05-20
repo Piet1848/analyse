@@ -518,33 +518,42 @@ class Calculator:
         if not pending_pairs:
             return
 
-        mean_values, block_sum_matrix, block_lengths = self._build_compact_block_sums(pending_pairs)
-        n_blocks = block_sum_matrix.shape[0]
-        bootstrap_matrix = np.empty((self.n_bootstrap, len(pending_pairs)), dtype=np.float32)
-        rng = np.random.default_rng(self.seed)
+        pairs_by_length: dict[int, list[data_organizer.FlowKey]] = collections.defaultdict(list)
+        for pair in pending_pairs:
+            series = compact_wilson[pair]
+            pairs_by_length[int(len(series))].append(pair)
 
-        for start in range(0, self.n_bootstrap, bootstrap_chunk_size):
-            current_size = min(bootstrap_chunk_size, self.n_bootstrap - start)
-            sampled_blocks = rng.integers(0, n_blocks, size=(current_size, n_blocks))
-            counts = np.zeros((current_size, n_blocks), dtype=np.float64)
-            np.add.at(counts, (np.arange(current_size)[:, None], sampled_blocks), 1.0)
-            total_lengths = counts @ block_lengths
-            bootstrap_matrix[start:start + current_size] = (
-                (counts @ block_sum_matrix) / total_lengths[:, None]
-            ).astype(np.float32, copy=False)
+        for length, length_pairs in sorted(pairs_by_length.items()):
+            if length <= 0:
+                continue
+            mean_values, block_sum_matrix, block_lengths = self._build_compact_block_sums(length_pairs)
+            n_blocks = block_sum_matrix.shape[0]
+            bootstrap_matrix = np.empty((self.n_bootstrap, len(length_pairs)), dtype=np.float32)
+            rng = np.random.default_rng(self.seed)
 
-        for idx, pair in enumerate(pending_pairs):
-            flow_val, r_val, t_val = pair
-            cache_key = make_key("W_R_T", self._cache_params_for_wrt(flow_val, r_val, t_val))
-            var_data = data_organizer.VariableData("W_R_T")
-            var_data.set_value(
-                mean_values[idx],
-                bootstrap_samples=bootstrap_matrix[:, idx],
-                R=r_val,
-                T=t_val,
-                flow_time=flow_val,
-            )
-            self.variables[cache_key] = var_data
+            for start in range(0, self.n_bootstrap, bootstrap_chunk_size):
+                current_size = min(bootstrap_chunk_size, self.n_bootstrap - start)
+                sampled_blocks = rng.integers(0, n_blocks, size=(current_size, n_blocks))
+                counts = np.zeros((current_size, n_blocks), dtype=np.float64)
+                np.add.at(counts, (np.arange(current_size)[:, None], sampled_blocks), 1.0)
+                total_lengths = counts @ block_lengths
+                bootstrap_matrix[start:start + current_size] = (
+                    (counts @ block_sum_matrix) / total_lengths[:, None]
+                ).astype(np.float32, copy=False)
+
+            for idx, pair in enumerate(length_pairs):
+                flow_val, r_val, t_val = pair
+                cache_key = make_key("W_R_T", self._cache_params_for_wrt(flow_val, r_val, t_val))
+                var_data = data_organizer.VariableData("W_R_T")
+                var_data.set_value(
+                    mean_values[idx],
+                    bootstrap_samples=bootstrap_matrix[:, idx],
+                    R=r_val,
+                    T=t_val,
+                    flow_time=flow_val,
+                    n_samples=length,
+                )
+                self.variables[cache_key] = var_data
     
     ### Variable implementations ###
 
@@ -581,7 +590,14 @@ class Calculator:
             block_lengths[sampled_blocks].sum(axis=1)
         ).astype(np.float32, copy=False)
 
-        var_data.set_value(mean_val, bootstrap_samples=bootstrap_means, R=R, T=T, flow_time=key[0])
+        var_data.set_value(
+            mean_val,
+            bootstrap_samples=bootstrap_means,
+            R=R,
+            T=T,
+            flow_time=key[0],
+            n_samples=n_samples,
+        )
         return var_data
     
     @register("V_R")

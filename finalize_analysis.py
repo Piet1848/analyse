@@ -52,12 +52,17 @@ from load_input_yaml import (
 
 SCHEMA_VERSION = 1
 IGNORED_METRO_FIELDS = {"seed", "nSweep"}
+REQUIRED_METRO_FIELDS = {"beta", "L0", "epsilon1", "epsilon2"}
+ALLOWED_GRADIENT_FLOW_FIELDS = {"dt", "t_values"}
 GROUP_FIELD_ALIASES = {
     "eps1": "epsilon1",
     "eps2": "epsilon2",
+    "dt": "gradient_flow.dt",
+    "t_values": "gradient_flow.t_values",
     "gf.dt": "gradient_flow.dt",
     "gradient.dt": "gradient_flow.dt",
     "gradient_flow_dt": "gradient_flow.dt",
+    "gradient_flow_t_values": "gradient_flow.t_values",
 }
 FILTER_FIELD_ALIASES = GROUP_FIELD_ALIASES
 DEFAULT_BLOCK_SIZE_SCAN_MIN = 1
@@ -335,6 +340,54 @@ def freeze_group_value(value: Any) -> Any:
     return value
 
 
+def _jsonable_group_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_jsonable_group_value(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable_group_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable_group_value(val) for key, val in value.items()}
+    return value
+
+
+def _unique_values_for_runs(run_values: dict[str, Any]) -> list[Any]:
+    frozen_seen: dict[Any, Any] = {}
+    for value in run_values.values():
+        frozen = freeze_group_value(value)
+        frozen_seen.setdefault(frozen, value)
+    return [
+        _jsonable_group_value(value)
+        for _, value in sorted(frozen_seen.items(), key=lambda item: repr(item[0]))
+    ]
+
+
+def _varying_field_summary(run_values: dict[str, dict[str, Any]], field_names: set[str]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for field in sorted(field_names):
+        values_by_run = {run_dir: values.get(field) for run_dir, values in run_values.items()}
+        unique_values = _unique_values_for_runs(values_by_run)
+        if len(unique_values) <= 1:
+            continue
+        summary[field] = {
+            "unique_values": unique_values,
+            "values_by_run": {
+                run_dir: _jsonable_group_value(value)
+                for run_dir, value in values_by_run.items()
+            },
+        }
+    return summary
+
+
+def _common_field_summary(run_values: dict[str, dict[str, Any]], field_names: set[str]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for field in sorted(field_names):
+        values_by_run = {run_dir: values.get(field) for run_dir, values in run_values.items()}
+        unique_values = _unique_values_for_runs(values_by_run)
+        if len(unique_values) == 1:
+            summary[field] = unique_values[0]
+    return summary
+
+
 def discover_run_directories(root: str) -> list[str]:
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
@@ -368,28 +421,50 @@ def filter_run_directories(run_dirs: list[str], criteria: dict[str, Any]) -> lis
     return matches
 
 
+def exclude_run_directories(run_dirs: list[str], patterns: list[str] | None) -> list[str]:
+    if not patterns:
+        return sorted(os.path.abspath(path) for path in run_dirs)
+
+    excluded: list[str] = []
+    for run_dir in sorted(os.path.abspath(path) for path in run_dirs):
+        path = Path(run_dir)
+        if any(pattern in run_dir or path.match(pattern) for pattern in patterns):
+            continue
+        excluded.append(run_dir)
+    return excluded
+
+
 def build_group_signature(
     metro: MetropolisParams,
     gauge: GaugeObservableParams,
     gradient_flow: GradientFlowParams | None = None,
     group_by: list[str] | None = None,
+    require_fixed_dt: bool = False,
 ) -> tuple[tuple[str, Any], ...]:
-    metro_fields = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
+    all_metro_fields = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
+    metro_fields = {k: v for k, v in all_metro_fields.items() if k in REQUIRED_METRO_FIELDS}
     gauge_fields = asdict(gauge)
-    gradient_flow_fields = (
+    ignored_gradient_flow_fields = set(ALLOWED_GRADIENT_FLOW_FIELDS)
+    if require_fixed_dt:
+        ignored_gradient_flow_fields.discard("dt")
+    all_gradient_flow_fields = (
         {f"gradient_flow.{key}": value for key, value in asdict(gradient_flow).items()}
         if gradient_flow is not None
         else {}
     )
-    combined = {**metro_fields, **gauge_fields, **gradient_flow_fields}
 
     if group_by:
+        combined = {**all_metro_fields, **gauge_fields, **all_gradient_flow_fields}
         requested = [canonical_group_field(name) for name in group_by]
         missing = [name for name in requested if name not in combined]
         if missing:
             raise ValueError(f"Unknown grouping field(s): {', '.join(missing)}")
         return tuple((name, freeze_group_value(combined[name])) for name in requested)
 
+    gradient_flow_fields = {}
+    if require_fixed_dt and "gradient_flow.dt" in all_gradient_flow_fields:
+        gradient_flow_fields["gradient_flow.dt"] = all_gradient_flow_fields["gradient_flow.dt"]
+    combined = {**metro_fields, **gradient_flow_fields}
     return tuple((name, freeze_group_value(value)) for name, value in sorted(combined.items()))
 
 
@@ -400,6 +475,7 @@ def describe_group_signature(signature: tuple[tuple[str, Any], ...]) -> str:
 def group_run_directories(
     run_dirs: list[str],
     group_by: list[str] | None = None,
+    require_fixed_dt: bool = False,
 ) -> list[tuple[tuple[tuple[str, Any], ...], list[str]]]:
     grouped: dict[tuple[tuple[str, Any], ...], list[str]] = {}
 
@@ -409,7 +485,13 @@ def group_run_directories(
             raise ValueError(f"Missing input.yaml in {run_dir}")
         metro, gauge = load_params(str(yaml_path))
         gradient_flow = load_gradient_flow_params(str(yaml_path))
-        signature = build_group_signature(metro, gauge, gradient_flow, group_by=group_by)
+        signature = build_group_signature(
+            metro,
+            gauge,
+            gradient_flow,
+            group_by=group_by,
+            require_fixed_dt=require_fixed_dt,
+        )
         grouped.setdefault(signature, []).append(run_dir)
 
     return sorted(grouped.items(), key=lambda item: (describe_group_signature(item[0]), item[1]))
@@ -417,6 +499,8 @@ def group_run_directories(
 
 def validate_run_directories(
     run_dirs: list[str],
+    *,
+    require_fixed_dt: bool = False,
 ) -> tuple[MetropolisParams, GaugeObservableParams, dict[str, Any]]:
     if not run_dirs:
         raise ValueError("At least one run directory is required.")
@@ -439,14 +523,30 @@ def validate_run_directories(
     ref_metro_dict = asdict(ref_metro)
     ref_gauge_dict = asdict(ref_gauge)
     ref_gradient_flow_dict = asdict(ref_gradient_flow)
-    ref_metro_cmp = {k: v for k, v in ref_metro_dict.items() if k not in IGNORED_METRO_FIELDS}
+    ref_required_metro_cmp = {k: v for k, v in ref_metro_dict.items() if k in REQUIRED_METRO_FIELDS}
+    ref_gradient_flow_cmp: dict[str, Any] = {}
+    if require_fixed_dt:
+        ref_gradient_flow_cmp["dt"] = ref_gradient_flow_dict.get("dt")
+
+    metro_values_by_run = {ref_path: ref_metro_dict}
+    gauge_values_by_run = {ref_path: ref_gauge_dict}
+    gradient_flow_values_by_run = {ref_path: ref_gradient_flow_dict}
 
     mismatches: list[str] = []
     for path, metro, gauge, gradient_flow in loaded[1:]:
-        metro_cmp = {k: v for k, v in asdict(metro).items() if k not in IGNORED_METRO_FIELDS}
-        metro_diff = compare_dataclass_dicts(ref_metro_cmp, metro_cmp)
-        gauge_diff = compare_dataclass_dicts(ref_gauge_dict, asdict(gauge))
-        gradient_flow_diff = compare_dataclass_dicts(ref_gradient_flow_dict, asdict(gradient_flow))
+        current_metro_dict = asdict(metro)
+        current_gauge_dict = asdict(gauge)
+        current_gradient_flow_dict = asdict(gradient_flow)
+        metro_values_by_run[path] = current_metro_dict
+        gauge_values_by_run[path] = current_gauge_dict
+        gradient_flow_values_by_run[path] = current_gradient_flow_dict
+        metro_cmp = {k: v for k, v in current_metro_dict.items() if k in REQUIRED_METRO_FIELDS}
+        gradient_flow_cmp: dict[str, Any] = {}
+        if require_fixed_dt:
+            gradient_flow_cmp["dt"] = current_gradient_flow_dict.get("dt")
+        metro_diff = compare_dataclass_dicts(ref_required_metro_cmp, metro_cmp)
+        gauge_diff: dict[str, tuple[Any, Any]] = {}
+        gradient_flow_diff = compare_dataclass_dicts(ref_gradient_flow_cmp, gradient_flow_cmp)
         if not metro_diff and not gauge_diff and not gradient_flow_diff:
             continue
 
@@ -462,12 +562,43 @@ def validate_run_directories(
     if mismatches:
         raise ValueError("\n".join(mismatches))
 
+    metro_field_names = set(ref_metro_dict)
+    gauge_field_names = set(ref_gauge_dict)
+    gradient_flow_field_names = set(ref_gradient_flow_dict)
+    common_metropolis_fields = _common_field_summary(metro_values_by_run, metro_field_names)
+    varying_metropolis_fields = _varying_field_summary(metro_values_by_run, metro_field_names)
+    common_gauge_fields = _common_field_summary(gauge_values_by_run, gauge_field_names)
+    varying_gauge_fields = _varying_field_summary(gauge_values_by_run, gauge_field_names)
+    common_gradient_flow_fields = _common_field_summary(
+        gradient_flow_values_by_run,
+        gradient_flow_field_names,
+    )
+    varying_gradient_flow_fields = _varying_field_summary(
+        gradient_flow_values_by_run,
+        gradient_flow_field_names,
+    )
+    gradient_flow_dt_by_run = {
+        run_dir: values.get("dt") for run_dir, values in gradient_flow_values_by_run.items()
+    }
+    gradient_flow_t_values_by_run = {
+        run_dir: _jsonable_group_value(values.get("t_values"))
+        for run_dir, values in gradient_flow_values_by_run.items()
+    }
     summary = {
         "reference_run": ref_path,
         "ignored_metropolis_fields": sorted(IGNORED_METRO_FIELDS),
-        "metropolis_common": ref_metro_cmp,
-        "gauge_common": ref_gauge_dict,
-        "gradient_flow_common": ref_gradient_flow_dict,
+        "required_metropolis_fields": sorted(REQUIRED_METRO_FIELDS),
+        "allowed_gradient_flow_differences": sorted(ALLOWED_GRADIENT_FLOW_FIELDS),
+        "require_fixed_dt": bool(require_fixed_dt),
+        "metropolis_common": common_metropolis_fields,
+        "metropolis_varying": varying_metropolis_fields,
+        "gauge_common": common_gauge_fields,
+        "gauge_varying": varying_gauge_fields,
+        "gradient_flow_common": common_gradient_flow_fields,
+        "gradient_flow_varying": varying_gradient_flow_fields,
+        "gradient_flow_dt_values": _unique_values_for_runs(gradient_flow_dt_by_run),
+        "gradient_flow_dt_by_run": gradient_flow_dt_by_run,
+        "gradient_flow_t_values_by_run": gradient_flow_t_values_by_run,
     }
     return ref_metro, ref_gauge, summary
 
@@ -487,6 +618,7 @@ class FinalizedAnalysisRunner:
         block_size_scan_max: int | None = DEFAULT_BLOCK_SIZE_SCAN_MAX,
         block_size_scan_step: int = DEFAULT_BLOCK_SIZE_SCAN_STEP,
         max_r: int | None = None,
+        require_fixed_dt: bool = False,
         open_plots: bool = True,
         open_plot_func: Callable[[Path], bool] = open_html_plot,
         input_func: Callable[[str], str] = input,
@@ -514,6 +646,7 @@ class FinalizedAnalysisRunner:
         self.max_r = int(max_r) if max_r is not None else None
         if self.max_r is not None and self.max_r < 0:
             raise ValueError("--max-r must be non-negative")
+        self.require_fixed_dt = bool(require_fixed_dt)
         self.block_size_scan_values = (
             sorted({int(value) for value in block_size_scan_values if int(value) >= 1})
             if block_size_scan_values is not None
@@ -526,7 +659,11 @@ class FinalizedAnalysisRunner:
         self.input = input_func
         self.print = print_func
 
-        self.metro, self.gauge, self.compatibility_summary = validate_run_directories(self.run_dirs)
+        self.metro, self.gauge, self.compatibility_summary = validate_run_directories(
+            self.run_dirs,
+            require_fixed_dt=self.require_fixed_dt,
+        )
+        self._print_input_compatibility_summary()
         self.selection_preview_dir = (self.output_root / "_selection_previews" / preview_hash(self.run_dirs)).resolve()
         self.selection_preview_dir.mkdir(parents=True, exist_ok=True)
         self.thermalization_selection_path = self.selection_preview_dir / "thermalization_cuts.json"
@@ -581,6 +718,24 @@ class FinalizedAnalysisRunner:
             f"__{self.analysis_id}"
         )
         return self.output_root / folder_name
+
+    def _print_input_compatibility_summary(self) -> None:
+        dt_values = self.compatibility_summary.get("gradient_flow_dt_values", [])
+        if dt_values:
+            dt_text = ", ".join(format_token(value) for value in dt_values)
+            mode = "fixed" if len(dt_values) == 1 else "varies"
+            self.print(f"Gradient-flow dt ({mode}): {dt_text}")
+        t_values_by_run = self.compatibility_summary.get("gradient_flow_t_values_by_run", {})
+        unique_t_value_sets = _unique_values_for_runs(t_values_by_run) if t_values_by_run else []
+        if unique_t_value_sets:
+            self.print(
+                "Gradient-flow t_values set(s): "
+                f"{len(unique_t_value_sets)} unique list(s); combined summaries use common observed flow times."
+            )
+        varying_metro = self.compatibility_summary.get("metropolis_varying", {})
+        if "nSweep" in varying_metro:
+            values = varying_metro["nSweep"].get("unique_values", [])
+            self.print(f"nSweep varies across runs: {', '.join(format_token(value) for value in values)}")
 
     def _load_saved_thermalization_cuts(self) -> dict[str, int]:
         payload = load_json(self.thermalization_selection_path, default={})
@@ -1739,9 +1894,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Search-data-style YAML parameter filters for --run-root, e.g. beta=2.4 eps1=0.0 L0=24.",
     )
     parser.add_argument(
+        "--exclude",
+        nargs="+",
+        metavar="TEXT_OR_GLOB",
+        help="When using --run-root, exclude run directories whose path contains this text or matches this glob.",
+    )
+    parser.add_argument(
         "--group-by",
         nargs="+",
-        help="Optional field names used to split discovered runs, e.g. eps1 beta L0. Defaults to full compatibility.",
+        help=(
+            "Optional field names used to split discovered runs, e.g. eps1 beta L0. "
+            "By default, runs are grouped by compatible inputs while allowing seed, nSweep, "
+            "gradient_flow.dt, and gradient_flow.t_values to vary."
+        ),
+    )
+    parser.add_argument(
+        "--require-fixed-dt",
+        action="store_true",
+        help="Reject or split combined runs whose GradientFlowParams.dt values differ.",
     )
     parser.add_argument(
         "--min-group-size",
@@ -1835,6 +2005,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Provide run directories or use --run-root.")
     if args.filter and not args.run_root:
         parser.error("--filter can only be used with --run-root.")
+    if args.exclude and not args.run_root:
+        parser.error("--exclude can only be used with --run-root.")
     if args.min_group_size < 1:
         parser.error("--min-group-size must be at least 1.")
 
@@ -1850,13 +2022,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_root:
         run_dirs = discover_run_directories(args.run_root)
         run_dirs = filter_run_directories(run_dirs, filter_criteria)
+        run_dirs = exclude_run_directories(run_dirs, args.exclude)
         if not run_dirs:
             criteria_text = " ".join(args.filter or [])
-            suffix = f" matching filters: {criteria_text}" if criteria_text else ""
+            suffix_parts = []
+            if criteria_text:
+                suffix_parts.append(f"matching filters: {criteria_text}")
+            if args.exclude:
+                suffix_parts.append(f"after exclusions: {' '.join(args.exclude)}")
+            suffix = f" {'; '.join(suffix_parts)}" if suffix_parts else ""
             parser.error(f"No run directories found under {args.run_root}{suffix}.")
         grouped_runs = group_run_directories(
             run_dirs,
             group_by=args.group_by,
+            require_fixed_dt=args.require_fixed_dt,
         )
         grouped_runs = [
             (signature, group_run_dirs)
@@ -1891,6 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
             n_bootstrap=args.n_bootstrap,
             target_force=args.target_force,
             max_r=args.max_r,
+            require_fixed_dt=args.require_fixed_dt,
             block_size_scan_values=block_size_scan_values,
             block_size_scan_min=args.min_block_size,
             block_size_scan_max=args.max_block_size,

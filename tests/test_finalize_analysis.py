@@ -29,6 +29,8 @@ def write_input_yaml(
     seed: int = 1,
     n_sweep: int = 100,
     gradient_dt: float = 0.05,
+    gradient_t_values: list[float] | None = None,
+    w_temp_pairs=None,
 ) -> None:
     payload = {
         "MetropolisParams": {
@@ -53,7 +55,7 @@ def write_input_yaml(
             "measure_wilson_loop_temporal": True,
             "measure_wilson_loop_mu_nu": False,
             "measure_retrace_U": False,
-            "W_temp_L_T_pairs": [[2, "1:4"], [3, "1:4"], [4, "1:4"]],
+            "W_temp_L_T_pairs": [[2, "1:4"], [3, "1:4"], [4, "1:4"]] if w_temp_pairs is None else w_temp_pairs,
             "W_mu_nu_pairs": [],
             "W_Lmu_Lnu_pairs": [],
             "plaquette_filename": "plaquette.out",
@@ -66,7 +68,7 @@ def write_input_yaml(
             "enabled": True,
             "integrator": "rk3",
             "dt": gradient_dt,
-            "t_values": [0.0, 0.25],
+            "t_values": [0.0, 0.25] if gradient_t_values is None else gradient_t_values,
             "measure_energy_clover": True,
             "measure_wilson_loop_temporal": False,
             "measure_wilson_loop_mu_nu": False,
@@ -82,16 +84,24 @@ def write_input_yaml(
         yaml.safe_dump(payload, handle, sort_keys=False)
 
 
-def write_w_temp(run_dir: Path, *, run_offset: float = 0.0) -> None:
+def write_w_temp(
+    run_dir: Path,
+    *,
+    run_offset: float = 0.0,
+    r_values: list[int] | None = None,
+    t_values: list[int] | None = None,
+) -> None:
     A = 0.5
     sigma = 0.2
     B = 0.1
     steps = [0, 1000, 2000, 3000]
+    r_values = [2, 3, 4] if r_values is None else r_values
+    t_values = [1, 2, 3, 4] if t_values is None else t_values
     rows = ["step,L,T,W_temp"]
     for cfg_index, step in enumerate(steps):
-        for r_val in [2, 3, 4]:
+        for r_val in r_values:
             potential = A + sigma * r_val - B / r_val
-            for t_val in [1, 2, 3, 4]:
+            for t_val in t_values:
                 modulation = 1.0 + 0.01 * cfg_index + run_offset
                 value = modulation * np.exp(-potential * t_val)
                 rows.append(f"{step},{r_val},{t_val},{value:.10f}")
@@ -109,6 +119,10 @@ def make_run(
     n_sweep: int = 100,
     run_offset: float = 0.0,
     gradient_dt: float = 0.05,
+    gradient_t_values: list[float] | None = None,
+    w_temp_pairs=None,
+    w_temp_r_values: list[int] | None = None,
+    w_temp_t_values: list[int] | None = None,
 ) -> Path:
     run_dir = base_dir / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -120,8 +134,15 @@ def make_run(
         seed=seed,
         n_sweep=n_sweep,
         gradient_dt=gradient_dt,
+        gradient_t_values=gradient_t_values,
+        w_temp_pairs=w_temp_pairs,
     )
-    write_w_temp(run_dir, run_offset=run_offset)
+    write_w_temp(
+        run_dir,
+        run_offset=run_offset,
+        r_values=w_temp_r_values,
+        t_values=w_temp_t_values,
+    )
     return run_dir
 
 
@@ -297,16 +318,42 @@ class FinalizeAnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"MetropolisParams\.beta"):
                 finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
 
-    def test_validate_run_directories_rejects_gradient_flow_mismatch(self):
+    def test_validate_run_directories_allows_measurement_grid_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", w_temp_pairs=[[2, "1:4"], [3, "1:4"]])
+            run_b = make_run(root, "run_b", seed=2, w_temp_pairs=[[2, "1:6"], [3, "1:6"], [4, "1:6"]])
+
+            _, _, summary = finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
+
+            self.assertIn("W_temp_L_T_pairs", summary["gauge_varying"])
+            self.assertAlmostEqual(summary["metropolis_common"]["beta"], 2.4)
+
+    def test_validate_run_directories_allows_gradient_flow_dt_and_t_values_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_dt=0.05, gradient_t_values=[0.0, 0.25])
+            run_b = make_run(root, "run_b", seed=2, gradient_dt=0.25, gradient_t_values=[0.0, 0.5])
+
+            _, _, summary = finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
+
+            self.assertEqual(summary["gradient_flow_dt_values"], [0.05, 0.25])
+            self.assertIn("dt", summary["gradient_flow_varying"])
+            self.assertIn("t_values", summary["gradient_flow_varying"])
+
+    def test_validate_run_directories_can_require_fixed_gradient_flow_dt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_a = make_run(root, "run_a", gradient_dt=0.05)
             run_b = make_run(root, "run_b", seed=2, gradient_dt=0.25)
 
             with self.assertRaisesRegex(ValueError, r"GradientFlowParams\.dt"):
-                finalize_analysis.validate_run_directories([str(run_a), str(run_b)])
+                finalize_analysis.validate_run_directories(
+                    [str(run_a), str(run_b)],
+                    require_fixed_dt=True,
+                )
 
-    def test_group_run_directories_splits_by_gradient_flow_dt(self):
+    def test_group_run_directories_combines_gradient_flow_dt_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_a = make_run(root, "run_a", gradient_dt=0.05)
@@ -315,6 +362,37 @@ class FinalizeAnalysisTests(unittest.TestCase):
 
             groups = finalize_analysis.group_run_directories(
                 finalize_analysis.discover_run_directories(str(root)),
+            )
+
+            grouped_paths = [paths for _, paths in groups]
+            self.assertEqual(
+                grouped_paths,
+                [sorted([str(run_a.resolve()), str(run_b.resolve()), str(run_c.resolve())])],
+            )
+
+    def test_group_run_directories_combines_measurement_grid_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", w_temp_pairs=[[2, "1:4"], [3, "1:4"]])
+            run_b = make_run(root, "run_b", seed=2, w_temp_pairs=[[2, "1:6"], [3, "1:6"], [4, "1:6"]])
+
+            groups = finalize_analysis.group_run_directories(
+                finalize_analysis.discover_run_directories(str(root)),
+            )
+
+            grouped_paths = [paths for _, paths in groups]
+            self.assertEqual(grouped_paths, [sorted([str(run_a.resolve()), str(run_b.resolve())])])
+
+    def test_group_run_directories_splits_by_gradient_flow_dt_when_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_dt=0.05)
+            run_b = make_run(root, "run_b", seed=2, gradient_dt=0.05)
+            run_c = make_run(root, "run_c", seed=3, gradient_dt=0.25)
+
+            groups = finalize_analysis.group_run_directories(
+                finalize_analysis.discover_run_directories(str(root)),
+                require_fixed_dt=True,
             )
 
             grouped_paths = [paths for _, paths in groups]
@@ -347,6 +425,19 @@ class FinalizeAnalysisTests(unittest.TestCase):
             )
 
             self.assertEqual(matches, sorted([str(run_a.resolve()), str(run_b.resolve())]))
+
+    def test_exclude_run_directories_filters_path_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            keep = make_run(root / "20260515", "1")
+            drop = make_run(root / "20260514_fast", "1", seed=2)
+
+            filtered = finalize_analysis.exclude_run_directories(
+                [str(keep), str(drop)],
+                ["20260514_fast"],
+            )
+
+            self.assertEqual(filtered, [str(keep.resolve())])
 
     def test_custom_thermalization_threads_into_loader(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,6 +486,29 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     str(run_b.resolve()): 2500,
                 },
             )
+
+    def test_mixed_wilson_loop_merge_keeps_union_with_per_pair_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", w_temp_r_values=[2, 3], w_temp_t_values=[1, 2])
+            run_b = make_run(root, "run_b", seed=2, w_temp_r_values=[2, 3, 4], w_temp_t_values=[1, 2])
+
+            combined, metadata = run_evaluation._load_combined_w_temp(
+                [str(run_a), str(run_b)],
+                load_workers=1,
+                thermalization_steps=1500,
+            )
+
+            self.assertIsNotNone(combined)
+            assert combined is not None
+            self.assertIn((None, 4, 1), combined.wilson_by_flow_pair)
+            self.assertEqual(len(combined.wilson_by_flow_pair[(None, 2, 1)]), 4)
+            self.assertEqual(len(combined.wilson_by_flow_pair[(None, 4, 1)]), 2)
+            self.assertEqual(metadata["wilson_loop_sample_counts"]["none,2,1"], 4)
+            self.assertEqual(metadata["wilson_loop_sample_counts"]["none,4,1"], 2)
+            calc = Calculator(combined, n_bootstrap=8, step_size=1)
+            calc.prime_w_rt_cache(pairs=[(2, 1), (4, 1)])
+            self.assertTrue(np.isfinite(calc.get_variable("W_R_T", R=4, T=1).get()))
 
     def test_gradient_flow_summary_trims_unequal_flow_time_lengths(self):
         flow_data = {

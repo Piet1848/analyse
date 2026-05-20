@@ -930,9 +930,25 @@ def _load_combined_w_temp(
     }
 
     if combined is not None:
-        n_configurations_after_cut = getattr(combined, "n_configurations", 0)
+        pair_sample_counts = getattr(combined, "pair_sample_counts", {})
+        sample_lengths = [int(value) for value in pair_sample_counts.values()]
+        n_configurations_after_cut = int(max(sample_lengths, default=getattr(combined, "n_configurations", 0)))
+
+        def format_flow_key(flow_time: float | None, r_val: int, t_val: int) -> str:
+            flow_text = "none" if flow_time is None else f"{float(flow_time):g}"
+            return f"{flow_text},{int(r_val)},{int(t_val)}"
+
         metadata["n_configurations_after_cut"] = n_configurations_after_cut
-        metadata["n_samples_after_cut"] = n_configurations_after_cut * len(getattr(combined, "flow_pair_order", []))
+        metadata["min_configurations_per_wilson_loop"] = int(min(sample_lengths, default=0))
+        metadata["max_configurations_per_wilson_loop"] = int(max(sample_lengths, default=0))
+        metadata["n_samples_after_cut"] = int(sum(sample_lengths))
+        metadata["wilson_loop_sample_counts"] = {
+            format_flow_key(flow_time, r_val, t_val): int(count)
+            for (flow_time, r_val, t_val), count in sorted(
+                pair_sample_counts.items(),
+                key=lambda item: (-1.0 if item[0][0] is None else float(item[0][0]), item[0][1], item[0][2]),
+            )
+        }
         metadata["available_wilson_flow_times"] = [
             None if value is None else float(value)
             for value in combined.available_flow_times()
