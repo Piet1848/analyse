@@ -44,9 +44,13 @@
 \maketitle
 
 \begin{abstract}
-This thesis investigates whether and how the continuum limit of a lattice gauge theory is affected by small explicit violations of gauge invariance. The study [...] numerical measurements of Wilson loops, Creutz ratios,
- the static potential, the Sommer scale, and related scaling observables. The central goal is to determine
- whether gauge-breaking effects vanish, persist, or modify the extrapolation toward the continuum limit as the lattice spacing is reduced.
+This thesis investigates whether and how the continuum limit of a lattice gauge
+theory is affected by small explicit violations of gauge invariance. The study
+combines theoretical scaling arguments with numerical measurements of Wilson
+loops, Creutz ratios, the static potential, the Sommer scale, and related
+dimensionless observables. The central goal is to determine whether
+gauge-breaking effects vanish, persist, or modify the extrapolation toward the
+continuum limit as the lattice spacing is reduced.
 \end{abstract}
 
 \tableofcontents
@@ -64,19 +68,59 @@ This thesis investigates whether and how the continuum limit of a lattice gauge 
 \end{description}
 
 \chapter{Introduction}
-\section{Motivation}
-Explain why gauge invariance is normally central in lattice gauge theory and why controlled violations are relevant. Possible motivations include numerical robustness, effective descriptions, regulator artifacts, quantum simulation errors, or imperfect implementation of gauge constraints.
+\label{chap:introduction}
 
-\section{Research Question}
-State the main question precisely:
+\section{Context and Problem}
+Gauge invariance is one of the defining structural principles of lattice gauge
+theory. In Wilson's formulation it is preserved exactly at nonzero lattice
+spacing, which strongly constrains the allowed lattice artifacts and supports a
+controlled approach to the continuum limit. In practical and generalized
+settings, however, gauge invariance may be only approximate. Small explicit
+violations can arise from regulator artifacts, effective descriptions,
+algorithmic imperfections, or imperfect implementations of gauge constraints.
+
+The central problem of this thesis is therefore not whether exact gauge
+invariance is useful, but how robust the continuum limit is when the lattice
+theory is perturbed by a controlled, small gauge-breaking deformation. This
+requires a comparison between the standard gauge-invariant theory and deformed
+ensembles along a sequence of lattice spacings.
+
+\section{Research Gap}
+The theoretical expectation depends on the scaling character of the
+gauge-breaking deformation. If the deformation acts like an irrelevant lattice
+artifact, its effect should vanish as the lattice spacing is reduced. If it
+contains a relevant component, it may change the continuum theory unless it is
+tuned away. The numerical study must therefore distinguish a harmless change of
+cutoff effects from a genuine shift of continuum observables.
+
+\section{Aim and Research Questions}
+The aim of the thesis is to test this distinction numerically for pure
+$\SU(2)$ lattice gauge theory with a small explicit gauge-breaking deformation.
+The guiding research question is:
 \begin{quote}
   Does a small explicit breaking of gauge invariance disappear in the continuum limit, or does it alter the continuum extrapolation of physical observables?
 \end{quote}
 
 \section{Strategy and Main Observables}
-Introduce the numerical strategy and the observables used to probe the continuum limit: Wilson loops, Creutz ratios, the static potential $V(R)$, $\rzero$, and $\stringtension$.
+The numerical strategy is to compare gauge-invariant and gauge-broken ensembles
+through observables that have a well-defined continuum interpretation. The main
+observables are temporal Wilson loops, Creutz ratios, the static potential
+$V(R)$, the Sommer scale $\rzero$, and the string tension $\stringtension$ or
+dimensionless combinations derived from it. These quantities provide both scale
+setting information and direct probes of the continuum extrapolation.
 
-\chapter{Theoretical Background}
+\section{Structure of the Thesis}
+Chapter~\ref{chap:theoretical-background} summarizes the theoretical
+background needed for the analysis. Chapter~\ref{chap:small-breaking} derives
+the concrete research gap and formulates the gauge-breaking framework and
+working hypotheses. Chapter~\ref{chap:methodology} describes the simulation
+setup, observable extraction, continuum extrapolation, and uncertainty
+estimation. Chapter~\ref{chap:results} presents the numerical results.
+Chapter~\ref{chap:discussion} interprets the findings in relation to the
+research question and the theoretical expectations. The final chapter
+summarizes the conclusions and identifies directions for further research.
+
+\chapter{Scientific Background and Theoretical Framework}
 \label{chap:theoretical-background}
 
 The aim of this chapter is to collect the theoretical ingredients needed for the
@@ -247,7 +291,13 @@ where $N_\mu$ is the number of lattice points in direction $\mu$. Therefore two
 limits are conceptually distinct: the continuum limit $\latspacing \to 0$ and
 the infinite-volume limit $L_\mu \to \infty$. In practice, one tries to choose
 volumes large enough that finite-volume effects are smaller than the statistical
-and systematic errors relevant for the analysis. [in simulations in this thesis I use Lµ=const for the space directions and Nµ const for time direction]
+and systematic errors relevant for the analysis. In the simulation campaign of
+this thesis, spatial volumes are organized to keep the physical spatial extent
+approximately fixed where possible, while the temporal extent is chosen as part
+of the ensemble definition and analysis strategy.
+[Check against the actual simulation setup: in the simulations in this thesis I
+use $L_\mu=\mathrm{const}$ for the spatial directions and
+$N_\mu=\mathrm{const}$ for the time direction.]
 
 \subsection{Link Variables and Plaquettes}
 \label{subsec:link-variables-plaquettes}
@@ -306,7 +356,9 @@ For smooth fields, the plaquette has the continuum expansion
   \right].
 \end{equation}
 Thus the plaquette is the lattice object from which the continuum field
-strength is recovered. [but not really used in this thesis, so maybe remove this point]
+strength is recovered. Although the later analysis focuses on Wilson loops,
+static potentials, and Creutz ratios, this relation explains why the Wilson
+plaquette action reproduces Yang--Mills theory in the continuum limit.
 
 \subsection{Wilson Gauge Action}
 \label{subsec:wilson-gauge-action}
@@ -443,20 +495,19 @@ Continuum extrapolations compare observables at fixed physical
 conditions, not merely at fixed lattice indices. For observables derived from
 Wilson loops this means that a loop size $R$ on a coarse ensemble and the same
 integer $R$ on a fine ensemble do not represent the same physical distance.
-Therefor instead compare at fixed ratios such as $r/\rzero$ or fixed
-dimensionless distances, a reference scale is used.
-[This point is emphasized in recent]
-work on controlled continuum extrapolations of Wilson-loop observables, where
-Creutz ratios are used as finite continuum quantities and fitted at fixed
-physical distance \cite{Risch2024SmearingContinuum}.
+Therefore one should compare at fixed ratios such as $r/\rzero$ or other fixed
+dimensionless distances. This point is emphasized in recent work on controlled
+continuum extrapolations of Wilson-loop observables, where Creutz ratios are
+used as finite continuum quantities and fitted at fixed physical distance
+\cite{Risch2024SmearingContinuum}.
 
 The renormalization-group interpretation is central for the present thesis.
 Different lattice actions can lead to the same continuum theory if they differ
 only by irrelevant operators. In that case they lie in the same universality
 class. By contrast, a relevant deformation changes the long-distance theory
-unless its coefficient is tuned to zero. [A gauge-breaking term must therefore be
+unless its coefficient is tuned to zero. A gauge-breaking term must therefore be
 classified by its effect on long-distance, gauge-invariant observables as
-$\latspacing \to 0$. (not written well yet)] The numerical analysis in later chapters tests this
+$\latspacing \to 0$. The numerical analysis in later chapters tests this
 question directly.
 
 \section{Static Potential and Confinement}
@@ -780,69 +831,169 @@ This quantity is useful because it is independent of the arbitrary choice of
 lattice units. Agreement of such dimensionless quantities along a sequence of
 lattice spacings is a central test of scaling toward a common continuum limit.
 
-\chapter{Small Breaking of Gauge Invariance}
+\chapter{Research Gap and Gauge-Breaking Framework}
+\label{chap:small-breaking}
+
+\section{Research Gap Derived from the Background}
+The background chapter establishes the theoretical role of exact lattice gauge
+invariance and the observables used to monitor the continuum limit. The open
+question for the present work is how a controlled violation of this symmetry
+enters the scaling analysis. The deformation must be specified at the level of
+the lattice action or update rule, and its effect must then be tested through
+dimensionless observables that can be compared across lattice spacings.
+
 \section{Definition of the Gauge-Breaking Deformation}
-Define the modified lattice action or update rule used in the simulations. Specify the breaking parameters, for example $\eps_1$ and $\eps_2$, and explain which gauge transformations are no longer exact symmetries.
+Define the modified lattice action or update rule used in the simulations.
+Specify the breaking parameters, for example $\eps_1$ and $\eps_2$, and explain
+which gauge transformations are no longer exact symmetries.
 
 \section{Symmetry and Scaling Expectations}
 \subsection{Relevant, Marginal, and Irrelevant Breaking Terms}
+Classify the deformation in renormalization-group language and state which
+scaling behavior would be expected for each case.
+
 \subsection{Possible Restoration of Gauge Invariance}
+Explain under which conditions gauge-invariant observables can approach the
+same continuum limit even when gauge invariance is broken at finite lattice
+spacing.
+
 \subsection{Expected Dependence on Breaking Strength and Lattice Spacing}
+State the expected dependence on $\eps_1$, $\eps_2$, and $\latspacing$, and use
+this expectation to motivate the fit forms introduced in the methodology
+chapter.
 
 \section{Working Hypotheses}
-List the concrete hypotheses tested numerically:
+The numerical analysis tests the following hypotheses:
 \begin{enumerate}
   \item Gauge-invariant observables approach the same continuum values for sufficiently small $\eps$.
   \item Gauge-breaking effects scale to zero with a measurable power of $\latspacing$ or $\eps$.
   \item Above a threshold in $\eps$, continuum extrapolations become unstable or incompatible with the gauge-invariant limit.
 \end{enumerate}
 
-\chapter{Numerical Setup}
-\section{Simulation Parameters}
-Describe the gauge group, lattice volumes, coupling range, update algorithm, thermalization strategy, number of sweeps, and stored observables.
+\chapter{Methodological Approach}
+\label{chap:methodology}
 
-\section{Ensemble Organization}
-Explain how ensembles are grouped by common physical and algorithmic parameters. State which parameters are varied in the continuum study and which are held fixed.
+\section{Simulation Setup and Parameters}
 
-\section{Thermalization and Autocorrelations}
+The gauge-field ensembles were generated for pure $\SU(2)$ lattice gauge theory
+on four-dimensional hypercubic lattices. Each ensemble is specified by an
+\texttt{input.yaml} file, which contains the lattice geometry
+$N_0\times N_1\times N_2\times N_3$, the bare coupling $\beta$, the
+gauge-breaking parameters $\eps_1$ and $\eps_2$, the Metropolis update
+parameters, and the measurement setup. The simulations use the Wilson gauge
+action supplemented by the gauge-breaking deformation introduced in
+Chapter~\ref{chap:small-breaking}. Gauge configurations are generated with a
+local Metropolis algorithm. One sweep consists of updating all link variables of
+the lattice, with \texttt{nHits} Metropolis proposals per link. The proposal
+size is controlled by the parameter \texttt{delta}. The main bare parameters
+varied in the simulation campaign are the coupling $\beta$, which controls the
+lattice spacing, and the breaking strength $\eps_1$. The parameter $\eps_2$ is
+kept at zero unless stated otherwise. Measurements are performed after fixed
+sweep intervals and include the plaquette, the average link trace, and temporal
+Wilson loops. The temporal Wilson loops are measured for selected spatial and
+temporal extents $(R,T)$ and are written to \texttt{W\_temp.out}; these data form
+the basis for the extraction of the static potential, Creutz ratios, and scale
+setting quantities.
+
+\section{Ensemble Organization and Fixed-Physics Logic}
+Explain how ensembles are grouped by common physical and algorithmic
+parameters. State which parameters are varied in the continuum study and which
+are held fixed. The organizing principle is that comparisons across $\beta$
+should be made at fixed physical conditions as far as the available data allow,
+rather than at fixed lattice indices alone.
+
+\section{Thermalization, Autocorrelations, and Bootstrap}
 \subsection{Thermalization Cuts}
+Describe how the initial non-equilibrated part of each Markov chain is
+identified and removed before combining runs.
+
 \subsection{Integrated Autocorrelation Time}
+Estimate or monitor autocorrelation times for representative observables in
+order to choose measurement spacing and bootstrap block lengths.
+
 \subsection{Bootstrap Blocking}
 
-\section{Analysis Pipeline}
-Describe the analysis code and reproducibility workflow. Include the path from raw measurements to final observables:
-\begin{enumerate}
-  \item Load simulation metadata from \texttt{input.yaml}.
-  \item Read Wilson-loop and observable measurements.
-  \item Apply thermalization cuts.
-  \item Estimate uncertainties with bootstrap resampling.
-  \item Extract $V(R)$, $\creutz$, $\rzero$, and related quantities.
-  \item Aggregate ensembles for continuum and breaking-strength comparisons.
-\end{enumerate}
+The measurements after thermalization are still not statistically independent,
+because consecutive configurations are generated by a Markov chain. A naive
+bootstrap over individual measurements would therefore underestimate the
+statistical error. To account for this, the ordered measurement history is
+divided into contiguous blocks of fixed length \(b\) in simulation time. The
+bootstrap samples are then generated by drawing these blocks with replacement
+and averaging over the resampled history. Unless stated otherwise, the
+statistical errors quoted in this work use \(N_{\mathrm{boot}}=1000\) bootstrap
+replicas.
 
-\chapter{Extraction of Physical Observables}
-\section{Wilson Loop Analysis}
-\subsection{Effective Mass Plateaus}
-\subsection{Choice of Fit Windows}
-\subsection{Systematic Uncertainty from Fit Ranges}
+The block length must be large compared with the autocorrelation time of the
+observables used in the analysis. If \(b\) is too small, correlations remain
+between the resampled data and the error estimate is biased downward. If \(b\)
+is too large, the number of available blocks becomes small and the bootstrap
+estimate becomes noisy. In practice, several block sizes are compared and the
+chosen value is taken from the region where the estimated errors are stable
+under further increases of \(b\).
 
-\section{Static Potential}
-\subsection{Potential Extraction}
-\subsection{Cornell-Type Fits}
-\subsection{Force and Sommer Scale}
+The same bootstrap samples are propagated through the nonlinear analysis steps.
+Wilson loops are resampled first, and derived quantities such as effective
+potentials, the static potential \(V(R)\), Creutz ratios, and the Sommer scale
+are recomputed for each bootstrap replica. This preserves correlations between
+quantities derived from the same ensemble and gives the statistical
+uncertainties used in the later continuum analysis.
 
-\section{Creutz Ratio Analysis}
-\subsection{Definition and Interpretation}
-\subsection{Large-Time Behavior}
-\subsection{Relation to the String Tension}
+\section{Analysis Pipeline and Data Reduction}
+The final analysis starts from the individual simulation runs and groups
+together runs with the same base parameters, in particular the same
+$\beta$, lattice size, $\eps_1$, and $\eps_2$. Runs in such a group differ only
+by statistical details such as the random seed or the total number of sweeps and
+are treated as independent Markov chains for the same ensemble.
 
-\section{Scale Setting}
-\subsection{Determination of the Sommer Scale in Lattice Units}
-\subsection{Alternative Scale Estimates}
-\subsection{Consistency Checks}
+For each input run the early Monte Carlo history is inspected before combining
+the data. In practice, Wilson loops and simple observables are plotted as a
+function of the simulation step. A thermalization cutoff is chosen from these
+plots. Measurements before this cutoff are discarded, and the remaining
+measurements from all runs in the group are combined into one data set.
 
-\chapter{Continuum Extrapolation Method}
-\section{Choice of Continuum Variable}
+The combined post-thermalization data are then used to estimate the Wilson
+loops $W(R,T)$ and their statistical uncertainties. Errors are obtained by a
+blocked bootstrap, with a block size chosen large enough to reduce the effect of
+autocorrelations. From the Wilson loops, effective masses are formed and fit
+windows in $T$ are selected to extract the static potential $V(R)$.
+
+The finalized potential points are fitted with a Cornell-type ansatz to obtain
+the Sommer scale $\rzero/\latspacing$. This scale is then used to form the
+dimensionless lattice spacing
+\begin{equation}
+  \hat a = \frac{\latspacing}{\rzero}
+\end{equation}
+and the rescaled breaking parameter
+\begin{equation}
+  \bar\eps =
+  \frac{\eps_1}{\beta}
+  \left(\frac{\rzero}{\latspacing}\right)^2 .
+\end{equation}
+Creutz ratios and available gradient-flow observables are evaluated from the
+same combined ensemble. The resulting finalized ensemble summaries are the
+inputs for the later comparison across different $\beta$ values and breaking
+strengths.
+
+\section{Extraction of Physical Observables}
+\subsection{Wilson-Loop Analysis}
+Describe the effective-mass plateaus, the choice of temporal fit windows, and
+the systematic uncertainty associated with varying those windows.
+
+\subsection{Static Potential}
+Describe the potential extraction, Cornell-type fits, force determination, and
+Sommer-scale extraction.
+
+\subsection{Creutz-Ratio Analysis}
+Define the Creutz-ratio observables used in the numerical analysis, explain
+their large-time interpretation, and state how they are related to the string
+tension.
+
+\subsection{Scale Setting}
+Summarize the determination of the Sommer scale in lattice units, possible
+alternative scale estimates, and consistency checks.
+
+\section{Continuum Extrapolation and Scaling Tests}
+\subsection{Choice of Continuum Variable}
 The primary continuum variable is chosen to be the measured dimensionless
 lattice spacing
 \begin{equation}
@@ -874,7 +1025,7 @@ regime; division by $\latspacing^2$ and multiplication by $\rzero^2$ converts it
 to a quantity with a finite physical continuum limit. The same logic applies to
 the force extracted from the static potential.
 
-\section{Fixed-Physics Trajectories}
+\subsection{Fixed-Physics Trajectories}
 Ensembles at different $\beta$ values are compared along trajectories where the
 physical volume and the dimensionless analysis point are kept as fixed as the
 available data allow. In practice this means comparing observables at common
@@ -891,8 +1042,11 @@ for example $\eps\propto \latspacing^q$, the fit must instead include this
 scaling explicitly. The central diagnostic is whether the broken and unbroken
 data approach a common continuum value.
 
-\section{Fit Ansatz}
-\subsection{Gauge-Invariant Baseline}
+\subsection{Fit Ansatz}
+The fit strategy compares a gauge-invariant baseline with combined
+lattice-spacing and breaking-dependence models.
+
+\noindent\textbf{Gauge-invariant baseline.}
 For the gauge-invariant ensembles, a minimal continuum ansatz for a
 dimensionless observable $\hat O$ is
 \begin{equation}
@@ -912,7 +1066,8 @@ as a fit-systematic variation. The default fit should be stable under removing
 the coarsest lattice spacing and under modest changes of the physical-distance
 range used for the observable.
 
-\subsection{Combined Lattice-Spacing and Breaking Dependence}
+\medskip
+\noindent\textbf{Combined lattice-spacing and breaking dependence.}
 A useful shared-intercept test is
 \begin{equation}
   \hat O(\hat a,\eps)
@@ -963,15 +1118,16 @@ continuum observable. In the present gauge-breaking problem there is no
 guarantee of a shared intercept, so Eqs.~\eqref{eq:shared-intercept-breaking-fit}
 and \eqref{eq:separate-intercept-breaking-fit} are both part of the analysis.
 
-\section{Uncertainty Budget}
-\subsection{Statistical Errors}
+\subsection{Uncertainty Budget}
+\noindent\textbf{Statistical errors.}
 Statistical errors are obtained from blocked bootstrap samples. The block size
 is chosen large enough to reduce residual autocorrelation effects in the saved
 Markov-chain history. Derived observables such as Creutz ratios, Sommer scales,
 and continuum-fit parameters are recomputed inside the bootstrap whenever
 possible, so nonlinear error propagation is captured by the resampling.
 
-\subsection{Fit-Window and Interpolation Systematics}
+\medskip
+\noindent\textbf{Fit-window and interpolation systematics.}
 Wilson-loop observables depend on analysis choices: the temporal range used for
 effective-potential plateaus, the loop sizes included in Creutz-ratio summaries,
 and the interpolation used to compare fixed physical distances. These choices
@@ -979,7 +1135,8 @@ are varied to estimate systematic effects. For Creutz ratios, short distances
 are most vulnerable to cutoff and breaking artifacts, while long distances are
 most vulnerable to statistical noise.
 
-\subsection{Finite-Volume and Continuum-Fit Systematics}
+\medskip
+\noindent\textbf{Finite-volume and continuum-fit systematics.}
 Finite-volume effects are monitored by comparing ensembles with similar
 $\hat a$ and $\eps$ but different physical volumes when available. Continuum-fit
 systematics are estimated by changing the fit ansatz, removing the coarsest
@@ -988,7 +1145,16 @@ the fitted range. Non-monotonic behavior or strong shifts of the intercept under
 reasonable fit variations are treated as evidence that the available lattice
 spacings are not yet in a controlled scaling regime.
 
+\section{Computational Environment}
+The simulations were carried out on the QBig cluster. Most production runs were
+performed on nodes 13--17 equipped with NVIDIA P100 GPUs. Additional and faster
+runs were performed on nodes 18 and 19 equipped with NVIDIA A100 GPUs. The GPU
+type affects the wall-clock runtime but not the generated Markov-chain ensemble,
+provided that the same action, random seed handling, and update algorithm are
+used.
+
 \chapter{Results}
+\label{chap:results}
 \section{Thermalization and Data Quality}
 Insert representative thermalization histories and autocorrelation estimates.
 
@@ -997,13 +1163,28 @@ Present the $\eps=0$ results for $\wilsonloop$, $V(R)$, $\rzero$, and $\stringte
 
 \section{Dependence on Gauge-Breaking Strength}
 \subsection{Observable Shifts at Fixed Coupling}
+Report how each observable changes with $\eps_1$ at fixed $\beta$ and fixed
+lattice geometry.
+
 \subsection{Scaling of Shifts with Breaking Strength}
+Fit or summarize whether the shifts are linear, quadratic, or nonlinear in the
+breaking strength within the accessible range.
+
 \subsection{Thresholds or Nonlinear Behavior}
+Identify any breaking strengths for which the data no longer follow the
+small-deformation pattern assumed in the scaling analysis.
 
 \section{Continuum Limit at Fixed Breaking}
 \subsection{Continuum Extrapolations for Each Breaking Strength}
+Present continuum fits separately for each investigated breaking strength.
+
 \subsection{Comparison with the Gauge-Invariant Limit}
+Compare the extrapolated values with the $\eps=0$ baseline and state whether
+the intercepts are statistically compatible.
+
 \subsection{Stability Under Fit Variations}
+Show how the continuum conclusions change when fit ranges, lattice spacings,
+and systematic variants are modified.
 
 \section{Combined Scaling Analysis}
 Fit the dependence on both lattice spacing and gauge-breaking parameter. State whether the data support restoration of gauge invariance in the continuum limit.
@@ -1012,11 +1193,13 @@ Fit the dependence on both lattice spacing and gauge-breaking parameter. State w
 Collect checks that are not part of the primary result but constrain the interpretation.
 
 \chapter{Discussion}
+\label{chap:discussion}
 \section{Interpretation of the Continuum Limit}
 Discuss whether small gauge breaking behaves like an irrelevant lattice artifact, a relevant deformation, or a source of uncontrolled continuum bias.
 
 \section{Comparison with Theoretical Expectations}
-Relate the numerical findings to the hypotheses from Chapter~3.
+Relate the numerical findings to the hypotheses from
+Chapter~\ref{chap:small-breaking}.
 
 \section{Limitations}
 Discuss limits from statistics, accessible lattice spacings, finite volume, fit-systematic control, and the specific form of gauge breaking studied.
@@ -1025,6 +1208,7 @@ Discuss limits from statistics, accessible lattice spacings, finite volume, fit-
 Explain what the result means for simulations or formulations where gauge invariance is only approximate.
 
 \chapter{Conclusion and Outlook}
+\label{chap:conclusion}
 \section{Summary of Findings}
 State the central quantitative conclusions.
 
