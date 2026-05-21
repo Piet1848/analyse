@@ -784,7 +784,7 @@ class FinalizedAnalysisRunner:
         if unique_t_value_sets:
             self.print(
                 "Gradient-flow t_values set(s): "
-                f"{len(unique_t_value_sets)} unique list(s); combined summaries use common observed flow times."
+                f"{len(unique_t_value_sets)} unique list(s); combined summaries use all observed flow times."
             )
         varying_metro = self.compatibility_summary.get("metropolis_varying", {})
         if "nSweep" in varying_metro:

@@ -328,7 +328,7 @@ def _load_single_gradient_flow_obs(
 
     grouped: Dict[float, Dict[str, list[float]]] = {}
     for t_val, e_val, t2e_val in zip(t_values, ehat, t2e):
-        key = float(round(float(t_val), 12))
+        key = float(f"{float(t_val):.7g}")
         row = grouped.setdefault(key, {"Ehat_clover": [], "t2E_clover": []})
         row["Ehat_clover"].append(float(e_val))
         row["t2E_clover"].append(float(t2e_val))
@@ -359,7 +359,6 @@ def _load_combined_gradient_flow_obs(
 
     runs_with_flow = 0
     target = None
-    common_times: set[float] | None = None
     chunks: Dict[float, Dict[str, list[np.ndarray]]] = {}
 
     for run_path in run_paths:
@@ -373,16 +372,12 @@ def _load_combined_gradient_flow_obs(
             continue
         runs_with_flow += 1
         current_times = set(flow_data)
-        if common_times is None:
-            common_times = set(current_times)
-        else:
-            common_times &= current_times
         for t_val in current_times:
             slot = chunks.setdefault(t_val, {"Ehat_clover": [], "t2E_clover": []})
             slot["Ehat_clover"].append(flow_data[t_val]["Ehat_clover"])
             slot["t2E_clover"].append(flow_data[t_val]["t2E_clover"])
 
-    if not common_times:
+    if not chunks:
         return None, {
             "n_runs_with_gradient_flow": runs_with_flow,
             "t0_target": target,
@@ -393,13 +388,17 @@ def _load_combined_gradient_flow_obs(
             name: np.concatenate(chunks[t_val][name]).astype(np.float32, copy=False)
             for name in ("Ehat_clover", "t2E_clover")
         }
-        for t_val in sorted(common_times)
+        for t_val in sorted(chunks)
     }
-    first = next(iter(combined.values()))
+    t2e_lengths_by_time = {
+        f"{float(t_val):.12g}": int(len(values["t2E_clover"]))
+        for t_val, values in combined.items()
+    }
     return combined, {
         "n_runs_with_gradient_flow": runs_with_flow,
-        "available_flow_times": sorted(float(t) for t in common_times),
-        "n_configurations_after_cut": int(len(first["t2E_clover"])),
+        "available_flow_times": sorted(float(t) for t in combined),
+        "n_configurations_after_cut": int(min(t2e_lengths_by_time.values(), default=0)),
+        "n_configurations_by_flow_time": t2e_lengths_by_time,
         "t0_target": target,
     }
 
@@ -442,6 +441,33 @@ def _trim_series_to_common_length(series_by_row: list[np.ndarray]) -> tuple[list
     if common_length <= 0:
         return [np.asarray(row, dtype=float)[:0] for row in series_by_row], 0, lengths
     return [np.asarray(row, dtype=float)[:common_length] for row in series_by_row], common_length, lengths
+
+
+def _bootstrap_series_rows_independently(
+    series_by_row: list[np.ndarray],
+    block_size: int,
+    n_bootstrap: int,
+    seed: int = 42,
+) -> np.ndarray:
+    if not series_by_row:
+        return np.empty((0, n_bootstrap), dtype=float)
+
+    block_size = max(1, int(block_size))
+    rng = np.random.default_rng(seed)
+    out = np.empty((len(series_by_row), n_bootstrap), dtype=float)
+    for row_idx, row in enumerate(series_by_row):
+        values = np.asarray(row, dtype=np.float64)
+        if values.size <= 0:
+            out[row_idx, :] = np.nan
+            continue
+        starts = np.arange(0, values.size, block_size, dtype=np.int64)
+        lengths = np.minimum(block_size, values.size - starts).astype(np.float64)
+        sums = np.add.reduceat(values, starts).astype(np.float64)
+        n_blocks = len(starts)
+        for boot_idx in range(n_bootstrap):
+            sampled = rng.integers(0, n_blocks, size=n_blocks)
+            out[row_idx, boot_idx] = float(sums[sampled].sum() / lengths[sampled].sum())
+    return out
 
 
 def _interpolate_t0(flow_times: np.ndarray, t2e_values: np.ndarray, target: float) -> float:
@@ -563,22 +589,30 @@ def summarize_gradient_flow_obs(
 ) -> Dict[str, Any]:
     if not flow_data:
         return {}
-    times = np.asarray(sorted(flow_data), dtype=float)
-    e_series = [np.asarray(flow_data[float(t)]["Ehat_clover"], dtype=float) for t in times]
-    t2e_series = [np.asarray(flow_data[float(t)]["t2E_clover"], dtype=float) for t in times]
-    e_series, n_common_e, e_lengths = _trim_series_to_common_length(e_series)
-    t2e_series, n_common_t2e, t2e_lengths = _trim_series_to_common_length(t2e_series)
-    n_common = min(n_common_e, n_common_t2e)
-    if n_common <= 0:
+
+    rows = [
+        (
+            float(t),
+            np.asarray(flow_data[float(t)]["Ehat_clover"], dtype=float),
+            np.asarray(flow_data[float(t)]["t2E_clover"], dtype=float),
+        )
+        for t in sorted(flow_data)
+    ]
+    rows = [(t, e_row, t2e_row) for t, e_row, t2e_row in rows if len(e_row) > 0 and len(t2e_row) > 0]
+    if not rows:
         return {}
-    if n_common_e != n_common:
-        e_series = [row[:n_common] for row in e_series]
-    if n_common_t2e != n_common:
-        t2e_series = [row[:n_common] for row in t2e_series]
+
+    times = np.asarray([row[0] for row in rows], dtype=float)
+    e_series = [row[1] for row in rows]
+    t2e_series = [row[2] for row in rows]
+    e_lengths = [int(len(row)) for row in e_series]
+    t2e_lengths = [int(len(row)) for row in t2e_series]
+    n_min = min(min(e_lengths), min(t2e_lengths))
+    n_max = max(max(e_lengths), max(t2e_lengths))
     e_means = np.asarray([np.mean(row) for row in e_series], dtype=float)
     t2e_means = np.asarray([np.mean(row) for row in t2e_series], dtype=float)
-    e_boot = _bootstrap_series_matrix(e_series, block_size, n_bootstrap)
-    t2e_boot = _bootstrap_series_matrix(t2e_series, block_size, n_bootstrap)
+    e_boot = _bootstrap_series_rows_independently(e_series, block_size, n_bootstrap)
+    t2e_boot = _bootstrap_series_rows_independently(t2e_series, block_size, n_bootstrap)
     e_errs = np.asarray([_std_finite(e_boot[idx]) for idx in range(e_boot.shape[0])], dtype=float)
     t2e_errs = np.asarray([_std_finite(t2e_boot[idx]) for idx in range(t2e_boot.shape[0])], dtype=float)
     target = 0.1 if t0_target is None else float(t0_target)
@@ -609,7 +643,9 @@ def summarize_gradient_flow_obs(
 
     payload: Dict[str, Any] = {
         "available_flow_times": [float(t) for t in times],
-        "n_configurations_used": int(n_common),
+        "n_configurations_used": int(n_min),
+        "n_configurations_min": int(n_min),
+        "n_configurations_max": int(n_max),
         "n_configurations_by_flow_time": {
             f"{float(t):.12g}": {
                 "Ehat_clover": int(e_len),
@@ -617,10 +653,7 @@ def summarize_gradient_flow_obs(
             }
             for t, e_len, t2e_len in zip(times, e_lengths, t2e_lengths)
         },
-        "truncated_to_common_length": bool(
-            any(length != n_common for length in e_lengths)
-            or any(length != n_common for length in t2e_lengths)
-        ),
+        "truncated_to_common_length": False,
         "Ehat_clover": {f"{float(t):.12g}": float(v) for t, v in zip(times, e_means)},
         "Ehat_clover_err": {
             f"{float(t):.12g}": float(e_errs[idx]) if np.isfinite(e_errs[idx]) else None

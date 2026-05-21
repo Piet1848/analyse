@@ -108,6 +108,18 @@ def write_w_temp(
     (run_dir / "W_temp.out").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
+def write_gradient_flow_obs(
+    run_dir: Path,
+    rows: list[tuple[int, float, float, float]],
+) -> None:
+    lines = ["step t_over_a2 Ehat_clover t2E_clover"]
+    lines.extend(
+        f"{step} {t_over_a2:.12g} {ehat:.12g} {t2e:.12g}"
+        for step, t_over_a2, ehat, t2e in rows
+    )
+    (run_dir / "gradient_flow_obs.dat").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def make_run(
     base_dir: Path,
     name: str,
@@ -525,7 +537,49 @@ class FinalizeAnalysisTests(unittest.TestCase):
             calc.prime_w_rt_cache(pairs=[(2, 1), (4, 1)])
             self.assertTrue(np.isfinite(calc.get_variable("W_R_T", R=4, T=1).get()))
 
-    def test_gradient_flow_summary_trims_unequal_flow_time_lengths(self):
+    def test_gradient_flow_merge_keeps_union_with_per_flow_time_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(root, "run_a", gradient_t_values=[0.0, 1.0, 3.7])
+            run_b = make_run(root, "run_b", seed=2, gradient_t_values=[0.0, 1.0, 3.56])
+            write_gradient_flow_obs(
+                run_a,
+                [
+                    (0, 0.0, 1.0, 0.00),
+                    (0, 1.0, 2.0, 0.04),
+                    (0, 3.7, 5.0, 0.12),
+                    (1, 0.0, 1.1, 0.00),
+                    (1, 1.0, 2.1, 0.05),
+                    (1, 3.7, 5.1, 0.13),
+                ],
+            )
+            write_gradient_flow_obs(
+                run_b,
+                [
+                    (0, 0.0, 1.2, 0.00),
+                    (0, 1.0, 2.2, 0.05),
+                    (0, 3.56, 4.8, 0.11),
+                    (1, 0.0, 1.3, 0.00),
+                    (1, 1.0, 2.3, 0.06),
+                    (1, 3.56, 4.9, 0.12),
+                ],
+            )
+
+            combined, metadata = run_evaluation._load_combined_gradient_flow_obs(
+                [str(run_a), str(run_b)],
+                load_workers=1,
+                thermalization_steps=0,
+            )
+
+            self.assertIsNotNone(combined)
+            combined = combined or {}
+            self.assertEqual(metadata["available_flow_times"], [0.0, 1.0, 3.56, 3.7])
+            self.assertEqual(metadata["n_configurations_by_flow_time"]["1"], 4)
+            self.assertEqual(metadata["n_configurations_by_flow_time"]["3.56"], 2)
+            self.assertEqual(len(combined[3.56]["t2E_clover"]), 2)
+            self.assertEqual(len(combined[3.7]["t2E_clover"]), 2)
+
+    def test_gradient_flow_summary_keeps_unequal_flow_time_lengths(self):
         flow_data = {
             0.0: {
                 "Ehat_clover": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
@@ -546,8 +600,10 @@ class FinalizeAnalysisTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["n_configurations_used"], 2)
-        self.assertTrue(summary["truncated_to_common_length"])
-        self.assertAlmostEqual(summary["Ehat_clover"]["0"], 1.5)
+        self.assertEqual(summary["n_configurations_min"], 2)
+        self.assertEqual(summary["n_configurations_max"], 3)
+        self.assertFalse(summary["truncated_to_common_length"])
+        self.assertAlmostEqual(summary["Ehat_clover"]["0"], 2.0)
         self.assertEqual(summary["bootstrap_samples"]["t2E_clover"].shape, (2, 8))
 
     def test_gradient_flow_summary_reports_fixed_0p1_crossing_and_weighted_fit(self):
