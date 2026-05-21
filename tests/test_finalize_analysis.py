@@ -168,6 +168,21 @@ class InputSequence:
 
 
 class FinalizeAnalysisTests(unittest.TestCase):
+    def test_compact_result_summary_formatting_matches_requested_precision(self):
+        self.assertEqual(
+            finalize_analysis.format_result_value_rounded_to_error(4.38115, 0.0156),
+            "4.381 +/- 0.016",
+        )
+        self.assertEqual(
+            finalize_analysis.format_result_value_rounded_to_error(2.73925, 0.00977),
+            "2.739 +/- 0.010",
+        )
+        self.assertEqual(finalize_analysis.format_compact_float(0.0), "0.0")
+        self.assertEqual(
+            finalize_analysis.format_result_value_rounded_to_error(1.84789, 0.000638),
+            "1.8479 +/- 0.0006",
+        )
+
     def test_prompt_window_choice_reuses_previous_on_blank_input(self):
         runner = finalize_analysis.FinalizedAnalysisRunner.__new__(finalize_analysis.FinalizedAnalysisRunner)
         runner.input = InputSequence([""])
@@ -986,6 +1001,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue(manifest["status"]["derived_complete"])
                 self.assertTrue(manifest["status"]["gradient_flow_complete"])
                 self.assertTrue(manifest["status"]["creutz_complete"])
+                self.assertIn("result_summary_txt", manifest)
                 self.assertIn("thermalization_preview_plot", manifest)
                 self.assertEqual(manifest["block_size"], 1)
                 self.assertEqual(second_runner.calc.step_size, 1)
@@ -1004,6 +1020,14 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 self.assertTrue((analysis_dir / "derived" / "summary.json").exists())
                 self.assertTrue((analysis_dir / "gradient_flow" / "summary.json").exists())
                 self.assertTrue((analysis_dir / "creutz" / "summary.json").exists())
+                summary_txt_path = analysis_dir / "result_summary.txt"
+                self.assertTrue(summary_txt_path.exists())
+                summary_txt = summary_txt_path.read_text(encoding="utf-8")
+                self.assertIn("r0=", summary_txt)
+                self.assertIn("length=", summary_txt)
+                self.assertIn(" fm", summary_txt)
+                self.assertIn("eps_bar=", summary_txt)
+                self.assertIn("gf_t/a²=", summary_txt)
                 self.assertTrue((analysis_dir / "derived" / "bootstrap" / "volume_r0.npy").exists())
                 self.assertTrue((analysis_dir / "plots" / "bootstrap_block_size.html").exists())
                 self.assertTrue((analysis_dir / "plots" / "thermalization_preview.html").exists())

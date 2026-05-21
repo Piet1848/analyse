@@ -103,6 +103,60 @@ def format_result_value(value: Any, error: Any = None) -> str:
     return f"{value_text} +/- {numeric_error:.3g}"
 
 
+def uncertainty_decimal_places(error: float) -> int | None:
+    if not np.isfinite(error) or error <= 0:
+        return None
+
+    exponent = int(np.floor(np.log10(abs(error))))
+    leading_digit = int(abs(error) / (10 ** exponent))
+    significant_digits = 2 if leading_digit == 1 else 1
+    return significant_digits - 1 - exponent
+
+
+def format_decimal_places(value: float, decimal_places: int) -> str:
+    rounded = round(value, decimal_places)
+    if rounded == 0:
+        rounded = 0.0
+    if decimal_places > 0:
+        return f"{rounded:.{decimal_places}f}"
+    return f"{rounded:.0f}"
+
+
+def format_result_value_rounded_to_error(value: Any, error: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric_value = float(value)
+        numeric_error = float(error)
+    except (TypeError, ValueError):
+        return format_result_value(value, error)
+    if not np.isfinite(numeric_value) or not np.isfinite(numeric_error):
+        return format_result_value(value, error)
+
+    decimal_places = uncertainty_decimal_places(numeric_error)
+    if decimal_places is None:
+        return format_result_value(value, error)
+
+    return (
+        f"{format_decimal_places(numeric_value, decimal_places)} +/- "
+        f"{format_decimal_places(numeric_error, decimal_places)}"
+    )
+
+
+def format_compact_float(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric_value):
+        return str(numeric_value)
+    if numeric_value == 0.0:
+        return "0.0"
+    return f"{numeric_value:.6g}"
+
+
 def build_filter_field_map() -> dict[str, tuple[str, Any]]:
     field_map: dict[str, tuple[str, Any]] = {}
     for name, typ in get_type_hints(MetropolisParams).items():
@@ -1866,6 +1920,26 @@ class FinalizedAnalysisRunner:
                 f"{format_result_value(t2e_0p1_fit, gradient_summary.get('t_over_a2_at_t2E_clover_0p1_weighted_fit_err'))}"
             )
 
+    def _write_result_summary_txt(self) -> Path:
+        r0_result = load_json(self.r0_dir / "r0_result.json", default={}) or {}
+        derived_summary = load_json(self.derived_dir / "summary.json", default={}) or {}
+        gradient_summary = load_json(self.gradient_flow_dir / "summary.json", default={}) or {}
+
+        t2e_0p1 = gradient_summary.get("t_over_a2_at_t2E_clover_0p1")
+        t2e_0p1_err = gradient_summary.get("t_over_a2_at_t2E_clover_0p1_err")
+
+        lines = [
+            f"r0={format_result_value_rounded_to_error(r0_result.get('r0'), r0_result.get('r0_err'))}",
+            f"length={format_result_value_rounded_to_error(derived_summary.get('length'), derived_summary.get('length_err'))} fm",
+            f"eps_bar={format_compact_float(derived_summary.get('epsilon_bar'))}",
+            f"gf_t/a²={format_result_value_rounded_to_error(t2e_0p1, t2e_0p1_err)}",
+        ]
+        path = self.analysis_dir / "result_summary.txt"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.manifest["result_summary_txt"] = str(path)
+        self._save_manifest()
+        return path
+
     def run(self) -> Path:
         self._finalize_wilsonloop()
         self.print("\nWilson loop analysis complete. Proceeding to finalize gradient-flow and Creutz summaries...")
@@ -1875,7 +1949,9 @@ class FinalizedAnalysisRunner:
         self._finalize_r0()
         self.print("\nr0 fit complete. Proceeding to compute derived quantities...")
         self._finalize_derived()
+        summary_txt_path = self._write_result_summary_txt()
         self.print(f"\nFinalized analysis saved to: {self.analysis_dir}")
+        self.print(f"Saved compact result summary: {summary_txt_path}")
         self._print_result_summary()
         return self.analysis_dir
 
