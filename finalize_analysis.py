@@ -17,6 +17,7 @@ from typing import Any, Callable, get_origin, get_type_hints
 
 import numpy as np
 
+import data_organizer
 import run_evaluation
 from calculator import Calculator, fit_r0_from_potential_data
 from finalized_analysis_helpers import (
@@ -257,12 +258,18 @@ def common_thermalization_step(thermalization_steps_by_run: dict[str, int]) -> i
     return unique[0] if len(unique) == 1 else None
 
 
-def analysis_hash(run_dirs: list[str], thermalization_steps_by_run: dict[str, int]) -> str:
+def analysis_hash(
+    run_dirs: list[str],
+    thermalization_steps_by_run: dict[str, int],
+    wilson_flow_time: float | None = None,
+) -> str:
     normalized_cuts = normalize_thermalization_steps_by_run(run_dirs, thermalization_steps_by_run)
     payload = {
         "run_dirs": sorted(os.path.abspath(path) for path in run_dirs),
         "thermalization_steps_by_run": normalized_cuts,
     }
+    if wilson_flow_time is not None:
+        payload["wilson_flow_time"] = float(wilson_flow_time)
     digest = hashlib.md5(repr(payload).encode("utf-8")).hexdigest()
     return digest[:12]
 
@@ -672,6 +679,7 @@ class FinalizedAnalysisRunner:
         block_size_scan_max: int | None = DEFAULT_BLOCK_SIZE_SCAN_MAX,
         block_size_scan_step: int = DEFAULT_BLOCK_SIZE_SCAN_STEP,
         max_r: int | None = None,
+        wilson_flow_time: float | None = None,
         require_fixed_dt: bool = False,
         open_plots: bool = True,
         open_plot_func: Callable[[Path], bool] = open_html_plot,
@@ -700,6 +708,7 @@ class FinalizedAnalysisRunner:
         self.max_r = int(max_r) if max_r is not None else None
         if self.max_r is not None and self.max_r < 0:
             raise ValueError("--max-r must be non-negative")
+        self.wilson_flow_time = data_organizer._normalize_flow_time(wilson_flow_time)
         self.require_fixed_dt = bool(require_fixed_dt)
         self.block_size_scan_values = (
             sorted({int(value) for value in block_size_scan_values if int(value) >= 1})
@@ -729,7 +738,11 @@ class FinalizedAnalysisRunner:
             self.print(f"Thermalization cut set to: {self.thermalization_steps} for all runs")
         else:
             self.print("Thermalization cuts saved per run.")
-        self.analysis_id = analysis_hash(self.run_dirs, self.thermalization_steps_by_run)
+        self.analysis_id = analysis_hash(
+            self.run_dirs,
+            self.thermalization_steps_by_run,
+            wilson_flow_time=self.wilson_flow_time,
+        )
         self.analysis_dir = self._analysis_dir_path()
 
         self.manifest_path = self.analysis_dir / "manifest.json"
@@ -763,11 +776,15 @@ class FinalizedAnalysisRunner:
         self.windows: list[tuple[int, int | None]] = []
 
     def _analysis_dir_path(self) -> Path:
+        flow_part = ""
+        if self.wilson_flow_time is not None:
+            flow_part = f"__tf_{format_token(self.wilson_flow_time)}"
         folder_name = (
             f"beta_{format_token(self.metro.beta)}"
             f"__L_{self.metro.L0}x{self.metro.L1}x{self.metro.L2}x{self.metro.L3}"
             f"__eps1_{format_token(self.metro.epsilon1)}"
             f"__eps2_{format_token(self.metro.epsilon2)}"
+            f"{flow_part}"
             f"__nrun_{len(self.run_dirs)}"
             f"__{self.analysis_id}"
         )
@@ -1035,6 +1052,7 @@ class FinalizedAnalysisRunner:
                 "thermalization_mode": "per_run",
                 "thermalization_steps": self.thermalization_steps,
                 "thermalization_steps_by_run": self.thermalization_steps_by_run,
+                "wilson_flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "n_bootstrap": int(self.n_bootstrap),
                 "target_force": float(self.target_force),
                 "block_size": None,
@@ -1071,6 +1089,12 @@ class FinalizedAnalysisRunner:
                 f"Existing analysis uses target_force={manifest.get('target_force')} "
                 f"but this run requested {self.target_force}."
             )
+        stored_flow = data_organizer._normalize_flow_time(manifest.get("wilson_flow_time"))
+        if stored_flow != self.wilson_flow_time:
+            raise ValueError(
+                f"Existing analysis uses wilson_flow_time={manifest.get('wilson_flow_time')} "
+                f"but this run requested {self.wilson_flow_time}."
+            )
         status = manifest.setdefault("status", {})
         status.setdefault("gradient_flow_complete", False)
         status.setdefault("creutz_complete", False)
@@ -1100,6 +1124,7 @@ class FinalizedAnalysisRunner:
         payload = {
             "run_dirs": self.run_dirs,
             "thermalization_steps_by_run": self.thermalization_steps_by_run,
+            "wilson_flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
             "compatibility_summary": self.compatibility_summary,
         }
         save_json(self.input_runs_path, payload)
@@ -1153,7 +1178,15 @@ class FinalizedAnalysisRunner:
                 return int(len(first_series))
         wilson_by_flow_pair = getattr(file_data, "wilson_by_flow_pair", None)
         if wilson_by_flow_pair:
-            first_series = next(iter(wilson_by_flow_pair.values()), None)
+            selected_flow = self.wilson_flow_time
+            first_series = next(
+                (
+                    series
+                    for (flow_time, _r_val, _t_val), series in wilson_by_flow_pair.items()
+                    if flow_time == selected_flow
+                ),
+                None,
+            )
             if first_series is not None:
                 return int(len(first_series))
 
@@ -1220,6 +1253,7 @@ class FinalizedAnalysisRunner:
             file_data,
             block_size_scan_values,
             n_bootstrap=self.n_bootstrap,
+            flow_time=self.wilson_flow_time,
         )
         tau_hint = self._compute_tau_hint(file_data)
         recommended = recommend_bootstrap_block_size(
@@ -1233,6 +1267,7 @@ class FinalizedAnalysisRunner:
                 "schema_version": SCHEMA_VERSION,
                 "block_size_scan_values": block_size_scan_values,
                 "block_size_scan_total_length": self._bootstrap_scan_total_length(file_data),
+                "wilson_flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "selected_pairs": [{"R": int(r_val), "T": int(t_val)} for r_val, t_val in selected_pairs],
                 "tau_int": tau_hint,
                 "recommended_block_size": int(recommended),
@@ -1262,6 +1297,7 @@ class FinalizedAnalysisRunner:
                 "recommended_block_size": int(recommended),
                 "scan_path": str(scan_path),
                 "plot_path": str(plot_path),
+                "wilson_flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "tau_int": tau_hint,
                 "saved_at": utc_now(),
             },
@@ -1304,14 +1340,35 @@ class FinalizedAnalysisRunner:
             n_bootstrap=self.n_bootstrap,
             step_size=block_size,
         )
-        self.unique_rs = [int(r) for r in self.calc.get_unique_Rs()]
-        self.unique_ts = [int(t) for t in self.calc.get_unique_Ts()]
+        available_flow_times = self.calc.get_available_flow_times()
+        if self.wilson_flow_time not in available_flow_times:
+            available_text = ", ".join(
+                "unflowed" if value is None else f"{float(value):g}"
+                for value in available_flow_times
+            ) or "none"
+            requested_text = "unflowed" if self.wilson_flow_time is None else f"{float(self.wilson_flow_time):g}"
+            raise RuntimeError(
+                f"Requested Wilson-loop flow time {requested_text} is not available. "
+                f"Available Wilson-loop flow times: {available_text}."
+            )
+        if self.wilson_flow_time is not None:
+            self.print(f"Using Wilson-loop flow time t_f={self.wilson_flow_time:g}.")
+        self.unique_rs = [int(r) for r in self.calc.get_unique_Rs(flow_time=self.wilson_flow_time)]
+        self.unique_ts = [int(t) for t in self.calc.get_unique_Ts(flow_time=self.wilson_flow_time)]
+        if not self.unique_rs or not self.unique_ts:
+            requested_text = "unflowed" if self.wilson_flow_time is None else f"{float(self.wilson_flow_time):g}"
+            raise RuntimeError(f"No Wilson-loop R/T pairs are available for flow time {requested_text}.")
         self.windows = enumerate_t_windows(self.unique_ts)
 
         self.manifest["aggregation"] = aggregation
         self.manifest["block_size"] = block_size
         self.manifest["available_R"] = self.unique_rs
         self.manifest["available_T"] = self.unique_ts
+        self.manifest["wilson_flow_time"] = None if self.wilson_flow_time is None else float(self.wilson_flow_time)
+        self.manifest["available_wilson_flow_times"] = [
+            None if value is None else float(value)
+            for value in available_flow_times
+        ]
         self.manifest["gradient_flow_metadata"] = gradient_flow_metadata
         self._save_manifest()
 
@@ -1325,11 +1382,19 @@ class FinalizedAnalysisRunner:
         vr_path = self.scan_dir / "v_r_scan_candidates.json"
 
         if not wrt_path.exists():
-            save_json(wrt_path, build_wrt_scan(self.calc, self.unique_rs, self.unique_ts))
+            save_json(wrt_path, build_wrt_scan(self.calc, self.unique_rs, self.unique_ts, flow_time=self.wilson_flow_time))
         if not eff_path.exists():
-            save_json(eff_path, build_effective_mass_scan(self.calc, self.unique_rs, self.unique_ts))
+            save_json(
+                eff_path,
+                build_effective_mass_scan(
+                    self.calc,
+                    self.unique_rs,
+                    self.unique_ts,
+                    flow_time=self.wilson_flow_time,
+                ),
+            )
         if not vr_path.exists():
-            save_json(vr_path, build_v_r_scan(self.calc, self.unique_rs, self.windows))
+            save_json(vr_path, build_v_r_scan(self.calc, self.unique_rs, self.windows, flow_time=self.wilson_flow_time))
 
         self.manifest["status"]["scan_cache_built"] = True
         self._save_manifest()
@@ -1482,7 +1547,13 @@ class FinalizedAnalysisRunner:
             t_min, t_max = window_choice
             previous_choice = (t_min, t_max)
 
-            var = self.calc.get_variable("V_R", R=int(r_value), t_min=int(t_min), t_max=t_max)
+            var = self.calc.get_variable(
+                "V_R",
+                R=int(r_value),
+                t_min=int(t_min),
+                t_max=t_max,
+                flow_time=self.wilson_flow_time,
+            )
             value = var.get()
             if value is None or not np.isfinite(value):
                 raise RuntimeError(f"Selected window produced no finite V(R) result for R={r_value}.")
@@ -1494,12 +1565,14 @@ class FinalizedAnalysisRunner:
                 "R": int(r_value),
                 "t_min": int(t_min),
                 "t_max": t_max,
+                "flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "plot_path": str(plot_path),
                 "saved_at": utc_now(),
             }
             summary_payload = {
                 "value": float(value),
                 "err": float(var.err()) if var.err() is not None else None,
+                "flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "fit_C": (
                     float(var.parameters.get("fit_C"))
                     if var.parameters.get("fit_C") is not None and np.isfinite(var.parameters.get("fit_C"))
@@ -1637,6 +1710,7 @@ class FinalizedAnalysisRunner:
             choice_path,
             {
                 "r_min": int(r_min),
+                "flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "plot_paths": {
                     "stability": str(stability_path),
                     "cornell": str(cornell_path),
@@ -1657,6 +1731,7 @@ class FinalizedAnalysisRunner:
                 "r0": float(fit_result["r0"]),
                 "r0_err": float(fit_result["r0_err"]) if fit_result["r0_err"] is not None else None,
                 "target_force": float(self.target_force),
+                "flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
                 "cornell_params": fit_result["cornell_params"],
                 "chi2": float(fit_result["chi2"]) if fit_result["chi2"] is not None else None,
                 "dof": int(fit_result["dof"]),
@@ -1794,7 +1869,7 @@ class FinalizedAnalysisRunner:
 
         for r_mid, t_mid in chi_pairs:
             try:
-                var = self.calc.get_variable("chi", R=r_mid, T=t_mid)
+                var = self.calc.get_variable("chi", R=r_mid, T=t_mid, flow_time=self.wilson_flow_time)
             except Exception:
                 continue
             value = var.get()
@@ -1815,7 +1890,7 @@ class FinalizedAnalysisRunner:
         creutz_p_err: dict[str, float] = {}
         for r_val in [r for r in self.unique_rs if r > 0 and r % 2 == 0]:
             try:
-                var = self.calc.get_variable("creutz_P", R=int(r_val))
+                var = self.calc.get_variable("creutz_P", R=int(r_val), flow_time=self.wilson_flow_time)
             except Exception:
                 continue
             value = var.get()
@@ -1828,6 +1903,7 @@ class FinalizedAnalysisRunner:
 
         payload = {
             "status": status,
+            "flow_time": None if self.wilson_flow_time is None else float(self.wilson_flow_time),
             "chi": chi,
             "chi_err": chi_err,
             "chi_bootstrap_paths": chi_boot_paths,
@@ -1885,6 +1961,7 @@ class FinalizedAnalysisRunner:
             thermalization_text = f"per-run ({min(cuts)}-{max(cuts)})" if cuts else "per-run"
         self.print(
             f"  Analysis choices: thermalization={thermalization_text}, "
+            f"wilson_flow_time={'unflowed' if self.wilson_flow_time is None else format_token(self.wilson_flow_time)}, "
             f"block_size={self.manifest.get('block_size', 'n/a')}, "
             f"bootstrap={self.n_bootstrap}"
         )
@@ -1929,6 +2006,7 @@ class FinalizedAnalysisRunner:
         t2e_0p1_err = gradient_summary.get("t_over_a2_at_t2E_clover_0p1_err")
 
         lines = [
+            f"wilson_flow_time={'unflowed' if self.wilson_flow_time is None else format_compact_float(self.wilson_flow_time)}",
             f"r0={format_result_value_rounded_to_error(r0_result.get('r0'), r0_result.get('r0_err'))}",
             f"length={format_result_value_rounded_to_error(derived_summary.get('length'), derived_summary.get('length_err'))} fm",
             f"eps_bar={format_compact_float(derived_summary.get('epsilon_bar'))}",
@@ -2031,6 +2109,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Use only finalized V(R) points with R <= this value and ignore larger R values.",
+    )
+    parser.add_argument(
+        "--flow-time",
+        "--t-f",
+        dest="wilson_flow_time",
+        type=float,
+        default=None,
+        help=(
+            "Use Wilson loops at this gradient-flow t_over_a2 value from gradient_flow_wtemp.dat "
+            "for finalized V(R), r0, and Creutz analysis. Omit to use unflowed W_temp.out."
+        ),
     )
     parser.add_argument(
         "--block-sizes",
@@ -2146,6 +2235,7 @@ def main(argv: list[str] | None = None) -> int:
             n_bootstrap=args.n_bootstrap,
             target_force=args.target_force,
             max_r=args.max_r,
+            wilson_flow_time=args.wilson_flow_time,
             require_fixed_dt=args.require_fixed_dt,
             block_size_scan_values=block_size_scan_values,
             block_size_scan_min=args.min_block_size,

@@ -120,6 +120,33 @@ def write_gradient_flow_obs(
     (run_dir / "gradient_flow_obs.dat").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_gradient_flow_wtemp(
+    run_dir: Path,
+    *,
+    flow_values: list[float],
+    flow_potential_shift: dict[float, float] | None = None,
+    r_values: list[int] | None = None,
+    t_values: list[int] | None = None,
+) -> None:
+    A = 0.5
+    sigma = 0.2
+    B = 0.1
+    steps = [0, 1000, 2000, 3000]
+    r_values = [2, 3, 4] if r_values is None else r_values
+    t_values = [1, 2, 3, 4] if t_values is None else t_values
+    flow_potential_shift = flow_potential_shift or {}
+    rows = ["# conf_id t_over_a2 L T W_temp"]
+    for cfg_index, step in enumerate(steps):
+        for flow_time in flow_values:
+            for r_val in r_values:
+                potential = A + sigma * r_val - B / r_val + flow_potential_shift.get(flow_time, 0.0)
+                for t_val in t_values:
+                    modulation = 1.0 + 0.01 * cfg_index
+                    value = modulation * np.exp(-potential * t_val)
+                    rows.append(f"{step} {flow_time:.12g} {r_val} {t_val} {value:.10f}")
+    (run_dir / "gradient_flow_wtemp.dat").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
 def make_run(
     base_dir: Path,
     name: str,
@@ -679,6 +706,45 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertEqual(compact.available_flow_times(), [None] if False else [0.0, 0.25])
             calc = Calculator(compact, n_bootstrap=8, step_size=1)
             self.assertAlmostEqual(calc.get_variable("W_R_T", R=1, T=1, flow_time=0.25).get(), 0.575)
+
+    def test_finalized_runner_uses_requested_wilson_flow_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = make_run(root, "run_a")
+            write_gradient_flow_wtemp(
+                run_dir,
+                flow_values=[0.0, 0.25],
+                flow_potential_shift={0.25: -0.15},
+            )
+            output_root = root / "finalized"
+
+            with (
+                mock.patch.object(finalize_analysis, "save_thermalization_plot", side_effect=write_stub_plot),
+                mock.patch.object(finalize_analysis, "save_bootstrap_block_size_plot", side_effect=write_stub_plot),
+            ):
+                runner = finalize_analysis.FinalizedAnalysisRunner(
+                    run_dirs=[str(run_dir)],
+                    output_root=output_root,
+                    plot_mode="html",
+                    load_workers=1,
+                    calc_workers=None,
+                    n_bootstrap=8,
+                    target_force=1.65,
+                    wilson_flow_time=0.25,
+                    block_size_scan_values=[1],
+                    open_plots=False,
+                    input_func=InputSequence(["", ""]),
+                    print_func=lambda *args, **kwargs: None,
+                )
+                runner._load_data()
+
+            self.assertEqual(runner.wilson_flow_time, 0.25)
+            self.assertIn(0.25, runner.calc.get_available_flow_times())
+            flowed = runner.calc.get_variable("V_R", R=2, t_min=1, t_max=None, flow_time=0.25)
+            unflowed = runner.calc.get_variable("V_R", R=2, t_min=1, t_max=None)
+            self.assertLess(flowed.get(), unflowed.get())
+            self.assertEqual(runner.manifest["wilson_flow_time"], 0.25)
+            self.assertIn("__tf_0.25__", str(runner.analysis_dir))
 
     def test_new_input_yaml_defaults_legacy_dimensions(self):
         with tempfile.TemporaryDirectory() as tmp:

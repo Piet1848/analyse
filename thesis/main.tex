@@ -984,9 +984,63 @@ Describe the potential extraction, Cornell-type fits, force determination, and
 Sommer-scale extraction.
 
 \subsection{Creutz-Ratio Analysis}
-Define the Creutz-ratio observables used in the numerical analysis, explain
-their large-time interpretation, and state how they are related to the string
-tension.
+The finalized analysis computes Creutz ratios directly from the measured
+temporal Wilson loops, not from the fitted static potential. The input data are
+the post-thermalization \texttt{W\_temp} measurements of the individual
+simulation runs belonging to one ensemble. For each run, the analysis reads
+\texttt{W\_temp.out}. If gradient-flow Wilson loops were produced, the
+additional Wilson-loop file named in \texttt{input.yaml} can also be loaded and
+stored under its nonzero flow-time labels, but the default finalized
+\(R=T\) Creutz-ratio plot uses the unflowed \(t_{\mathrm{flow}}=0\) Wilson loops
+unless the analysis explicitly requests another flow time. Each row contains the
+simulation step, the spatial loop size \(L\), the temporal loop size \(T\), and
+the normalized temporal Wilson-loop value \texttt{W\_temp}. After applying the
+chosen thermalization cut for each run,
+the remaining measurements with the same \((L,T)\) are concatenated across all
+runs in the ensemble. This combined Wilson-loop history is the only data source
+used for the standard Creutz ratios in the finalized output.
+
+For every available adjacent set of loop sizes, the code forms
+\begin{equation}
+  \chi\left(R+\frac{1}{2},T+\frac{1}{2}\right)
+  =
+  \ln
+  \left[
+    \frac{
+      W(R,T+1) W(R+1,T)
+    }{
+      W(R,T) W(R+1,T+1)
+    }
+  \right].
+\end{equation}
+Thus a displayed diagonal point at \(R=T=1.5\), for example, is calculated from
+the four measured Wilson loops \(W(1,1)\), \(W(1,2)\), \(W(2,1)\), and
+\(W(2,2)\). More generally, the diagonal plot
+\texttt{creutz\_ratios\_R\_eq\_T.html} keeps only those Creutz-ratio midpoints
+for which the spatial and temporal midpoint are equal. The horizontal coordinate
+is therefore the midpoint value \(R+1/2=T+1/2\), not an original integer loop
+extent.
+
+The central values are computed by first averaging each of the four required
+Wilson-loop histories and then inserting these four means into the logarithmic
+ratio. Statistical errors are obtained by the same blocked bootstrap used for
+the Wilson-loop analysis. In each bootstrap replica, contiguous blocks of saved
+configurations are resampled, the four Wilson-loop means are recomputed from
+the resampled histories, and the Creutz ratio is recalculated from those
+bootstrap means. The standard deviation of the resulting bootstrap distribution
+is stored as the Creutz-ratio error. Bootstrap samples for each accepted ratio
+are also written to the finalized analysis directory.
+
+In the finalized output, the complete set of ratios is saved in
+\texttt{creutz/summary.json} under the keys \texttt{chi}, \texttt{chi\_err},
+and \texttt{chi\_bootstrap\_paths}. The keys of \texttt{chi} are midpoint pairs
+such as \texttt{1.5,1.5}. The summary script used for scans then reads this
+file and extracts the positive-within-error diagonal entries as columns named
+\texttt{chi\_R=T\_1.5}, \texttt{chi\_R=T\_2.5}, and so on. These summary
+columns are therefore derived from
+the finalized Creutz-ratio JSON file, which in turn is derived from the combined
+post-thermalization \texttt{W\_temp} Wilson-loop measurements of the source
+runs.
 
 \subsection{Scale Setting}
 Summarize the determination of the Sommer scale in lattice units, possible

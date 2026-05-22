@@ -62,12 +62,12 @@ def window_label(t_min: int, t_max: int | None) -> str:
     return f"t_min={int(t_min)}, t_max={'None' if t_max is None else int(t_max)}"
 
 
-def build_wrt_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any]]:
+def build_wrt_scan(calc: Calculator, unique_rs, unique_ts, flow_time: float | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for r_val in unique_rs:
         for t_val in unique_ts:
             try:
-                var = calc.get_variable("W_R_T", R=int(r_val), T=int(t_val))
+                var = calc.get_variable("W_R_T", R=int(r_val), T=int(t_val), flow_time=flow_time)
             except Exception:
                 continue
             value = var.get()
@@ -80,6 +80,7 @@ def build_wrt_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any
                     "T": int(t_val),
                     "value": float(value),
                     "err": float(err) if err is not None and np.isfinite(err) else None,
+                    "flow_time": None if flow_time is None else float(flow_time),
                 }
             )
     return records
@@ -91,9 +92,10 @@ def build_bootstrap_block_size_scan(
     *,
     n_bootstrap: int,
     pair_keys: list[tuple[int, int]] | None = None,
+    flow_time: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
     probe_calc = Calculator(file_data, n_bootstrap=1, step_size=1)
-    available_pairs = probe_calc.get_available_pairs()
+    available_pairs = probe_calc.get_available_pairs(flow_time=flow_time)
     selected_pairs = (
         _select_preview_pair_keys([(int(r_val), int(t_val)) for r_val, t_val in available_pairs])
         if pair_keys is None
@@ -106,7 +108,7 @@ def build_bootstrap_block_size_scan(
     for block_size in sorted({int(value) for value in block_sizes if int(value) >= 1}):
         calc = Calculator(file_data, n_bootstrap=int(n_bootstrap), step_size=int(block_size))
         try:
-            calc.prime_w_rt_cache(pairs=selected_pairs)
+            calc.prime_w_rt_cache(pairs=selected_pairs, flow_time=flow_time)
         except Exception:
             pass
 
@@ -118,9 +120,10 @@ def build_bootstrap_block_size_scan(
                 "value": None,
                 "err": None,
                 "status": "ok",
+                "flow_time": None if flow_time is None else float(flow_time),
             }
             try:
-                var = calc.get_variable("W_R_T", R=int(r_val), T=int(t_val))
+                var = calc.get_variable("W_R_T", R=int(r_val), T=int(t_val), flow_time=flow_time)
                 value = var.get()
                 err = var.err()
                 row["value"] = float(value) if value is not None and np.isfinite(value) else None
@@ -268,7 +271,7 @@ def build_thermalization_preview(
     return combined_series + run_series
 
 
-def build_effective_mass_scan(calc: Calculator, unique_rs, unique_ts) -> list[dict[str, Any]]:
+def build_effective_mass_scan(calc: Calculator, unique_rs, unique_ts, flow_time: float | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     t_values = sorted({int(t) for t in unique_ts})
     if len(t_values) < 2:
@@ -277,7 +280,7 @@ def build_effective_mass_scan(calc: Calculator, unique_rs, unique_ts) -> list[di
     for r_val in unique_rs:
         for t_val in t_values[:-1]:
             try:
-                var = calc.get_variable("effective_mass", R=int(r_val), T=int(t_val))
+                var = calc.get_variable("effective_mass", R=int(r_val), T=int(t_val), flow_time=flow_time)
             except Exception:
                 continue
             value = var.get()
@@ -291,6 +294,7 @@ def build_effective_mass_scan(calc: Calculator, unique_rs, unique_ts) -> list[di
                     "t_mid": float(t_val) + 0.5,
                     "value": float(value),
                     "err": float(err) if err is not None and np.isfinite(err) else None,
+                    "flow_time": None if flow_time is None else float(flow_time),
                 }
             )
     return records
@@ -300,12 +304,19 @@ def build_v_r_scan(
     calc: Calculator,
     unique_rs,
     windows: list[tuple[int, int | None]],
+    flow_time: float | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for t_min, t_max in windows:
         for r_val in unique_rs:
             try:
-                var = calc.get_variable("V_R", R=int(r_val), t_min=int(t_min), t_max=t_max)
+                var = calc.get_variable(
+                    "V_R",
+                    R=int(r_val),
+                    t_min=int(t_min),
+                    t_max=t_max,
+                    flow_time=flow_time,
+                )
             except Exception:
                 continue
             value = var.get()
@@ -321,6 +332,7 @@ def build_v_r_scan(
                     "value": float(value),
                     "err": float(err) if err is not None and np.isfinite(err) else None,
                     "fit_C": float(fit_c) if fit_c is not None and np.isfinite(fit_c) else None,
+                    "flow_time": None if flow_time is None else float(flow_time),
                 }
             )
     return records
