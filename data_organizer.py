@@ -102,15 +102,15 @@ class ObservableData:
     def __init__(self, name: str, values=None):
         self.name = name
         if values is not None:
-            self.values = np.asarray(values, dtype=np.float32)
+            self.values = np.asarray(values, dtype=float)
         else:
-            self.values = np.array([], dtype=np.float32)
+            self.values = np.array([], dtype=float)
 
     def append(self, value: float):
-        self.values = np.append(self.values, np.float32(value))
+        self.values = np.append(self.values, float(value))
 
     def extend(self, values):
-        self.values = np.concatenate((self.values, np.asarray(values, dtype=np.float32)))
+        self.values = np.concatenate((self.values, np.asarray(values, dtype=float)))
 
     def slice(self, indices: List[int]):
         self.values = self.values[indices]
@@ -186,7 +186,7 @@ class FileData:
                 return
             if start >= len(steps):
                 for obs in self.observables:
-                    obs.values = np.array([], dtype=np.float32)
+                    obs.values = np.array([], dtype=float)
                 return
             for obs in self.observables:
                 obs.slice_from(start)
@@ -279,7 +279,7 @@ class CompactWilsonData(FileData):
             for flow_time, r, t in flow_pair_order
         ]
         self.wilson_by_flow_pair = {
-            (_normalize_flow_time(flow_time), int(r), int(t)): np.asarray(values, dtype=np.float32)
+            (_normalize_flow_time(flow_time), int(r), int(t)): np.asarray(values, dtype=float)
             for (flow_time, r, t), values in wilson_by_flow_pair.items()
         }
         self.pair_order = [(r, t) for flow_time, r, t in self.flow_pair_order if flow_time is None]
@@ -308,7 +308,7 @@ def _normalize_flow_time(value: Any) -> Optional[float]:
         flow_time = float(value)
     except (TypeError, ValueError):
         return None
-    return round(flow_time, 12)
+    return round(flow_time, 7)
 
 
 def _read_numeric_table(path: Path) -> _NumericTable:
@@ -359,7 +359,7 @@ def _read_numeric_table(path: Path) -> _NumericTable:
     if not rows or header_tokens is None:
         raise EmptyNumericDataError("no numeric data")
 
-    matrix = np.asarray(rows, dtype=np.float32)
+    matrix = np.asarray(rows, dtype=float)
     data = {
         name: matrix[:, idx]
         for idx, name in enumerate(header_tokens)
@@ -433,7 +433,7 @@ def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData 
         return None
 
     try:
-        obs_w = np.asarray(fd.get("W_temp").values, dtype=np.float32)
+        obs_w = np.asarray(fd.get("W_temp").values, dtype=float)
         obs_L = np.asarray(fd.get("L").values)
         obs_T = np.asarray(fd.get("T").values)
     except ValueError:
@@ -446,9 +446,23 @@ def load_compact_wilson_file(path: str, min_step: int = 0) -> CompactWilsonData 
     steps = np.asarray(step_obs.values) if step_obs is not None else None
     rows_per_cfg = _infer_rows_per_configuration(steps, obs_L, obs_T, flow_times=flow_times)
 
-    if rows_per_cfg <= 0 or len(obs_w) % rows_per_cfg != 0:
+    if rows_per_cfg <= 0:
         print(f"Warning: Unable to determine rows per configuration for {path}, skipping W_temp loading.")
         return None
+    complete_length = (len(obs_w) // rows_per_cfg) * rows_per_cfg
+    if complete_length <= 0:
+        print(f"Warning: Unable to determine rows per configuration for {path}, skipping W_temp loading.")
+        return None
+    if complete_length != len(obs_w):
+        dropped_rows = len(obs_w) - complete_length
+        print(
+            f"Warning: Dropping {dropped_rows} trailing incomplete W_temp row(s) from {path}."
+        )
+        obs_w = obs_w[:complete_length]
+        obs_L = obs_L[:complete_length]
+        obs_T = obs_T[:complete_length]
+        if flow_times is not None:
+            flow_times = flow_times[:complete_length]
 
     if flow_times is None:
         flow_order = [(None, int(l), int(t)) for l, t in zip(obs_L[:rows_per_cfg], obs_T[:rows_per_cfg])]
@@ -494,7 +508,7 @@ def combine_compact_wilson_data(
         return None
 
     combined_pairs = {
-        pair: np.concatenate(chunks_by_pair[pair]).astype(np.float32, copy=False)
+        pair: np.concatenate(chunks_by_pair[pair]).astype(float, copy=False)
         for pair in final_order
     }
     return CompactWilsonData(
@@ -544,7 +558,7 @@ def combine_file_data(
 
     combined = FileData(f"{source_name}.out")
     combined.observables = [
-        ObservableData(name, np.concatenate(chunks_by_name[name]).astype(np.float32, copy=False))
+        ObservableData(name, np.concatenate(chunks_by_name[name]).astype(float, copy=False))
         for name in final_names
     ]
 

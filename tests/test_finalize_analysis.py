@@ -707,6 +707,32 @@ class FinalizeAnalysisTests(unittest.TestCase):
             calc = Calculator(compact, n_bootstrap=8, step_size=1)
             self.assertAlmostEqual(calc.get_variable("W_R_T", R=1, T=1, flow_time=0.25).get(), 0.575)
 
+    def test_flow_time_normalization_matches_float32_input(self):
+        self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.96)), 0.96)
+        self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.97)), 0.97)
+
+    def test_flowed_w_temp_loading_drops_trailing_incomplete_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gradient_flow_wtemp.dat"
+            path.write_text(
+                "# conf_id t_over_a2 L T W_temp\n"
+                "0 0.0 1 1 0.5\n"
+                "0 0.96 1 1 0.6\n"
+                "5 0.0 1 1 0.4\n"
+                "5 0.96 1 1 0.55\n"
+                "10 0.0 1 1 0.3\n",
+                encoding="utf-8",
+            )
+
+            compact = data_organizer.load_compact_wilson_file(str(path), min_step=0)
+
+            self.assertIsNotNone(compact)
+            assert compact is not None
+            self.assertEqual(compact.available_flow_times(), [0.0, 0.96])
+            self.assertEqual(compact.n_configurations, 2)
+            calc = Calculator(compact, n_bootstrap=8, step_size=1)
+            self.assertAlmostEqual(calc.get_variable("W_R_T", R=1, T=1, flow_time=0.96).get(), 0.575)
+
     def test_finalized_runner_uses_requested_wilson_flow_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

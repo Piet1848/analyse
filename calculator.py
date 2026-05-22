@@ -344,7 +344,7 @@ class Calculator:
             return
 
         try:
-            obs_val = np.asarray(self.file_data.get("W_temp").values, dtype=np.float32)
+            obs_val = np.asarray(self.file_data.get("W_temp").values, dtype=float)
         except ValueError as e:
             raise KeyError(f"Missing required column W_temp in file: {e}") from e
 
@@ -367,7 +367,7 @@ class Calculator:
         cache = collections.defaultdict(list)
         for flow_time, l_val, t_val, val in zip(flow_iter, obs_L, obs_T, obs_val):
             cache[self._flow_key(flow_time, int(l_val), int(t_val))].append(val)
-        self._w_rt_cache = {k: np.asarray(v, dtype=np.float32) for k, v in cache.items()}
+        self._w_rt_cache = {k: np.asarray(v, dtype=float) for k, v in cache.items()}
         self._pair_order = sorted(self._w_rt_cache)
 
     def get_available_flow_times(self) -> list[float | None]:
@@ -457,7 +457,7 @@ class Calculator:
             )
 
         first_pair = pairs[0]
-        first_values = np.asarray(self._w_rt_cache[first_pair], dtype=np.float32)
+        first_values = np.asarray(self._w_rt_cache[first_pair], dtype=float)
         n_samples = int(len(first_values))
         if n_samples <= 0:
             raise ValueError("No Wilson-loop samples available for bootstrap priming.")
@@ -470,7 +470,7 @@ class Calculator:
             series = self._w_rt_cache.get(pair)
             if series is None:
                 raise ValueError(f"No data found for flow_time={pair[0]}, R={pair[1]}, T={pair[2]}")
-            series_arr = np.asarray(series, dtype=np.float32)
+            series_arr = np.asarray(series, dtype=float)
             if len(series_arr) != n_samples:
                 raise ValueError("Compact Wilson data must have a consistent number of samples per pair.")
             mean_values[idx] = float(np.mean(series_arr))
@@ -528,7 +528,7 @@ class Calculator:
                 continue
             mean_values, block_sum_matrix, block_lengths = self._build_compact_block_sums(length_pairs)
             n_blocks = block_sum_matrix.shape[0]
-            bootstrap_matrix = np.empty((self.n_bootstrap, len(length_pairs)), dtype=np.float32)
+            bootstrap_matrix = np.empty((self.n_bootstrap, len(length_pairs)), dtype=float)
             rng = np.random.default_rng(self.seed)
 
             for start in range(0, self.n_bootstrap, bootstrap_chunk_size):
@@ -539,7 +539,7 @@ class Calculator:
                 total_lengths = counts @ block_lengths
                 bootstrap_matrix[start:start + current_size] = (
                     (counts @ block_sum_matrix) / total_lengths[:, None]
-                ).astype(np.float32, copy=False)
+                ).astype(float, copy=False)
 
             for idx, pair in enumerate(length_pairs):
                 flow_val, r_val, t_val = pair
@@ -566,7 +566,7 @@ class Calculator:
         if selected_values is None:
             raise ValueError(f"No data found for flow_time={key[0]}, R={R}, T={T}")
 
-        selected_values = np.asarray(selected_values, dtype=np.float32)
+        selected_values = np.asarray(selected_values, dtype=float)
         n_samples = len(selected_values)
 
         if n_samples == 0:
@@ -588,7 +588,7 @@ class Calculator:
         bootstrap_means = (
             block_sums[sampled_blocks].sum(axis=1) /
             block_lengths[sampled_blocks].sum(axis=1)
-        ).astype(np.float32, copy=False)
+        ).astype(float, copy=False)
 
         var_data.set_value(
             mean_val,
