@@ -60,7 +60,7 @@ continuum limit as the lattice spacing is reduced.
 \begin{description}
   \item[$\latspacing$] Lattice spacing.
   \item[$\beta$] Bare lattice coupling parameter.
-  \item[$\eps_1,\eps_2$] Bare parameters controlling the explicit breaking of gauge invariance.
+  \item[$\eps_1$] Bare parameter controlling the explicit breaking of gauge invariance.
   \item[$\wilsonloop$] Wilson loop with spatial extent $R$ and temporal extent $T$.
   \item[$\creutz$] Creutz ratio used to estimate the force and string tension.
   \item[$\rzero$] Sommer scale defined through $r^2F(r)=1.65$.
@@ -423,6 +423,13 @@ order $\latspacing^2$, although the actual scaling observed in numerical data
 can be affected by statistics, finite-volume effects, operator definitions, and
 the accessible range of lattice spacings.
 
+The action in Eq.~\eqref{eq:wilson-action-su2} is the gauge-invariant reference
+action. In the numerical study this action is supplemented by a controlled
+gauge-breaking deformation. The explicit form of this deformation and its
+symmetry properties are introduced in Chapter~\ref{chap:small-breaking}. The
+standard Wilson action is kept as the reference theory corresponding to
+\(\epsilon_1=\epsilon_2=0\).
+
 \subsection{Path Integral and Expectation Values}
 \label{subsec:lattice-path-integral}
 
@@ -752,12 +759,12 @@ static potential in lattice units:
   a V(R).
 \end{equation}
 
-In the numerical analysis, $W(R,T)$ denotes the already normalized and spatially
-averaged observable stored as \texttt{W\_temp}. No additional color, volume, or
-spatial-direction normalization is applied during the analysis. The main
-remaining analysis choices are the thermalization cut, the treatment of
-autocorrelations, the temporal range used for the extraction, and the estimation
-of statistical uncertainties.
+In the numerical analysis, \(W(R,T)\) denotes the value stored as
+\texttt{W\_temp}. This quantity is already normalized by the color factor
+\(1/N_c\), averaged over lattice base points, and averaged over the spatial
+directions used for temporal Wilson loops. For the \(\mathrm{SU}(2)\) simulations
+considered here, \(N_c=2\). Therefore no further normalization by color, volume,
+or spatial directions is applied in the analysis.
 
 \subsection{Creutz Ratios}
 \label{subsec:creutz-ratios}
@@ -967,9 +974,10 @@ The central question is whether this dependence remains in the continuum
 intercept after the data are expressed in physical units.
 
 \section{Definition of the Gauge-Breaking Deformation}
-The simulations start from the usual Wilson plaquette action and add explicit
-single-link terms. Up to additive constants that do not affect expectation
-values, the action used in the Metropolis path is
+
+The simulations start from the Wilson plaquette action and add an explicit
+single-link term. Up to additive constants that do not affect normalized
+expectation values, the action used for the Metropolis ensembles is
 \begin{equation}
   S[U]
   =
@@ -977,26 +985,47 @@ values, the action used in the Metropolis path is
   \sum_p
   \operatorname{Re}\operatorname{tr} U_p
   -
-  \frac{\eps_1}{2}
+  \eps_1
   \sum_{x,\mu}
-  \operatorname{Re}\operatorname{tr} U_\mu(x)
-  -
-  \eps_2
-  \sum_{x,\mu}
-  \left[
-    \operatorname{Re}\operatorname{tr} U_\mu(x)
-  \right]^2 .
+  \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_\mu(x).
   \label{eq:gauge-breaking-action}
 \end{equation}
-Here $U_p$ denotes the plaquette matrix, $N_c=2$ for the ensembles studied in
-this work, and $\eps_1$ and $\eps_2$ are bare parameters controlling the
-strength of the explicit breaking. The first term is the Wilson plaquette
-action written without the irrelevant constant. The second and third terms are
-not built from closed loops. They act directly on individual links and are
-therefore sensitive to the representative chosen on each gauge orbit.
+Here \(U_p\) denotes the plaquette matrix, \(N_c=2\) for the
+\(\mathrm{SU}(2)\) ensembles studied in this work, and \(\eps_1\) is the bare
+parameter controlling the strength of the explicit breaking. For \(N_c=2\), the
+linear breaking term is equivalently
+\begin{equation}
+  -\frac{\eps_1}{2}
+  \sum_{x,\mu}
+  \operatorname{Re}\operatorname{tr} U_\mu(x).
+\end{equation}
 
-For a proposed replacement of a single link $U_{\mathrm{old}}$ by
-$U_{\mathrm{new}}$, the Metropolis acceptance step uses the local action
+The first term is the Wilson plaquette action written without the irrelevant
+constant. Indeed,
+\begin{equation}
+  \beta\sum_p
+  \left(
+    1-\frac{1}{N_c}\operatorname{Re}\operatorname{tr}U_p
+  \right)
+  =
+  \beta N_p
+  -
+  \frac{\beta}{N_c}
+  \sum_p
+  \operatorname{Re}\operatorname{tr}U_p ,
+\end{equation}
+where \(N_p\) is the number of plaquettes. The constant \(\beta N_p\) cancels
+from normalized expectation values. For \(\eps_1=0\), the action therefore
+reduces to the standard gauge-invariant Wilson theory.
+
+The second term is not built from closed loops. It acts directly on individual
+links and is therefore sensitive to the representative chosen on each gauge
+orbit. Positive \(\eps_1\) favours links with large positive
+\(\operatorname{Re}\operatorname{tr}U_\mu(x)\), and therefore biases links
+toward the identity element.
+
+For a proposed replacement of a single link \(U_{\mathrm{old}}\) by
+\(U_{\mathrm{new}}\), the Metropolis acceptance step uses the local action
 difference
 \begin{align}
   \Delta S
@@ -1012,49 +1041,16 @@ difference
   \notag\\
   &\quad
   -
-  \frac{\eps_1}{2}
+  \eps_1
   \left[
-    \operatorname{Re}\operatorname{tr} U_{\mathrm{new}}
+    \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_{\mathrm{new}}
     -
-    \operatorname{Re}\operatorname{tr} U_{\mathrm{old}}
-  \right]
-  \notag\\
-  &\quad
-  -
-  \eps_2
-  \left[
-    \left(\operatorname{Re}\operatorname{tr} U_{\mathrm{new}}\right)^2
-    -
-    \left(\operatorname{Re}\operatorname{tr} U_{\mathrm{old}}\right)^2
+    \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_{\mathrm{old}}
   \right],
   \label{eq:gauge-breaking-metropolis-delta-s}
 \end{align}
-where $S$ is the usual staple sum coupled to the updated link. This expression
-is the local form of Eq.~\eqref{eq:gauge-breaking-action}. Positive $\eps_1$
-favours links with large positive
-$\operatorname{Re}\operatorname{tr} U_\mu(x)$ and therefore biases links toward
-the identity element. The quadratic term controlled by $\eps_2$ favours links
-with large
-$\left|\operatorname{Re}\operatorname{tr} U_\mu(x)\right|$ in the Metropolis
-implementation.
-
-The heatbath and overrelaxation code uses a modified local matrix
-\begin{equation}
-  M
-  =
-  \beta S
-  +
-  \frac{N_c\eps_1}{2}\,\mathbb{1},
-  \label{eq:heatbath-modified-local-matrix}
-\end{equation}
-so the heatbath kernel includes the linear $\eps_1$ deformation. Although the
-heatbath parameter structure contains an $\eps_2$ entry, the current heatbath
-kernel does not include the quadratic $\eps_2$ contribution. Consequently,
-ensembles generated with the Metropolis update realize both terms in
-Eq.~\eqref{eq:gauge-breaking-action}, whereas heatbath or overrelaxation
-updates realize only the linear breaking term unless stated otherwise. This
-algorithmic distinction is important when comparing ensembles produced by
-different update paths.
+where \(S\) is the usual staple sum coupled to the updated link. This is the
+local form of Eq.~\eqref{eq:gauge-breaking-action}.
 
 The symmetry breaking follows directly from the lattice gauge transformation
 law in Eq.~\eqref{eq:lattice-gauge-transformation}. The Wilson plaquette term is
@@ -1076,10 +1072,10 @@ and therefore
   \label{eq:single-link-trace-gauge-transform}
 \end{equation}
 For independent transformations at the two endpoints of the link, this is not
-equal to the original trace in general. Thus nonzero $\eps_1$ or $\eps_2$
-explicitly breaks the local gauge symmetry. The exact local redundancy of the
-Wilson theory is replaced by a theory whose Boltzmann weight distinguishes
-between different representatives of the same Wilson gauge orbit.
+equal to the original trace in general. Thus nonzero \(\eps_1\) explicitly
+breaks the local gauge symmetry. The exact local redundancy of the Wilson
+theory is replaced by a theory whose Boltzmann weight distinguishes between
+different representatives of the same Wilson gauge orbit.
 
 One exact symmetry remains. If the same group element is used at every lattice
 site,
@@ -1091,8 +1087,14 @@ then each link transforms by conjugation,
   U_\mu(x) \mapsto \Omega U_\mu(x)\Omega^\dagger ,
 \end{equation}
 and the trace is unchanged. The deformed action therefore preserves the global
-diagonal $\SU(N_c)$ subgroup while breaking the independent site-dependent
+diagonal \(\SU(N_c)\) subgroup while breaking the independent site-dependent
 gauge transformations.
+
+The deformation acts as an explicit preference for particular representatives
+on each gauge orbit. It is not a gauge fixing of the Wilson theory: the
+Boltzmann weight itself is changed. The central question of this thesis is
+whether this explicit gauge-orbit bias disappears from gauge-invariant
+observables as the continuum limit is approached.
 
 \section{Symmetry and Scaling Expectations}
 \subsection{Relevant, Marginal, and Irrelevant Breaking Terms}
@@ -1109,7 +1111,7 @@ zero.
 
 The single-link trace terms are local and ultra-violet in character. They act
 on individual links rather than on extended physical observables. This makes it
-plausible that small values of $\eps_1$ and $\eps_2$ may first appear as cutoff
+plausible that small values of $\eps_1$ may first appear as cutoff
 distortions in short-distance quantities such as small Wilson loops and short
 Creutz ratios. Plausibility, however, is not a proof of irrelevance. Since the
 terms are not protected by local gauge symmetry, the numerical analysis must
@@ -1124,15 +1126,13 @@ ensembles lie on different lattice trajectories but approach the same
 continuum fixed point. For a dimensionless observable $\hat O$, this situation
 has the schematic form
 \begin{equation}
-  \hat O(\hat a,\eps_1,\eps_2)
+  \hat O(\hat a,\eps_1,)
   =
   O_0
   +
   c_a \hat a^2
   +
   c_1 \eps_1 \hat a^{p_1}
-  +
-  c_2 \eps_2 \hat a^{p_2}
   +
   \cdots ,
   \qquad
@@ -1145,13 +1145,11 @@ dependent, but the important point is the common intercept $O_0$.
 If restoration does not occur at fixed breaking strength, the leading
 dependence can instead enter the continuum intercept,
 \begin{equation}
-  \hat O(\hat a,\eps_1,\eps_2)
+  \hat O(\hat a,\eps_1)
   =
   O_0
   +
   d_1\eps_1
-  +
-  d_2\eps_2
   +
   c_a \hat a^2
   +
@@ -1170,9 +1168,8 @@ average link trace because the action gives lower weight to links far from the
 identity. This also affects Wilson loops indirectly, since products of links
 become biased toward larger traces. For sufficiently small $\eps_1$, the
 leading response of a generic observable is expected to be approximately
-linear unless a symmetry forbids the linear term. The $\eps_2$ term is
-quadratic in the real link trace. In the Metropolis implementation it is
-therefore even under
+linear unless a symmetry forbids the linear term. In the Metropolis implementation
+it is therefore even under
 $\operatorname{Re}\operatorname{tr}U_\mu(x)\mapsto
 -\operatorname{Re}\operatorname{tr}U_\mu(x)$ at the level of a single link, but
 it is still gauge breaking and can shift gauge-invariant observables through
@@ -1204,11 +1201,11 @@ to organize the observed breaking strength relative to the measured scale.
 \section{Working Hypotheses}
 The numerical analysis tests the following hypotheses.
 \begin{enumerate}
-  \item For sufficiently small $\eps_1$ and $\eps_2$, gauge-invariant observables can approach the same continuum values as in the Wilson theory, even though local gauge symmetry is broken at finite lattice spacing.
+  \item For sufficiently small $\eps_1$, gauge-invariant observable can approach the same continuum values as in the Wilson theory, even though local gauge symmetry is broken at finite lattice spacing.
   \item At fixed lattice spacing, the deformation produces measurable shifts in short-distance observables, especially the average link trace, small Wilson loops, and small Creutz ratios.
   \item If the breaking behaves as an irrelevant cutoff effect, the shifts between broken and unbroken ensembles decrease with a positive power of $\latspacing/\rzero$ after comparison at fixed physical distance.
-  \item If the deformation contains a relevant component, fixed nonzero $\eps_1$ or $\eps_2$ produces continuum extrapolations whose intercepts are incompatible with the gauge-invariant baseline.
-  \item There may be a practical small-breaking regime. Beyond it, the response to $\eps_1$ or $\eps_2$ can become nonlinear, continuum fits can become unstable, and the assumptions behind a perturbative breaking analysis no longer apply.
+  \item If the deformation contains a relevant component, fixed nonzero $\eps_1$ produces continuum extrapolations whose intercepts are incompatible with the gauge-invariant baseline.
+  \item There may be a practical small-breaking regime. Beyond it, the response to $\eps_1$ can become nonlinear, continuum fits can become unstable, and the assumptions behind a perturbative breaking analysis no longer apply.
 \end{enumerate}
 
 \chapter{Methodological Approach}
@@ -1220,7 +1217,7 @@ The gauge-field ensembles were generated for pure $\SU(2)$ lattice gauge theory
 on four-dimensional hypercubic lattices. Each ensemble is specified by an
 \texttt{input.yaml} file, which contains the lattice geometry
 $N_0\times N_1\times N_2\times N_3$, the bare coupling $\beta$, the
-gauge-breaking parameters $\eps_1$ and $\eps_2$, the Metropolis update
+gauge-breaking parameters $\eps_1$, the Metropolis update
 parameters, and the measurement setup. The simulations use the Wilson gauge
 action supplemented by the gauge-breaking deformation introduced in
 Chapter~\ref{chap:small-breaking}. Gauge configurations are generated with a
@@ -1228,8 +1225,7 @@ local Metropolis algorithm. One sweep consists of updating all link variables of
 the lattice, with \texttt{nHits} Metropolis proposals per link. The proposal
 size is controlled by the parameter \texttt{delta}. The main bare parameters
 varied in the simulation campaign are the coupling $\beta$, which controls the
-lattice spacing, and the breaking strength $\eps_1$. The parameter $\eps_2$ is
-kept at zero unless stated otherwise. Measurements are performed after fixed
+lattice spacing, and the breaking strength $\eps_1$. Measurements are performed after fixed
 sweep intervals and include the plaquette, the average link trace, and temporal
 Wilson loops. The temporal Wilson loops are measured for selected spatial and
 temporal extents $(R,T)$ and are written to \texttt{W\_temp.out}; these data form
@@ -1282,7 +1278,7 @@ uncertainties used in the later continuum analysis.
 \section{Analysis Pipeline and Data Reduction}
 The final analysis starts from the individual simulation runs and groups
 together runs with the same base parameters, in particular the same
-$\beta$, lattice size, $\eps_1$, and $\eps_2$. Runs in such a group differ only
+$\beta$, lattice size, $\eps_1$. Runs in such a group differ only
 by statistical details such as the random seed or the total number of sweeps and
 are treated as independent Markov chains for the same ensemble.
 
