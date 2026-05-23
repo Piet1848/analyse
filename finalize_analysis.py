@@ -466,6 +466,46 @@ def discover_run_directories(root: str) -> list[str]:
     return run_dirs
 
 
+def discover_run_directories_from_roots(roots: list[str]) -> list[str]:
+    run_dirs: set[str] = set()
+    errors: list[str] = []
+    for root in roots:
+        try:
+            run_dirs.update(discover_run_directories(root))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors and not run_dirs:
+        raise ValueError("; ".join(errors))
+    return sorted(run_dirs)
+
+
+def resolve_selected_run_directories(paths: list[str]) -> tuple[list[str], bool]:
+    run_dirs: set[str] = set()
+    expanded_roots = False
+    missing: list[str] = []
+    errors: list[str] = []
+
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_dir():
+            missing.append(str(path))
+            continue
+        if (path / "input.yaml").is_file():
+            run_dirs.add(str(path))
+            continue
+        expanded_roots = True
+        try:
+            run_dirs.update(discover_run_directories(str(path)))
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    if missing:
+        raise ValueError(f"Run directories not found: {missing}")
+    if errors and not run_dirs:
+        raise ValueError("; ".join(errors))
+    return sorted(run_dirs), expanded_roots
+
+
 def filter_run_directories(run_dirs: list[str], criteria: dict[str, Any]) -> list[str]:
     if not criteria:
         return sorted(os.path.abspath(path) for path in run_dirs)
@@ -2036,22 +2076,27 @@ class FinalizedAnalysisRunner:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Finalize the interactive lattice analysis workflow.")
-    parser.add_argument("run_dirs", nargs="*", help="Exact run directories to combine and analyze.")
+    parser.add_argument(
+        "run_dirs",
+        nargs="*",
+        help="Exact run directories to combine, or roots containing run directories to discover.",
+    )
     parser.add_argument(
         "--run-root",
-        help="Discover all run directories beneath this root and process them in grouped batches.",
+        nargs="+",
+        help="Discover all run directories beneath one or more roots and process them in grouped batches.",
     )
     parser.add_argument(
         "--filter",
         nargs="+",
         metavar="NAME=VALUE",
-        help="Search-data-style YAML parameter filters for --run-root, e.g. beta=2.4 eps1=0.0 L0=24.",
+        help="Search-data-style YAML parameter filters, e.g. beta=2.4 eps1=0.0 L0=24.",
     )
     parser.add_argument(
         "--exclude",
         nargs="+",
         metavar="TEXT_OR_GLOB",
-        help="When using --run-root, exclude run directories whose path contains this text or matches this glob.",
+        help="Exclude run directories whose path contains this text or matches this glob.",
     )
     parser.add_argument(
         "--group-by",
@@ -2071,10 +2116,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-group-size",
         type=int,
         default=1,
-        help="When using --run-root, skip discovered groups with fewer matching runs than this.",
+        help="When grouping discovered runs, skip groups with fewer matching runs than this.",
     )
     parser.add_argument(
         "--list-groups",
+        "--list-group",
         action="store_true",
         help="Print the discovered analysis groups and exit without running the final analysis.",
     )
@@ -2165,13 +2211,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.run_root and args.run_dirs:
-        parser.error("Use either positional run_dirs or --run-root, not both.")
+        parser.error("Use either positional run_dirs or --run-root roots, not both.")
     if not args.run_root and not args.run_dirs:
         parser.error("Provide run directories or use --run-root.")
-    if args.filter and not args.run_root:
-        parser.error("--filter can only be used with --run-root.")
-    if args.exclude and not args.run_root:
-        parser.error("--exclude can only be used with --run-root.")
     if args.min_group_size < 1:
         parser.error("--min-group-size must be at least 1.")
 
@@ -2185,7 +2227,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     if args.run_root:
-        run_dirs = discover_run_directories(args.run_root)
+        run_dirs = discover_run_directories_from_roots(args.run_root)
         run_dirs = filter_run_directories(run_dirs, filter_criteria)
         run_dirs = exclude_run_directories(run_dirs, args.exclude)
         if not run_dirs:
@@ -2196,7 +2238,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.exclude:
                 suffix_parts.append(f"after exclusions: {' '.join(args.exclude)}")
             suffix = f" {'; '.join(suffix_parts)}" if suffix_parts else ""
-            parser.error(f"No run directories found under {args.run_root}{suffix}.")
+            roots_text = ", ".join(args.run_root)
+            parser.error(f"No run directories found under {roots_text}{suffix}.")
         grouped_runs = group_run_directories(
             run_dirs,
             group_by=args.group_by,
@@ -2212,7 +2255,38 @@ def main(argv: list[str] | None = None) -> int:
                 f"No discovered groups have at least {args.min_group_size} matching run(s)."
             )
     else:
-        grouped_runs = [(tuple(), [os.path.abspath(path) for path in args.run_dirs])]
+        try:
+            run_dirs, expanded_roots = resolve_selected_run_directories(args.run_dirs)
+        except ValueError as exc:
+            parser.error(str(exc))
+        run_dirs = filter_run_directories(run_dirs, filter_criteria)
+        run_dirs = exclude_run_directories(run_dirs, args.exclude)
+        if not run_dirs:
+            criteria_text = " ".join(args.filter or [])
+            suffix_parts = []
+            if criteria_text:
+                suffix_parts.append(f"matching filters: {criteria_text}")
+            if args.exclude:
+                suffix_parts.append(f"after exclusions: {' '.join(args.exclude)}")
+            suffix = f" {'; '.join(suffix_parts)}" if suffix_parts else ""
+            parser.error(f"No selected run directories remain{suffix}.")
+        if expanded_roots:
+            grouped_runs = group_run_directories(
+                run_dirs,
+                group_by=args.group_by,
+                require_fixed_dt=args.require_fixed_dt,
+            )
+            grouped_runs = [
+                (signature, group_run_dirs)
+                for signature, group_run_dirs in grouped_runs
+                if len(group_run_dirs) >= args.min_group_size
+            ]
+            if not grouped_runs:
+                parser.error(
+                    f"No discovered groups have at least {args.min_group_size} matching run(s)."
+                )
+        else:
+            grouped_runs = [(tuple(), run_dirs)]
 
     if args.list_groups:
         for index, (signature, run_dirs) in enumerate(grouped_runs, start=1):

@@ -480,6 +480,58 @@ class FinalizeAnalysisTests(unittest.TestCase):
 
             self.assertEqual(matches, sorted([str(run_a.resolve()), str(run_b.resolve())]))
 
+    def test_main_lists_filtered_groups_from_multiple_run_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_root = root / "first"
+            second_root = root / "second"
+            run_a = make_run(first_root, "run_a", beta=2.4)
+            run_b = make_run(second_root, "run_b", beta=2.4, seed=2)
+            run_c = make_run(second_root, "run_c", beta=2.6)
+
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                status = finalize_analysis.main(
+                    [
+                        "--run-root",
+                        str(first_root),
+                        str(second_root),
+                        "--filter",
+                        "beta=2.4",
+                        "--list-group",
+                    ]
+                )
+
+            output = stdout.getvalue()
+            self.assertEqual(status, 0)
+            self.assertIn("[group 1] L0=4, beta=2.4", output)
+            self.assertIn(str(run_a.resolve()), output)
+            self.assertIn(str(run_b.resolve()), output)
+            self.assertNotIn(str(run_c.resolve()), output)
+
+    def test_main_discovers_positional_roots_when_listing_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_root = root / "first"
+            second_root = root / "second"
+            run_a = make_run(first_root, "run_a", beta=2.4)
+            run_b = make_run(second_root, "run_b", beta=2.6)
+
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                status = finalize_analysis.main(
+                    [
+                        str(first_root),
+                        str(second_root),
+                        "--filter",
+                        "beta=2.4",
+                        "--list-groups",
+                    ]
+                )
+
+            output = stdout.getvalue()
+            self.assertEqual(status, 0)
+            self.assertIn(str(run_a.resolve()), output)
+            self.assertNotIn(str(run_b.resolve()), output)
+
     def test_exclude_run_directories_filters_path_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
