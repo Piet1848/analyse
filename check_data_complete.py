@@ -81,7 +81,7 @@ def params_label(metro: Any) -> str:
     lattice = "x".join(str(getattr(metro, f"L{i}")) for i in range(4))
     return (
         f"beta={metro.beta:g} L={lattice} "
-        f"eps1={metro.epsilon1:g} eps2={metro.epsilon2:g} nSweep={metro.nSweep}"
+        f"eps1={metro.epsilon1:g} nSweep={metro.nSweep}"
     )
 
 

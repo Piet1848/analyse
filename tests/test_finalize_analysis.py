@@ -25,7 +25,6 @@ def write_input_yaml(
     *,
     beta: float = 2.4,
     epsilon1: float = 0.2,
-    epsilon2: float = 0.0,
     seed: int = 1,
     n_sweep: int = 100,
     gradient_dt: float = 0.05,
@@ -47,7 +46,6 @@ def write_input_yaml(
             "beta": beta,
             "delta": 0.1,
             "epsilon1": epsilon1,
-            "epsilon2": epsilon2,
         },
         "GaugeObservableParams": {
             "measurement_interval": 1,
@@ -153,7 +151,6 @@ def make_run(
     *,
     beta: float = 2.4,
     epsilon1: float = 0.2,
-    epsilon2: float = 0.0,
     seed: int = 1,
     n_sweep: int = 100,
     run_offset: float = 0.0,
@@ -169,7 +166,6 @@ def make_run(
         run_dir,
         beta=beta,
         epsilon1=epsilon1,
-        epsilon2=epsilon2,
         seed=seed,
         n_sweep=n_sweep,
         gradient_dt=gradient_dt,
@@ -839,7 +835,6 @@ class FinalizeAnalysisTests(unittest.TestCase):
                     "beta": 2.4,
                     "delta": 0.1,
                     "epsilon1": 0.0,
-                    "epsilon2": 0.0,
                 },
                 "GaugeObservableParams": {"W_temp_L_T_pairs": [["1:2", "1:2"]]},
                 "GradientFlowParams": {"enabled": True, "t_values": [0.0, 0.25]},
@@ -925,7 +920,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
     def test_finalized_search_summary_uses_only_finalized_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            analysis_dir = root / "beta_2.4__L_24x24x24x64__eps1_0__eps2_0__nrun_2__abc123"
+            analysis_dir = root / "beta_2.4__L_24x24x24x64__eps1_0__nrun_2__abc123"
             write_json(
                 analysis_dir / "manifest.json",
                 {
@@ -952,7 +947,6 @@ class FinalizeAnalysisTests(unittest.TestCase):
                             "L2": 24,
                             "L3": 64,
                             "epsilon1": 0.0,
-                            "epsilon2": 0.0,
                         }
                     },
                 },
@@ -1013,8 +1007,8 @@ class FinalizeAnalysisTests(unittest.TestCase):
     def test_finalized_search_quick_filters_by_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            first = root / "beta_2.4__L_24x24x24x64__eps1_0__eps2_0__nrun_1__first"
-            second = root / "beta_2.5__L_32x32x32x64__eps1_0__eps2_0__nrun_1__second"
+            first = root / "beta_2.4__L_24x24x24x64__eps1_0__nrun_1__first"
+            second = root / "beta_2.5__L_32x32x32x64__eps1_0__nrun_1__second"
             write_json(first / "manifest.json", {"analysis_id": "first", "status": {}})
             write_json(second / "manifest.json", {"analysis_id": "second", "status": {}})
 
@@ -1029,7 +1023,6 @@ class FinalizeAnalysisTests(unittest.TestCase):
         self.assertIn("chi_R=T_1.5", columns)
         self.assertNotIn("chi_R=T_1.5", search_data.FINALIZED_SUMMARY_COLUMNS)
         self.assertIn("source_path", search_data.FINALIZED_SUMMARY_COLUMNS)
-        self.assertNotIn("epsilon2", search_data.FINALIZED_SUMMARY_COLUMNS)
         self.assertNotIn("n_runs", search_data.FINALIZED_SUMMARY_COLUMNS)
 
     def test_finalized_table_rounds_values_to_uncertainties(self):

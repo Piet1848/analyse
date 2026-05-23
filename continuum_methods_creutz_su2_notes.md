@@ -544,7 +544,7 @@ The normalization cancels in the standard Creutz ratio, so the core formula is u
 
 ### Gauge Breaking Versus Smearing
 
-Smearing is gauge covariant when applied correctly; it does not intentionally break gauge symmetry. Your gauge-breaking setup is different if the action/update rule contains explicit non-gauge-invariant terms controlled by parameters such as `epsilon1` and `epsilon2`.
+Smearing is gauge covariant when applied correctly; it does not intentionally break gauge symmetry. Your gauge-breaking setup is different if the action/update rule contains explicit non-gauge-invariant terms controlled by a parameter such as `epsilon1`.
 
 Still, both situations can be analyzed with a similar continuum question:
 
@@ -697,7 +697,7 @@ Quadratic breaking test:
   = c_0
   + c_a \hat{a}^2
   + c_\epsilon \epsilon
-  + c_{\epsilon2} \epsilon^2
+  + c_{\epsilon^2} \epsilon^2
   + c_{a\epsilon} \hat{a}^2 \epsilon.
 ```
 

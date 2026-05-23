@@ -53,11 +53,10 @@ from load_input_yaml import (
 
 SCHEMA_VERSION = 1
 IGNORED_METRO_FIELDS = {"seed", "nSweep"}
-REQUIRED_METRO_FIELDS = {"beta", "L0", "epsilon1", "epsilon2"}
+REQUIRED_METRO_FIELDS = {"beta", "L0", "epsilon1"}
 ALLOWED_GRADIENT_FLOW_FIELDS = {"dt", "t_values"}
 GROUP_FIELD_ALIASES = {
     "eps1": "epsilon1",
-    "eps2": "epsilon2",
     "dt": "gradient_flow.dt",
     "t_values": "gradient_flow.t_values",
     "gf.dt": "gradient_flow.dt",
@@ -823,7 +822,6 @@ class FinalizedAnalysisRunner:
             f"beta_{format_token(self.metro.beta)}"
             f"__L_{self.metro.L0}x{self.metro.L1}x{self.metro.L2}x{self.metro.L3}"
             f"__eps1_{format_token(self.metro.epsilon1)}"
-            f"__eps2_{format_token(self.metro.epsilon2)}"
             f"{flow_part}"
             f"__nrun_{len(self.run_dirs)}"
             f"__{self.analysis_id}"
@@ -1991,7 +1989,7 @@ class FinalizedAnalysisRunner:
             "  Ensemble: "
             f"beta={self.metro.beta:g}, "
             f"L={self.metro.L0}x{self.metro.L1}x{self.metro.L2}x{self.metro.L3}, "
-            f"epsilon1={self.metro.epsilon1:g}, epsilon2={self.metro.epsilon2:g}, "
+            f"epsilon1={self.metro.epsilon1:g}, "
             f"runs={len(self.run_dirs)}"
         )
         if self.thermalization_steps is not None:

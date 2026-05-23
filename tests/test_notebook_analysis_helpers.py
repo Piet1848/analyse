@@ -28,7 +28,6 @@ def write_input_yaml(run_dir: Path, *, seed: int = 1, n_sweep: int = 100) -> Non
             "beta": 2.4,
             "delta": 0.1,
             "epsilon1": 0.2,
-            "epsilon2": 0.0,
         },
         "GaugeObservableParams": {
             "measurement_interval": 1,

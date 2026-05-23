@@ -71,7 +71,6 @@ CALCULATED_FIELD_ALIASES = {
 
 FIELD_ALIASES = {
     "eps1": "epsilon1",
-    "eps2": "epsilon2",
 }
 
 DEFAULT_FINALIZED_ANALYSIS_ROOT = Path("../data/finalized_analysis")
@@ -321,11 +320,6 @@ def _parse_finalized_dir_name(path: Path) -> Dict[str, Any]:
                 parsed["epsilon1"] = float(part.removeprefix("eps1_"))
             except ValueError:
                 parsed["epsilon1"] = part.removeprefix("eps1_")
-        elif part.startswith("eps2_"):
-            try:
-                parsed["epsilon2"] = float(part.removeprefix("eps2_"))
-            except ValueError:
-                parsed["epsilon2"] = part.removeprefix("eps2_")
         elif part.startswith("nrun_"):
             try:
                 parsed["n_runs"] = int(part.removeprefix("nrun_"))
@@ -445,7 +439,6 @@ def _read_finalized_analysis_row(analysis_dir: Path) -> Optional[Dict[str, Any]]
         "L2": metro.get("L2"),
         "L3": metro.get("L3"),
         "epsilon1": metro.get("epsilon1", parsed_name.get("epsilon1")),
-        "epsilon2": metro.get("epsilon2", parsed_name.get("epsilon2")),
         "block_size": manifest.get("block_size"),
         "thermalization_steps": manifest.get("thermalization_steps"),
         "target_force": manifest.get("target_force"),

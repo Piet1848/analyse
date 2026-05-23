@@ -23,7 +23,6 @@ class MetropolisParams:
     beta: float
     delta: float
     epsilon1: float
-    epsilon2: float
 
 
 @dataclass
