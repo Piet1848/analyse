@@ -931,188 +931,131 @@ This quantity is useful because it is independent of the arbitrary choice of
 lattice units. Agreement of such dimensionless quantities along a sequence of
 lattice spacings is a central test of scaling toward a common continuum limit.
 
-\chapter{Research Gap and Gauge-Breaking Framework}
+\chapter{Gauge-Breaking Deformation}
 \label{chap:small-breaking}
 
-\section{Research Gap Derived from the Background}
-The background chapter establishes two facts that are central for this thesis.
-First, the Wilson plaquette action preserves local gauge invariance exactly at
-nonzero lattice spacing. Second, the continuum limit is not tested directly on
-the bare link variables, but through dimensionless observables such as Wilson
-loops, Creutz ratios, the static potential, the Sommer scale, and combinations
-involving the string tension. The research gap is the relation between these
-two facts when the lattice action is deliberately deformed by terms that are
-not locally gauge invariant.
+This chapter defines the explicit gauge-breaking deformation used in the
+simulations and derives the scaling expectation that motivates the numerical
+tests.
 
-The standard universality argument says that many changes of the lattice action
-do not change the continuum theory. If the added terms correspond only to
-irrelevant cutoff effects, their contribution to physical observables should
-disappear as $\latspacing \to 0$. Gauge invariance, however, is a particularly
-restrictive symmetry. Once it is broken at finite lattice spacing, the usual
-symmetry argument that forbids gauge-noninvariant counterterms no longer
-applies. A small breaking term can therefore be harmless only if its effect is
-dynamically suppressed along the continuum trajectory, or if the coefficient is
-tuned in such a way that the gauge-invariant fixed point is recovered.
+\section{Definition of the Deformation}
+\label{sec:definition-gauge-breaking-deformation}
 
-This leaves an empirical question for the present simulations. The deformation
-is known explicitly at the level of the update action, and its strength can be
-varied or scaled with $\latspacing$. The weak-field argument below shows that
-the linear single-link term contains a relevant masslike component. What is not
-known a priori is how strongly this component affects the measured
-gauge-invariant observables in the accessible lattice-spacing range, and
-whether scaled trajectories suppress it enough to recover the undeformed
-continuum values. The role of the numerical analysis is therefore not merely to
-observe a dependence on the breaking parameters at fixed lattice spacing. Such
-a dependence is expected. The central question is whether this dependence
-remains in the continuum intercept after the data are expressed in physical
-units.
-
-\section{Definition of the Gauge-Breaking Deformation}
-
-The simulations start from the Wilson plaquette action and add an explicit
-single-link term. Up to additive constants that do not affect normalized
-expectation values, the action used for the Metropolis ensembles is
+The gauge-invariant reference theory is pure \(\SU(2)\) lattice gauge theory
+with the Wilson plaquette action. The deformed theory is obtained by adding a
+linear single-link term. Up to additive constants that do not affect normalized
+expectation values, the action is
 \begin{equation}
   S[U]
   =
-  -\frac{\beta}{N_c}
-  \sum_p
-  \operatorname{Re}\operatorname{tr} U_p
+  -\beta
+  \sum_x
+  \sum_{\mu<\nu}
+  \frac{1}{N_c}
+  \operatorname{Re}\operatorname{tr} U_{\mu\nu}(x)
   -
   \eps_1
-  \sum_{x,\mu}
-  \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_\mu(x).
+  \sum_x
+  \sum_{\mu=1}^{4}
+  \frac{1}{N_c}
+  \operatorname{Re}\operatorname{tr} U_\mu(x).
   \label{eq:gauge-breaking-action}
 \end{equation}
-Here \(U_p\) denotes the plaquette matrix, \(N_c=2\) for the
-\(\mathrm{SU}(2)\) ensembles studied in this work, and \(\eps_1\) is the bare
-parameter controlling the strength of the explicit breaking. For \(N_c=2\), the
-linear breaking term is equivalently
+Here \(U_p\) is the plaquette matrix, \(N_c=2\) in the simulations considered
+in this thesis, and \(\eps_1\) controls the strength of the explicit
+gauge-breaking deformation. The undeformed Wilson theory is recovered for
 \begin{equation}
-  -\frac{\eps_1}{2}
-  \sum_{x,\mu}
-  \operatorname{Re}\operatorname{tr} U_\mu(x).
+  \eps_1=0 .
 \end{equation}
 
-The first term is the Wilson plaquette action written without the irrelevant
-constant. Indeed,
-\begin{equation}
-  \beta\sum_p
-  \left(
-    1-\frac{1}{N_c}\operatorname{Re}\operatorname{tr}U_p
-  \right)
-  =
-  \beta N_p
-  -
-  \frac{\beta}{N_c}
-  \sum_p
-  \operatorname{Re}\operatorname{tr}U_p ,
-\end{equation}
-where \(N_p\) is the number of plaquettes. The constant \(\beta N_p\) cancels
-from normalized expectation values. For \(\eps_1=0\), the action therefore
-reduces to the standard gauge-invariant Wilson theory.
+For positive \(\eps_1\), the single-link term lowers the action when
+\(\operatorname{Re}\operatorname{tr}U_\mu(x)\) is large. It therefore biases
+individual links toward the identity element. This is the intended controlled
+violation of local gauge invariance.
 
-The second term is not built from closed loops. It acts directly on individual
-links and is therefore sensitive to the representative chosen on each gauge
-orbit. Positive \(\eps_1\) favours links with large positive
-\(\operatorname{Re}\operatorname{tr}U_\mu(x)\), and therefore biases links
-toward the identity element.
+\section{Breaking of Local Gauge Invariance}
+\label{sec:breaking-local-gauge-invariance}
 
-For a proposed replacement of a single link \(U_{\mathrm{old}}\) by
-\(U_{\mathrm{new}}\), the Metropolis acceptance step uses the local action
-difference
-\begin{align}
-  \Delta S
-  &=
-  -\frac{\beta}{N_c}
-  \left[
-    \operatorname{Re}\operatorname{tr}
-    \left(U_{\mathrm{new}} S\right)
-    -
-    \operatorname{Re}\operatorname{tr}
-    \left(U_{\mathrm{old}} S\right)
-  \right]
-  \notag\\
-  &\quad
-  -
-  \eps_1
-  \left[
-    \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_{\mathrm{new}}
-    -
-    \frac{1}{N_c}\operatorname{Re}\operatorname{tr} U_{\mathrm{old}}
-  \right],
-  \label{eq:gauge-breaking-metropolis-delta-s}
-\end{align}
-where \(S\) is the usual staple sum coupled to the updated link. This is the
-local form of Eq.~\eqref{eq:gauge-breaking-action}.
-
-The symmetry breaking follows directly from the lattice gauge transformation
-law in Eq.~\eqref{eq:lattice-gauge-transformation}. The Wilson plaquette term is
-invariant because each plaquette transforms by conjugation at its base point.
-A single link transforms as
+A local lattice gauge transformation acts on a link variable as
 \begin{equation}
   U_\mu(x)
   \mapsto
-  \Omega(x) U_\mu(x) \Omega^\dagger(x+\hat\mu),
+  \Omega(x)U_\mu(x)\Omega^\dagger(x+\hat\mu),
+  \label{eq:lattice-gauge-transformation-breaking}
 \end{equation}
-and therefore
+where \(\Omega(x)\in\SU(2)\) may be chosen independently at each lattice site.
+
+The plaquette transforms by conjugation at its base point,
 \begin{equation}
-  \operatorname{Re}\operatorname{tr} U_\mu(x)
+  U_p(x)
+  \mapsto
+  \Omega(x)U_p(x)\Omega^\dagger(x),
+\end{equation}
+so \(\operatorname{Re}\operatorname{tr}U_p(x)\) is invariant. This is why the
+Wilson plaquette action preserves local gauge invariance.
+
+The single-link term does not have this property. Under
+Eq.~\eqref{eq:lattice-gauge-transformation-breaking},
+\begin{equation}
+  \operatorname{Re}\operatorname{tr}U_\mu(x)
   \mapsto
   \operatorname{Re}\operatorname{tr}
   \left[
-    \Omega(x) U_\mu(x) \Omega^\dagger(x+\hat\mu)
+    \Omega(x)U_\mu(x)\Omega^\dagger(x+\hat\mu)
   \right].
-  \label{eq:single-link-trace-gauge-transform}
+  \label{eq:single-link-trace-transform}
 \end{equation}
-For independent transformations at the two endpoints of the link, this is not
-equal to the original trace in general. Thus nonzero \(\eps_1\) explicitly
-breaks the local gauge symmetry. The exact local redundancy of the Wilson
-theory is replaced by a theory whose Boltzmann weight distinguishes between
-different representatives of the same Wilson gauge orbit.
+For independent transformations at \(x\) and \(x+\hat\mu\), this is not equal
+to the original trace in general. Thus nonzero \(\eps_1\) explicitly breaks
+local gauge invariance.
 
-One exact symmetry remains. If the same group element is used at every lattice
-site,
+A global diagonal symmetry remains. If \(\Omega(x)=\Omega\) is the same group
+element at every site, then
 \begin{equation}
-  \Omega(x)=\Omega ,
+  U_\mu(x)\mapsto \Omega U_\mu(x)\Omega^\dagger ,
 \end{equation}
-then each link transforms by conjugation,
-\begin{equation}
-  U_\mu(x) \mapsto \Omega U_\mu(x)\Omega^\dagger ,
-\end{equation}
-and the trace is unchanged. The deformed action therefore preserves the global
-diagonal \(\SU(N_c)\) subgroup while breaking the independent site-dependent
-gauge transformations.
+and the trace is unchanged. The deformation therefore breaks local gauge
+invariance while preserving global \(\SU(2)\) conjugation symmetry.
 
-The deformation acts as an explicit preference for particular representatives
-on each gauge orbit. It is not a gauge fixing of the Wilson theory: the
-Boltzmann weight itself is changed. The central question of this thesis is
-whether this explicit gauge-orbit bias disappears from gauge-invariant
-observables as the continuum limit is approached.
+[This deformation is not a gauge fixing of the Wilson theory. Gauge fixing
+chooses representatives of gauge orbits without changing gauge-invariant
+expectation values when implemented correctly. The term in
+Eq.~\eqref{eq:gauge-breaking-action} instead changes the Boltzmann weight
+itself. Different representatives of the same Wilson gauge orbit no longer have
+the same statistical weight. ][maybe not necessary]
 
-\section{Symmetry and Scaling Expectations}
-\subsection{Relevant, Marginal, and Irrelevant Breaking Terms}
-The continuum interpretation of Eq.~\eqref{eq:gauge-breaking-action} can be
-made explicit by expanding the link near the identity,
+\section{Weak-Field Scaling Estimate}
+\label{sec:weak-field-scaling-estimate}
+
+The continuum relevance of the deformation can be estimated by expanding the
+link near the identity. Using the conventional normalization
 \begin{equation}
   U_\mu(x)
   =
-  \exp\!\left[i\latspacing g_0 A_\mu(x)\right] .
+  \exp\!\left[
+    i\latspacing g_0 A_\mu(x)
+  \right],
+  \label{eq:weak-field-link}
 \end{equation}
-For $\SU(2)$,
+one finds for \(\SU(2)\)
 \begin{equation}
   \frac{1}{2}
-  \operatorname{Re}\operatorname{tr} U_\mu(x)
+  \operatorname{Re}\operatorname{tr}U_\mu(x)
   =
   1
   -
   \frac{\latspacing^2 g_0^2}{4}
-  \operatorname{tr} A_\mu^2(x)
+  \operatorname{tr}A_\mu^2(x)
   +
-  \order(\latspacing^4 A_\mu^4) ,
+  \order(\latspacing^4 A_\mu^4).
+  \label{eq:weak-field-single-link-trace}
 \end{equation}
-up to convention-dependent normalization factors for the generators. The
-single-link deformation therefore contains
+The precise numerical prefactor depends on the normalization convention for the
+generators, but the leading correction is always of order
+\(\latspacing^2 g_0^2 A_\mu^2\).
+
+Inserting Eq.~\eqref{eq:weak-field-single-link-trace} into the single-link part
+of the action gives
 \begin{equation}
   S_{\mathrm{break}}
   =
@@ -1121,159 +1064,135 @@ single-link deformation therefore contains
   \frac{\eps_1 g_0^2}{4\latspacing^2}
   \int \dd^4x
   \sum_\mu
-  \operatorname{tr} A_\mu^2(x)
+  \operatorname{tr}A_\mu^2(x)
   +
   \cdots .
   \label{eq:single-link-masslike-term}
 \end{equation}
-Using $g_0^2=4/\beta$ for $\SU(2)$, the coefficient is proportional to
-$\eps_1/(\beta \latspacing^2)$. The induced operator
-$\sum_\mu\operatorname{tr}A_\mu^2$ is not gauge invariant, but once local gauge
-symmetry has been explicitly broken no symmetry forbids it. Since $A_\mu$ has
-canonical dimension one in four dimensions, this is a dimension-two masslike
-operator and is therefore relevant.
-
-Consequently, fixed nonzero $\eps_1$ should not be interpreted as an
-asymptotically irrelevant cutoff deformation. Along a fixed-$\eps_1$ trajectory
-the dimensionless coefficient in units of the Sommer scale grows as
+For \(\SU(2)\),
 \begin{equation}
-  \frac{\eps_1}{\beta}
-  \left(\frac{\rzero}{\latspacing}\right)^2 ,
+  g_0^2=\frac{4}{\beta},
 \end{equation}
-up to logarithmic running through $\beta$. Such ensembles are still useful as a
-numerical stress test, but the weak-field scaling expectation is that a common
-Yang--Mills continuum limit requires the bare breaking parameter to be scaled
-down with the lattice spacing.
+so the coefficient of the leading contribution is proportional to
+\begin{equation}
+  \frac{\eps_1}{\beta\latspacing^2}.
+  \label{eq:masslike-coefficient}
+\end{equation}
 
-\subsection{Possible Restoration of Gauge Invariance}
-Gauge invariance can be effectively restored in the continuum limit only if the
-dimensionless coefficient of the relevant masslike operator vanishes as
-$\latspacing\to0$. This motivates scaling the bare breaking parameter along
-the continuum trajectory. With a reference ensemble at $\beta^\star$, define
+The operator
+\begin{equation}
+  \sum_\mu \operatorname{tr}A_\mu^2
+\end{equation}
+is gauge noninvariant. However, once the single-link deformation has been
+added, local gauge invariance no longer forbids such a term. Since \(A_\mu\)
+has canonical dimension one in four dimensions, this is a dimension-two
+masslike contribution. It is therefore relevant by power counting.
+
+This is the main theoretical reason why fixed nonzero \(\eps_1\) should not be
+treated as an ordinary irrelevant cutoff effect. In units of the Sommer scale,
+the dimensionless size of the induced coefficient behaves as
+\begin{equation}
+  \bar\eps
+  =
+  \frac{\eps_1}{\beta}
+  \left(
+    \frac{\rzero}{\latspacing}
+  \right)^2 .
+  \label{eq:epsilon-bar}
+\end{equation}
+At fixed \(\eps_1\), this grows as \(\latspacing\to0\), up to the logarithmic
+running contained in \(\beta\).
+
+\section{Scaling of the Breaking Parameter}
+\label{sec:scaling-breaking-parameter}
+
+To recover the gauge-invariant continuum theory, the dimensionless breaking
+strength in Eq.~\eqref{eq:epsilon-bar} must be driven to zero.
+
+Let \(\beta^\star\) denote a reference ensemble with breaking amplitude
+\(\eps_1^\star\) and measured scale \((\rzero/\latspacing)^\star\). A useful
+scaling prescription is
 \begin{equation}
   \eps_1(\beta)
   =
   \eps_1^\star
   \frac{\beta}{\beta^\star}
   \left[
-    \frac{(\rzero/\latspacing)^\star}
-         {\rzero/\latspacing(\beta)}
+    \frac{
+      (\rzero/\latspacing)^\star
+    }{
+      \rzero/\latspacing(\beta)
+    }
   \right]^{2+p}.
   \label{eq:epsilon-scaling-prescription}
 \end{equation}
-The power two compensates the engineering dimension of the induced mass
-operator, while $p$ controls any additional suppression. In terms of the
-dimensionless coefficient
-\begin{equation}
-  \bar\eps(\beta)
-  =
-  \frac{\eps_1(\beta)}{\beta}
-  \left(\frac{\rzero}{\latspacing(\beta)}\right)^2 ,
-  \label{eq:epsilon-bar-scaled}
-\end{equation}
-Eq.~\eqref{eq:epsilon-scaling-prescription} gives
+The power two compensates the engineering dimension of the masslike term in
+Eq.~\eqref{eq:single-link-masslike-term}. The additional exponent \(p\)
+controls whether the induced coefficient is kept fixed or suppressed.
+
+Using Eq.~\eqref{eq:epsilon-bar}, the scaled trajectory gives
 \begin{equation}
   \bar\eps(\beta)
   =
   \bar\eps^\star
   \left[
-    \frac{(\rzero/\latspacing)^\star}
-         {\rzero/\latspacing(\beta)}
+    \frac{
+      (\rzero/\latspacing)^\star
+    }{
+      \rzero/\latspacing(\beta)
+    }
   \right]^p .
+  \label{eq:epsilon-bar-scaled}
 \end{equation}
-Thus $p=0$ keeps the masslike coefficient fixed in physical units, whereas
-$p>0$ drives the explicit breaking to zero. The scaled ensembles in the main
-analysis primarily use $p=1$, corresponding to the exponent $2+p=3$ in
-Eq.~\eqref{eq:epsilon-scaling-prescription}.
+Thus \(p=0\) keeps the induced masslike coefficient approximately fixed in
+physical units, while \(p>0\) drives it to zero as the lattice spacing is
+reduced. The main scaled trajectory used in this thesis is \(p=1\), for which
+\(\bar\eps\) decreases linearly in \(\latspacing/\rzero\).
 
-Along such a trajectory with $p>0$, the deformed ensembles and the Wilson
-ensembles can approach the same continuum fixed point. For a dimensionless
-observable $\hat O$, this situation has the schematic form
+The fixed-\(\eps_1\) ensembles therefore serve as stress tests of a relevant
+gauge-breaking deformation. The scaled ensembles test whether the Wilson
+continuum limit is recovered when the relevant breaking is suppressed.
+
+\section{Implications for the Continuum Analysis}
+\label{sec:continuum-implications-breaking}
+
+The observables measured in this thesis are gauge invariant, but their
+expectation values are computed with the deformed probability weight
+\(e^{-S[U]}\). They may therefore depend on \(\eps_1\) at nonzero lattice
+spacing. Such dependence is expected and is not by itself evidence for a
+different continuum limit.
+
+The relevant test is the continuum intercept. Let \(\hat O\) denote a
+dimensionless observable, for example \(\stringtension\rzero^2\) or a Creutz
+ratio expressed at fixed physical distance. Restoration of the gauge-invariant
+continuum limit means that Wilson and scaled gauge-broken ensembles approach
+a common value,
 \begin{equation}
-  \hat O(\hat a,\eps_1^\star)
-  =
-  O_0
-  +
-  c_a \hat a^2
-  +
-  c_1 \bar\eps^\star \hat a^p
-  +
-  \cdots ,
-  \label{eq:restored-gauge-symmetry-scaling}
+  \hat O(\latspacing,\eps_1)
+  \xrightarrow[\latspacing\to0]{}
+  O_0 .
 \end{equation}
-where $\hat a=\latspacing/\rzero$ and reference-scale factors have been
-absorbed into $c_1$. The coefficients and powers are observable dependent, but
-the important point is the common intercept $O_0$.
+In this case the breaking changes only the cutoff effects.
 
-If the relevant breaking is not scaled away, or if restoration does not occur
-over the accessible range, the leading dependence can instead enter the
-continuum intercept,
+If instead the deformed ensembles approach a different intercept, then the
+deformation has not been scaled away in the fitted range. The numerical
+analysis must therefore distinguish two possibilities:
 \begin{equation}
-  \hat O(\hat a,\eps_1)
-  =
-  O_0
-  +
-  d_1\eps_1
-  +
-  c_a \hat a^2
-  +
-  \cdots .
-  \label{eq:nonrestored-gauge-symmetry-scaling}
+  \text{common continuum intercept}
+  \quad\Longleftrightarrow\quad
+  \text{restoration of the Wilson continuum limit},
 \end{equation}
-In this case the deformed theory approaches a different continuum limit, or no
-controlled common continuum limit is visible in the accessible range. The
-distinction between Eqs.~\eqref{eq:restored-gauge-symmetry-scaling} and
-\eqref{eq:nonrestored-gauge-symmetry-scaling} is the main target of the
-continuum fits in Chapter~\ref{chap:methodology}.
+and
+\begin{equation}
+  \text{shifted continuum intercept}
+  \quad\Longleftrightarrow\quad
+  \text{persistent effect of the gauge-breaking deformation}.
+\end{equation}
 
-\subsection{Expected Dependence on Breaking Strength and Lattice Spacing}
-At fixed $\beta$ and fixed volume, increasing $\eps_1$ should increase the
-average link trace because the action gives lower weight to links far from the
-identity. This also affects Wilson loops indirectly, since products of links
-become biased toward larger traces. For sufficiently small $\eps_1$, the
-leading response of a generic observable is expected to be approximately
-linear unless another symmetry forbids the linear term. The deformation is
-therefore gauge breaking and can shift gauge-invariant observables through the
-generated ensemble distribution.
-
-The lattice-spacing dependence is the decisive part of the test. At fixed bare
-$\eps_1$, the relevant-operator argument predicts that the effective breaking
-strength grows in physical units. On scaled trajectories with $p>0$, by
-contrast, the coefficient $\bar\eps$ in Eq.~\eqref{eq:epsilon-bar-scaled} is
-driven to zero. If the remaining breaking only modifies cutoff effects, then
-differences between broken and unbroken ensembles should shrink when
-observables are compared at common physical distance and plotted against
-$\hat a^2$. If the deformation changes the continuum theory, the broken data may
-remain separated from the gauge-invariant baseline as $\hat a\to0$. The
-methodology therefore uses two classes of fits: shared-intercept fits, which
-encode restoration of gauge invariance along a scaled trajectory, and
-separate-intercept fits, which test for a persistent breaking effect.
-
-The coefficient $\bar\eps$ is therefore used as a diagnostic for comparing
-ensembles at different lattice spacings. It is not a substitute for the bare
-action parameter in Eq.~\eqref{eq:gauge-breaking-action}; rather, it provides a
-dimensionless way to organize the observed breaking strength relative to the
-measured scale.
-
-\section{Working Hypotheses}
-The numerical analysis tests the following hypotheses.
-\begin{enumerate}
-  \item The linear single-link deformation contains a relevant masslike
-  component. Fixed nonzero $\eps_1$ should therefore not be assumed to approach
-  the Wilson continuum theory.
-  \item Along scaled trajectories with $p>0$ in
-  Eq.~\eqref{eq:epsilon-scaling-prescription}, gauge-invariant observables can
-  approach the same continuum values as in the Wilson theory, even though local
-  gauge symmetry is broken at finite lattice spacing.
-  \item At fixed lattice spacing, the deformation produces measurable shifts in short-distance observables, especially the average link trace, small Wilson loops, and small Creutz ratios.
-  \item If the scaled breaking behaves as a residual cutoff effect, the shifts
-  between broken and unbroken ensembles decrease with a positive power of
-  $\latspacing/\rzero$ after comparison at fixed physical distance.
-  \item If the relevant deformation is not scaled away, fixed nonzero $\eps_1$
-  produces continuum extrapolations whose intercepts are incompatible with the
-  gauge-invariant baseline, or no controlled common extrapolation is visible.
-  \item There may be a practical small-breaking regime. Beyond it, the response to $\eps_1$ can become nonlinear, continuum fits can become unstable, and the assumptions behind a perturbative breaking analysis no longer apply.
-\end{enumerate}
+This is the central diagnostic used in the following chapters. Fixed
+\(\eps_1\) tests the size of the relevant deformation, while scaled
+\(\eps_1\) tests whether the deformation can be suppressed sufficiently to
+recover the gauge-invariant continuum theory.
 
 \chapter{Methodological Approach}
 \label{chap:methodology}
