@@ -607,7 +607,7 @@ Thus, for sufficiently large \(T\),
   \exp[-aV(R)T].
 \end{equation}
 In practice the signal-to-noise ratio decreases rapidly as the loop area
-\(RT\) grows. This motivates the use of smoothing procedures, such as Wilson
+\(RT\) grows. This can be improved with smoothing procedures, such as Wilson
 flow, before measuring the same Wilson-loop observable.
 
 \subsection{Wilson Flow and Flow-Time Convention}
@@ -642,7 +642,7 @@ gradient of the Wilson action,
   =
   -g_0^2\,\partial_{x,\mu}S_W[V(t_{\mathrm f})].
   \label{eq:wilson-flow-force}
-\end{equation}
+\end{equation} [add citations to papers where it is derived]
 Here \(\partial_{x,\mu}S_W\) denotes the derivative of the Wilson plaquette
 action with respect to the link \(V_\mu(x,t_{\mathrm f})\). On the lattice this
 force is built from the plaquette staples attached to the link. The force is
@@ -708,7 +708,8 @@ In physical units,
 which vanishes in the continuum limit at fixed \(t_{\mathrm{lat}}\). The flowed
 Wilson loops used in this thesis should therefore be understood as smeared
 versions of the same lattice observable, not as a different physical observable
-defined at fixed nonzero smoothing radius.
+defined at fixed nonzero smoothing radius. [cite Gauge field smearing and controlled continuum
+extrapolations by Andreas Risch]
 
 This distinction is important for the continuum analysis. If the flow time were
 kept fixed in physical units, the continuum observable itself would be changed.
@@ -722,7 +723,7 @@ continuum target.
 \label{subsec:effective-potential-extraction}
 
 Temporal Wilson loops are used to extract the static quark--antiquark potential.
-For large Euclidean time extent $T$, the Wilson loop has the spectral form
+For large Euclidean time extent $T$, the Wilson loop has the form
 \begin{equation}
   W(R,T)
   =
@@ -757,13 +758,6 @@ static potential in lattice units:
   a V(R).
 \end{equation}
 
-In the numerical analysis, \(W(R,T)\) denotes the value stored as
-\texttt{W\_temp}. This quantity is already normalized by the color factor
-\(1/N_c\), averaged over lattice base points, and averaged over the spatial
-directions used for temporal Wilson loops. For the \(\mathrm{SU}(2)\) simulations
-considered here, \(N_c=2\). Therefore no further normalization by color, volume,
-or spatial directions is applied in the analysis.
-
 \subsection{Creutz Ratios}
 \label{subsec:creutz-ratios}
 
@@ -794,21 +788,7 @@ lattice Creutz ratio located at half-integer separations,
   \right],
   \label{eq:creutz-ratio-central-difference}
 \end{equation}
-or, equivalently after a shift of indices,
-\begin{equation}
-  \chi(R,T)
-  =
-  -
-  \ln
-  \left[
-    \frac{
-      W(R,T) W(R-1,T-1)
-    }{
-      W(R,T-1) W(R-1,T)
-    }
-  \right].
-  \label{eq:creutz-ratio}
-\end{equation}
+
 The normalization of the Wilson loop, including the factor $1/N_c$, cancels in
 this ratio. This is useful for the present $\SU(2)$ analysis because the same
 formula can be applied directly to the normalized Wilson-loop output described
@@ -830,21 +810,34 @@ physical distance $r$. Diagonal ratios $\chi(R,R)$ are also useful summary
 observables because they probe the same spatial and temporal scale and are
 straightforward to compare across ensembles \cite{Creutz1980,Risch2024SmearingContinuum}.
 
-If large Wilson loops obey an area law,
+If the large Wilson loops are dominated by an area law, their leading behaviour
+may be written as
 \begin{equation}
   W(R,T)
   \sim
-  \exp[-\stringtension \latspacing^2 R T
-  - \text{perimeter terms}],
+  \exp\!\left[
+    -\stringtension \latspacing^2 R T
+    - \mu \latspacing (R+T)
+    - c
+  \right],
+  \label{eq:wilson-loop-area-law}
 \end{equation}
-then the Creutz ratio approaches
+where \(R\) and \(T\) are lattice extents, so that the physical area is
+\((R\latspacing)(T\latspacing)=\latspacing^2RT\). The coefficient
+\(\mu\) denotes a perimeter contribution and \(c\) is a constant.
+
+Inserting Eq.~\eqref{eq:wilson-loop-area-law} into the Creutz-ratio definition
+shows that the perimeter and constant terms cancel [maybe also source]. The remaining area term
+gives
 \begin{equation}
   \chi(R,T)
   \xrightarrow[R,T\to\infty]{}
   \stringtension \latspacing^2 .
+  \label{eq:creutz-ratio-string-tension-limit}
 \end{equation}
-Thus Creutz ratios provide a direct lattice estimator for the string tension in
-lattice units.
+Thus Creutz ratios provide a direct estimator of the string tension in lattice
+units, \( \latspacing^2\stringtension \), up to finite-size, excited-state, and
+lattice-spacing corrections.
 
 At finite $R$ and $T$, Creutz ratios contain corrections from excited states,
 Coulombic contributions, finite-volume effects, and lattice artifacts. They are
@@ -856,11 +849,11 @@ For continuum extrapolations the important distinction is between fixed lattice
 separation and fixed physical distance. Holding $R$ fixed while taking
 $\latspacing\to0$ drives the physical distance $r=R\latspacing$ to zero and
 therefore probes the short-distance limit rather than the same physical force.
-The continuum comparison should instead use a dimensionless distance such as
+The continuum comparison therefore uses a dimensionless distance
 \begin{equation}
   \hat r = \frac{r}{\rzero}
 \end{equation}
-and interpolate the measured Creutz ratios to common $\hat r$ values before
+and interpolates the measured Creutz ratios to common $\hat r$ values before
 fitting in $\latspacing/\rzero$. This is also where gauge-breaking effects are
 expected to be most visible: short-distance Wilson-loop observables are
 sensitive to ultraviolet deformations, while large loops suffer from rapidly
@@ -869,8 +862,8 @@ increasing statistical noise.
 \subsection{Sommer Scale and String Tension}
 \label{subsec:sommer-scale-string-tension}
 
-The static potential can also be used to set the scale. A common
-phenomenological form is the Cornell-type potential
+The static potential can also be used to set the scale. [A common
+phenomenological form[rephrase]] is the Cornell-type potential
 \begin{equation}
   V(r)
   =
