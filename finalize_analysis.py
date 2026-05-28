@@ -257,6 +257,24 @@ def common_thermalization_step(thermalization_steps_by_run: dict[str, int]) -> i
     return unique[0] if len(unique) == 1 else None
 
 
+def wilson_flow_time_pair_filter(
+    requested_flow_time: float | None,
+) -> Callable[[float | None, int, int], bool]:
+    normalized_requested = data_organizer._normalize_flow_time(requested_flow_time)
+
+    def pair_filter(flow_time: float | None, _r_val: int, _t_val: int) -> bool:
+        return data_organizer._normalize_flow_time(flow_time) == normalized_requested
+
+    return pair_filter
+
+
+def wilson_flow_time_filter_label(requested_flow_time: float | None) -> str:
+    normalized_requested = data_organizer._normalize_flow_time(requested_flow_time)
+    if normalized_requested is None:
+        return "flow_time=unflowed"
+    return f"flow_time={float(normalized_requested):g}"
+
+
 def analysis_hash(
     run_dirs: list[str],
     thermalization_steps_by_run: dict[str, int],
@@ -1351,8 +1369,10 @@ class FinalizedAnalysisRunner:
         if self.combined_w_temp is not None and self.calc is not None:
             return
 
-        combined_w_temp, aggregation = run_evaluation._load_combined_w_temp(
+        combined_w_temp, aggregation = run_evaluation._load_combined_w_temp_filtered(
             self.run_dirs,
+            pair_filter=wilson_flow_time_pair_filter(self.wilson_flow_time),
+            filter_label=wilson_flow_time_filter_label(self.wilson_flow_time),
             verbose=True,
             prefix="[finalize_analysis]",
             load_workers=self.load_workers,

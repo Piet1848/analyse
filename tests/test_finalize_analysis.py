@@ -783,6 +783,51 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertNotIn((0.25, 1, 3), compact.wilson_by_flow_pair)
             self.assertEqual(compact.n_configurations, 2)
 
+    def test_filtered_w_temp_loader_keeps_only_requested_flow_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gradient_flow_wtemp.dat"
+            path.write_text(
+                "# conf_id t_over_a2 L T W_temp\n"
+                "0 0.0 1 1 0.50\n"
+                "0 0.25 1 1 0.60\n"
+                "0 0.50 1 1 0.70\n"
+                "5 0.0 1 1 0.40\n"
+                "5 0.25 1 1 0.55\n"
+                "5 0.50 1 1 0.65\n",
+                encoding="utf-8",
+            )
+
+            compact = data_organizer.load_compact_wilson_file_filtered(
+                str(path),
+                min_step=0,
+                pair_filter=finalize_analysis.wilson_flow_time_pair_filter(0.25),
+            )
+
+            self.assertIsNotNone(compact)
+            assert compact is not None
+            self.assertEqual(compact.available_flow_times(), [0.25])
+            self.assertEqual(list(compact.wilson_by_flow_pair), [(0.25, 1, 1)])
+            self.assertEqual(compact.n_configurations, 2)
+
+    def test_finalize_flow_filter_keeps_only_unflowed_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = make_run(root, "run_a")
+            write_gradient_flow_wtemp(run_dir, flow_values=[0.0, 0.25])
+
+            combined, metadata = run_evaluation._load_combined_w_temp_filtered(
+                [str(run_dir)],
+                pair_filter=finalize_analysis.wilson_flow_time_pair_filter(None),
+                filter_label=finalize_analysis.wilson_flow_time_filter_label(None),
+                load_workers=1,
+                thermalization_steps=1500,
+            )
+
+            self.assertIsNotNone(combined)
+            assert combined is not None
+            self.assertEqual(combined.available_flow_times(), [None])
+            self.assertEqual(metadata["wilson_loop_filter"], "flow_time=unflowed")
+
     def test_flow_time_normalization_matches_float32_input(self):
         self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.96)), 0.96)
         self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.97)), 0.97)
@@ -841,10 +886,10 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 runner._load_data()
 
             self.assertEqual(runner.wilson_flow_time, 0.25)
-            self.assertIn(0.25, runner.calc.get_available_flow_times())
+            self.assertEqual(runner.calc.get_available_flow_times(), [0.25])
             flowed = runner.calc.get_variable("V_R", R=2, t_min=1, t_max=None, flow_time=0.25)
-            unflowed = runner.calc.get_variable("V_R", R=2, t_min=1, t_max=None)
-            self.assertLess(flowed.get(), unflowed.get())
+            self.assertTrue(np.isfinite(flowed.get()))
+            self.assertEqual(runner.aggregation["wilson_loop_filter"], "flow_time=0.25")
             self.assertEqual(runner.manifest["wilson_flow_time"], 0.25)
             self.assertIn("__tf_0.25__", str(runner.analysis_dir))
 

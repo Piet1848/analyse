@@ -1107,6 +1107,7 @@ def _load_combined_w_temp_filtered(
     run_paths: List[str],
     *,
     pair_filter=None,
+    filter_label: str | None = None,
     verbose: bool = False,
     prefix: str = "",
     load_workers: int = 1,
@@ -1164,7 +1165,9 @@ def _load_combined_w_temp_filtered(
         "thermalization_steps": unique_cuts[0] if len(unique_cuts) == 1 else None,
         "thermalization_steps_by_run": resolved_cuts_by_run,
         "load_workers": worker_count,
-        "wilson_loop_filter": "near_diagonal_abs_R_minus_T_le_1" if pair_filter is not None else "none",
+        "wilson_loop_filter": filter_label
+        if filter_label is not None
+        else ("near_diagonal_abs_R_minus_T_le_1" if pair_filter is not None else "none"),
     }
 
     if combined is not None:
