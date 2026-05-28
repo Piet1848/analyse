@@ -13,6 +13,8 @@ import finalize_analysis
 import run_evaluation
 from calculator import Calculator
 from finalized_analysis_helpers import (
+    _get_plotly,
+    _write_figure_html,
     build_bootstrap_block_size_scan,
     recommend_bootstrap_block_size,
     save_bootstrap_block_size_plot,
@@ -28,6 +30,75 @@ def flow_label(flow_time: float | None) -> str:
 
 def filename_token(value: str) -> str:
     return value.replace("-", "m").replace(".", "p")
+
+
+def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any]) -> None:
+    go = _get_plotly()
+    fig = go.Figure()
+    has_rows = False
+
+    def flow_sort_key(item: tuple[str, Any]) -> float:
+        label, payload = item
+        flow_time = payload.get("flow_time") if isinstance(payload, dict) else None
+        if flow_time is None:
+            return -1.0
+        try:
+            return float(flow_time)
+        except (TypeError, ValueError):
+            return float("inf")
+
+    for label, payload in sorted(by_flow.items(), key=flow_sort_key):
+        chi = payload.get("chi", {}) if isinstance(payload, dict) else {}
+        chi_err = payload.get("chi_err", {}) if isinstance(payload, dict) else {}
+        rows: list[tuple[float, float, float | None]] = []
+        for key, value in chi.items():
+            try:
+                r_text, t_text = key.split(",", 1)
+                r_val = float(r_text)
+                t_val = float(t_text)
+                if not np.isclose(r_val, t_val):
+                    continue
+                err = chi_err.get(key)
+                rows.append((r_val, float(value), float(err) if err is not None else None))
+            except (TypeError, ValueError):
+                continue
+
+        if not rows:
+            continue
+        has_rows = True
+        rows = sorted(rows)
+        fig.add_trace(
+            go.Scatter(
+                x=[row[0] for row in rows],
+                y=[row[1] for row in rows],
+                error_y={
+                    "type": "data",
+                    "array": [row[2] for row in rows],
+                    "visible": True,
+                },
+                mode="lines+markers",
+                name=f"flow {label}",
+            )
+        )
+
+    if not has_rows:
+        fig.add_annotation(
+            text="No diagonal Creutz-ratio data available",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+
+    fig.update_layout(
+        title="Creutz ratios on R = T by flow time",
+        template="plotly_white",
+        xaxis_title="R = T midpoint",
+        yaxis_title="chi(R,T)",
+        legend_title="Wilson-loop flow time",
+    )
+    _write_figure_html(fig, path)
 
 
 def diagonal_creutz_pairs(available_pairs: list[tuple[int, int]]) -> list[tuple[int, float]]:
@@ -381,6 +452,9 @@ class CreutzFlowAnalysisRunner(finalize_analysis.FinalizedAnalysisRunner):
             save_creutz_diagonal_plot(plot_path, flow_payload)
             plot_paths[label] = str(plot_path)
 
+        combined_plot_path = self.plots_dir / "creutz_ratios_R_eq_T__all_flow_times.html"
+        save_combined_creutz_flow_diagonal_plot(combined_plot_path, by_flow)
+
         summary_path = self.creutz_dir / "diagonal_flow_summary.json"
         payload = {
             "status": "ok" if any(flow.get("chi") for flow in by_flow.values()) else "no diagonal Creutz-ratio data available",
@@ -395,10 +469,12 @@ class CreutzFlowAnalysisRunner(finalize_analysis.FinalizedAnalysisRunner):
             "wilson_loop_filter": "near_diagonal_abs_R_minus_T_le_1",
             "by_flow_time": by_flow,
             "plot_paths": plot_paths,
+            "combined_plot_path": str(combined_plot_path),
         }
         save_json(summary_path, payload)
         self.manifest["creutz_diagonal_flow_summary"] = str(summary_path)
         self.manifest["creutz_diagonal_flow_plots"] = plot_paths
+        self.manifest["creutz_diagonal_flow_combined_plot"] = str(combined_plot_path)
         self.manifest["status"]["creutz_flow_complete"] = True
         self._save_manifest()
 

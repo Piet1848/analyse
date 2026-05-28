@@ -469,7 +469,7 @@ def _select_preview_pair_keys(
     available = set(ordered)
     max_r = max(r_val for r_val, _ in ordered)
     max_t_for_max_r = max(t_val for r_val, t_val in ordered if r_val == max_r)
-    preferred = [(1, 1), (1, 8), (5, 8), (8, 10), (max_r, max_t_for_max_r)]
+    preferred = [(1, 1), (1, 8), (5, 5), (5, 8), (8, 10), (10, 10), (max_r, max_t_for_max_r)]
 
     selected: list[tuple[int, int]] = []
     for pair in preferred:

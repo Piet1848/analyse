@@ -234,10 +234,10 @@ class FinalizeAnalysisTests(unittest.TestCase):
 
     def test_select_preview_pair_keys_limits_to_representative_subset(self):
         selected = helpers._select_preview_pair_keys(
-            [(1, 1), (1, 8), (5, 8), (8, 10), (8, 11), (10, 10)],
+            [(1, 1), (1, 8), (5, 5), (5, 8), (8, 10), (8, 11), (10, 10)],
         )
 
-        self.assertEqual(selected, [(1, 1), (1, 8), (5, 8), (8, 10), (10, 10)])
+        self.assertEqual(selected, [(1, 1), (1, 8), (5, 5), (5, 8), (8, 10), (10, 10)])
 
     def test_trim_preview_series_keeps_first_ten_percent(self):
         row = {
@@ -915,6 +915,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
                 mock.patch.object(analyze_creutz_flow, "save_bootstrap_block_size_plot", side_effect=write_stub_plot),
                 mock.patch.object(analyze_creutz_flow, "save_gradient_flow_plot", side_effect=write_stub_plot),
                 mock.patch.object(analyze_creutz_flow, "save_creutz_diagonal_plot", side_effect=write_stub_plot),
+                mock.patch.object(analyze_creutz_flow, "save_combined_creutz_flow_diagonal_plot", side_effect=write_stub_plot),
             ):
                 runner = analyze_creutz_flow.CreutzFlowAnalysisRunner(
                     run_dirs=[str(run_dir)],
@@ -938,6 +939,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertIn("0", summary["by_flow_time"])
             self.assertIn("0.25", summary["by_flow_time"])
             self.assertTrue(summary["by_flow_time"]["0.25"]["chi"])
+            self.assertTrue(summary["combined_plot_path"].endswith("creutz_ratios_R_eq_T__all_flow_times.html"))
             self.assertTrue((runner.gradient_flow_dir / "summary.json").exists())
 
     def test_new_input_yaml_defaults_legacy_dimensions(self):
