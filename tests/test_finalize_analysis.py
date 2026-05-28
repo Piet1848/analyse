@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 
 import finalize_analysis
+import analyze_creutz_flow
 import finalized_analysis_helpers as helpers
 import run_evaluation
 import search_data
@@ -755,6 +756,33 @@ class FinalizeAnalysisTests(unittest.TestCase):
             calc = Calculator(compact, n_bootstrap=8, step_size=1)
             self.assertAlmostEqual(calc.get_variable("W_R_T", R=1, T=1, flow_time=0.25).get(), 0.575)
 
+    def test_filtered_w_temp_loader_keeps_only_requested_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gradient_flow_wtemp.dat"
+            path.write_text(
+                "# conf_id t_over_a2 L T W_temp\n"
+                "0 0.25 1 1 0.50\n"
+                "0 0.25 1 3 0.20\n"
+                "0 0.25 2 1 0.30\n"
+                "5 0.25 1 1 0.40\n"
+                "5 0.25 1 3 0.10\n"
+                "5 0.25 2 1 0.25\n",
+                encoding="utf-8",
+            )
+
+            compact = data_organizer.load_compact_wilson_file_filtered(
+                str(path),
+                min_step=0,
+                pair_filter=run_evaluation._near_diagonal_wilson_pair_filter,
+            )
+
+            self.assertIsNotNone(compact)
+            assert compact is not None
+            self.assertIn((0.25, 1, 1), compact.wilson_by_flow_pair)
+            self.assertIn((0.25, 2, 1), compact.wilson_by_flow_pair)
+            self.assertNotIn((0.25, 1, 3), compact.wilson_by_flow_pair)
+            self.assertEqual(compact.n_configurations, 2)
+
     def test_flow_time_normalization_matches_float32_input(self):
         self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.96)), 0.96)
         self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.97)), 0.97)
@@ -819,6 +847,53 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertLess(flowed.get(), unflowed.get())
             self.assertEqual(runner.manifest["wilson_flow_time"], 0.25)
             self.assertIn("__tf_0.25__", str(runner.analysis_dir))
+
+    def test_creutz_flow_runner_calculates_diagonal_ratios_for_all_flow_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = make_run(root, "run_a", w_temp_r_values=[2, 3, 4], w_temp_t_values=[1, 2, 3, 4])
+            write_gradient_flow_wtemp(run_dir, flow_values=[0.0, 0.25])
+            write_gradient_flow_obs(
+                run_dir,
+                [
+                    (0, 0.0, 1.0, 0.04),
+                    (0, 0.5, 1.0, 0.08),
+                    (0, 1.0, 1.0, 0.12),
+                    (1, 0.0, 1.1, 0.05),
+                    (1, 0.5, 1.1, 0.09),
+                    (1, 1.0, 1.1, 0.13),
+                ],
+            )
+
+            with (
+                mock.patch.object(finalize_analysis, "save_thermalization_plot", side_effect=write_stub_plot),
+                mock.patch.object(analyze_creutz_flow, "save_bootstrap_block_size_plot", side_effect=write_stub_plot),
+                mock.patch.object(analyze_creutz_flow, "save_gradient_flow_plot", side_effect=write_stub_plot),
+                mock.patch.object(analyze_creutz_flow, "save_creutz_diagonal_plot", side_effect=write_stub_plot),
+            ):
+                runner = analyze_creutz_flow.CreutzFlowAnalysisRunner(
+                    run_dirs=[str(run_dir)],
+                    output_root=root / "creutz_flow",
+                    plot_mode="html",
+                    load_workers=1,
+                    calc_workers=None,
+                    n_bootstrap=8,
+                    target_force=1.65,
+                    block_size_scan_values=[1],
+                    open_plots=False,
+                    input_func=InputSequence(["", ""]),
+                    print_func=lambda *args, **kwargs: None,
+                )
+                runner.run()
+
+            summary = json.loads((runner.creutz_dir / "diagonal_flow_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["wilson_loop_filter"], "near_diagonal_abs_R_minus_T_le_1")
+            self.assertIn("unflowed", summary["by_flow_time"])
+            self.assertIn("0", summary["by_flow_time"])
+            self.assertIn("0.25", summary["by_flow_time"])
+            self.assertTrue(summary["by_flow_time"]["0.25"]["chi"])
+            self.assertTrue((runner.gradient_flow_dir / "summary.json").exists())
 
     def test_new_input_yaml_defaults_legacy_dimensions(self):
         with tempfile.TemporaryDirectory() as tmp:

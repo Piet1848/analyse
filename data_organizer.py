@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -376,6 +376,108 @@ def _split_table_line(line: str, delimiter: str | None) -> list[str]:
 def _looks_like_column_name(token: str) -> bool:
     return any(ch.isalpha() for ch in token) and all(
         ch.isalnum() or ch in {"_", "/"} for ch in token
+    )
+
+
+def _canonical_wilson_header(tokens: list[str] | None, width: int) -> list[str] | None:
+    if tokens is not None and len(tokens) == width:
+        return tokens
+    if width == 4:
+        return ["step", "L", "T", "W_temp"]
+    if width == 5:
+        return ["conf_id", "t_over_a2", "L", "T", "W_temp"]
+    return None
+
+
+def load_compact_wilson_file_filtered(
+    path: str,
+    min_step: int = 0,
+    pair_filter: Callable[[Optional[float], int, int], bool] | None = None,
+) -> CompactWilsonData | None:
+    """
+    Stream a temporal Wilson-loop file into CompactWilsonData while keeping only
+    selected (flow_time, L, T) keys.
+
+    This avoids building the full row table for wide Wilson-loop grids when an
+    analysis only needs a small subset of loops.
+    """
+    source_path = Path(path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"{source_path} not found")
+
+    delimiter: str | None = None
+    header_tokens: list[str] | None = None
+    header: list[str] | None = None
+    flow_pair_order: list[FlowKey] = []
+    chunks_by_pair: Dict[FlowKey, list[float]] = defaultdict(list)
+    min_step = int(min_step)
+
+    with source_path.open("r", encoding="utf-8-sig") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                tokens = stripped[1:].strip().split()
+                if tokens and "=" not in stripped and all(_looks_like_column_name(token) for token in tokens):
+                    header_tokens = tokens
+                continue
+
+            if delimiter is None:
+                delimiter = "," if "," in stripped else None
+            tokens = _split_table_line(stripped, delimiter)
+            if not tokens:
+                continue
+
+            if header is None and all(_looks_like_column_name(token) for token in tokens):
+                header_tokens = tokens
+                continue
+
+            try:
+                values = [float(token) for token in tokens]
+            except ValueError:
+                continue
+
+            if header is None:
+                header = _canonical_wilson_header(header_tokens, len(values))
+                if header is None:
+                    print(f"Warning: Could not infer Wilson-loop columns in {path}, skipping.")
+                    return None
+
+            if len(values) != len(header):
+                continue
+            row = dict(zip(header, values))
+            try:
+                w_value = float(row["W_temp"])
+                r_val = int(row["L"])
+                t_val = int(row["T"])
+            except (KeyError, TypeError, ValueError):
+                print(f"Warning: Required observables missing in {path}, skipping W_temp loading.")
+                return None
+
+            step_value = row.get("step", row.get("conf_id"))
+            if step_value is not None and min_step > 0 and float(step_value) < min_step:
+                continue
+
+            flow_time = _normalize_flow_time(row.get("t_over_a2"))
+            if pair_filter is not None and not pair_filter(flow_time, r_val, t_val):
+                continue
+
+            key = (flow_time, r_val, t_val)
+            if key not in chunks_by_pair:
+                flow_pair_order.append(key)
+            chunks_by_pair[key].append(w_value)
+
+    if not chunks_by_pair:
+        return None
+
+    return CompactWilsonData(
+        path,
+        flow_pair_order=flow_pair_order,
+        wilson_by_flow_pair={
+            key: np.asarray(values, dtype=float)
+            for key, values in chunks_by_pair.items()
+        },
     )
 
 

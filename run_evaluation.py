@@ -294,6 +294,57 @@ def _load_single_compact_w_temp(
     )
 
 
+def _near_diagonal_wilson_pair_filter(
+    flow_time: float | None,
+    r_val: int,
+    t_val: int,
+) -> bool:
+    return abs(int(r_val) - int(t_val)) <= 1
+
+
+def _load_single_compact_w_temp_filtered(
+    run_path: str,
+    thermalization_steps: Optional[int] = None,
+    pair_filter=None,
+) -> Tuple[str, Optional[do.CompactWilsonData]]:
+    run_dir = Path(run_path)
+    candidates = [run_dir / "W_temp.out"]
+    try:
+        flow_params = load_gradient_flow_params(str(run_dir / "input.yaml"))
+        candidates.append(run_dir / flow_params.W_temp_filename)
+    except Exception:
+        pass
+
+    min_step = THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps)
+    compact_parts = [
+        do.load_compact_wilson_file_filtered(
+            str(path),
+            min_step=min_step,
+            pair_filter=pair_filter,
+        )
+        for path in candidates
+        if path.exists()
+    ]
+    compact_parts = [part for part in compact_parts if part is not None]
+    if not compact_parts:
+        return run_path, None
+
+    flow_order: list[do.FlowKey] = []
+    wilson_by_flow_pair: dict[do.FlowKey, np.ndarray] = {}
+    for compact in compact_parts:
+        for key in compact.flow_pair_order:
+            if key in wilson_by_flow_pair:
+                raise ValueError(f"Duplicate Wilson-loop key {key} while loading {run_path}")
+            flow_order.append(key)
+            wilson_by_flow_pair[key] = compact.wilson_by_flow_pair[key]
+
+    return run_path, do.CompactWilsonData(
+        f"{run_path}/filtered_w_temp",
+        flow_pair_order=flow_order,
+        wilson_by_flow_pair=wilson_by_flow_pair,
+    )
+
+
 def _load_single_gradient_flow_obs(
     run_path: str,
     thermalization_steps: Optional[int] = None,
@@ -753,6 +804,68 @@ def _iter_loaded_compact_w_temp(
                 ready_results[index] = future.result()
 
 
+def _iter_loaded_compact_w_temp_filtered(
+    run_paths: List[str],
+    load_workers: int,
+    thermalization_steps: Optional[int] = None,
+    thermalization_steps_by_run: Optional[Dict[str, int]] = None,
+    pair_filter=None,
+):
+    cut_by_run = {
+        os.path.abspath(path): int(value)
+        for path, value in (thermalization_steps_by_run or {}).items()
+    }
+
+    def cut_for_run(run_path: str) -> Optional[int]:
+        return cut_by_run.get(os.path.abspath(run_path), thermalization_steps)
+
+    if load_workers <= 1:
+        for run_path in run_paths:
+            yield _load_single_compact_w_temp_filtered(
+                run_path,
+                thermalization_steps=cut_for_run(run_path),
+                pair_filter=pair_filter,
+            )
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=load_workers) as executor:
+        future_to_index: Dict[concurrent.futures.Future, int] = {}
+        ready_results: Dict[int, Tuple[str, Optional[do.CompactWilsonData]]] = {}
+        next_submit = 0
+        next_yield = 0
+
+        def submit_one(index: int):
+            future = executor.submit(
+                _load_single_compact_w_temp_filtered,
+                run_paths[index],
+                cut_for_run(run_paths[index]),
+                pair_filter,
+            )
+            future_to_index[future] = index
+
+        initial = min(load_workers, len(run_paths))
+        for _ in range(initial):
+            submit_one(next_submit)
+            next_submit += 1
+
+        while next_yield < len(run_paths):
+            if next_yield in ready_results:
+                yield ready_results.pop(next_yield)
+                if next_submit < len(run_paths):
+                    submit_one(next_submit)
+                    next_submit += 1
+                next_yield += 1
+                continue
+
+            done, _ = concurrent.futures.wait(
+                tuple(future_to_index),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                index = future_to_index.pop(future)
+                ready_results[index] = future.result()
+
+
 def _calculate_w_rt_variables(
     file_data: do.FileData,
     block_size: int,
@@ -960,6 +1073,98 @@ def _load_combined_w_temp(
         "thermalization_steps": unique_cuts[0] if len(unique_cuts) == 1 else None,
         "thermalization_steps_by_run": resolved_cuts_by_run,
         "load_workers": worker_count,
+    }
+
+    if combined is not None:
+        pair_sample_counts = getattr(combined, "pair_sample_counts", {})
+        sample_lengths = [int(value) for value in pair_sample_counts.values()]
+        n_configurations_after_cut = int(max(sample_lengths, default=getattr(combined, "n_configurations", 0)))
+
+        def format_flow_key(flow_time: float | None, r_val: int, t_val: int) -> str:
+            flow_text = "none" if flow_time is None else f"{float(flow_time):g}"
+            return f"{flow_text},{int(r_val)},{int(t_val)}"
+
+        metadata["n_configurations_after_cut"] = n_configurations_after_cut
+        metadata["min_configurations_per_wilson_loop"] = int(min(sample_lengths, default=0))
+        metadata["max_configurations_per_wilson_loop"] = int(max(sample_lengths, default=0))
+        metadata["n_samples_after_cut"] = int(sum(sample_lengths))
+        metadata["wilson_loop_sample_counts"] = {
+            format_flow_key(flow_time, r_val, t_val): int(count)
+            for (flow_time, r_val, t_val), count in sorted(
+                pair_sample_counts.items(),
+                key=lambda item: (-1.0 if item[0][0] is None else float(item[0][0]), item[0][1], item[0][2]),
+            )
+        }
+        metadata["available_wilson_flow_times"] = [
+            None if value is None else float(value)
+            for value in combined.available_flow_times()
+        ]
+
+    return combined, metadata
+
+
+def _load_combined_w_temp_filtered(
+    run_paths: List[str],
+    *,
+    pair_filter=None,
+    verbose: bool = False,
+    prefix: str = "",
+    load_workers: int = 1,
+    thermalization_steps: Optional[int] = None,
+    thermalization_steps_by_run: Optional[Dict[str, int]] = None,
+) -> Tuple[Optional[do.FileData], Dict[str, Any]]:
+    def vprint(msg: str):
+        if verbose:
+            import sys
+            print(f"{prefix} {msg}", file=sys.stderr, flush=True)
+
+    worker_count = _resolve_worker_count(load_workers, len(run_paths), default=1)
+    runs_with_w_temp = 0
+    resolved_cuts_by_run = {
+        os.path.abspath(path): (
+            int(thermalization_steps_by_run[os.path.abspath(path)])
+            if thermalization_steps_by_run is not None and os.path.abspath(path) in thermalization_steps_by_run
+            else (THERMALIZATION_STEPS if thermalization_steps is None else int(thermalization_steps))
+        )
+        for path in run_paths
+    }
+    unique_cuts = sorted(set(resolved_cuts_by_run.values()))
+
+    def iter_compact_files():
+        nonlocal runs_with_w_temp
+        for run_path, compact in _iter_loaded_compact_w_temp_filtered(
+            run_paths,
+            worker_count,
+            thermalization_steps=thermalization_steps,
+            thermalization_steps_by_run=resolved_cuts_by_run,
+            pair_filter=pair_filter,
+        ):
+            if compact is None:
+                continue
+            runs_with_w_temp += 1
+            vprint(f"Loaded filtered data from {Path(run_path).name}...")
+            yield compact
+
+    if worker_count > 1:
+        vprint(f"Loading up to {worker_count} filtered W_temp file(s) in parallel...")
+    vprint("Combining filtered W_temp data incrementally...")
+    vprint(f"Total runs in group: {len(run_paths)}")
+    combined = do.combine_compact_wilson_data(
+        iter_compact_files(),
+        source_name="W_temp_filtered_combined",
+    )
+    vprint("Filtered combination complete.")
+
+    metadata = {
+        "n_runs_in_group": len(run_paths),
+        "n_runs_with_w_temp": runs_with_w_temp,
+        "n_w_temp_files": runs_with_w_temp,
+        "n_samples_after_cut": 0,
+        "n_configurations_after_cut": 0,
+        "thermalization_steps": unique_cuts[0] if len(unique_cuts) == 1 else None,
+        "thermalization_steps_by_run": resolved_cuts_by_run,
+        "load_workers": worker_count,
+        "wilson_loop_filter": "near_diagonal_abs_R_minus_T_le_1" if pair_filter is not None else "none",
     }
 
     if combined is not None:
