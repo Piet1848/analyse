@@ -35,22 +35,21 @@ def filename_token(value: str) -> str:
 def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any]) -> None:
     go = _get_plotly()
     fig = go.Figure()
-    has_rows = False
 
-    def flow_sort_key(item: tuple[str, Any]) -> float:
-        label, payload = item
+    rows_by_flow: dict[float, dict[float, tuple[float, float | None, int]]] = {}
+    for _label, payload in by_flow.items():
+        if not isinstance(payload, dict):
+            continue
         flow_time = payload.get("flow_time") if isinstance(payload, dict) else None
-        if flow_time is None:
-            return -1.0
         try:
-            return float(flow_time)
+            plot_flow = 0.0 if flow_time is None else float(flow_time)
         except (TypeError, ValueError):
-            return float("inf")
-
-    for label, payload in sorted(by_flow.items(), key=flow_sort_key):
+            continue
+        # Unflowed and explicit t_f=0 are the same curve. If both are present,
+        # prefer the explicit t_f=0 value for duplicate R points.
+        source_priority = 0 if flow_time is None else 1
         chi = payload.get("chi", {}) if isinstance(payload, dict) else {}
         chi_err = payload.get("chi_err", {}) if isinstance(payload, dict) else {}
-        rows: list[tuple[float, float, float | None]] = []
         for key, value in chi.items():
             try:
                 r_text, t_text = key.split(",", 1)
@@ -59,29 +58,48 @@ def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any])
                 if not np.isclose(r_val, t_val):
                     continue
                 err = chi_err.get(key)
-                rows.append((r_val, float(value), float(err) if err is not None else None))
+                row = (float(value), float(err) if err is not None else None, source_priority)
             except (TypeError, ValueError):
                 continue
+            current = rows_by_flow.setdefault(plot_flow, {}).get(r_val)
+            if current is None or source_priority >= current[2]:
+                rows_by_flow[plot_flow][r_val] = row
 
+    flow_values = sorted(flow for flow, rows in rows_by_flow.items() if rows)
+    n_flows = len(flow_values)
+    if n_flows:
+        offset_step = min(0.035, 0.16 / max(n_flows - 1, 1))
+    else:
+        offset_step = 0.0
+
+    for flow_index, plot_flow in enumerate(flow_values):
+        rows = sorted(
+            (r_val, value, err)
+            for r_val, (value, err, _priority) in rows_by_flow[plot_flow].items()
+        )
         if not rows:
             continue
-        has_rows = True
-        rows = sorted(rows)
+        offset = (flow_index - (n_flows - 1) / 2.0) * offset_step
         fig.add_trace(
             go.Scatter(
-                x=[row[0] for row in rows],
+                x=[row[0] + offset for row in rows],
                 y=[row[1] for row in rows],
                 error_y={
                     "type": "data",
                     "array": [row[2] for row in rows],
                     "visible": True,
                 },
+                customdata=[row[0] for row in rows],
+                hovertemplate=(
+                    "R=T midpoint=%{customdata:g}<br>"
+                    "chi=%{y:g}<extra>flow %{fullData.name}</extra>"
+                ),
                 mode="lines+markers",
-                name=f"flow {label}",
+                name=f"{plot_flow:g}",
             )
         )
 
-    if not has_rows:
+    if not flow_values:
         fig.add_annotation(
             text="No diagonal Creutz-ratio data available",
             x=0.5,
