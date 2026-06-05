@@ -7,35 +7,22 @@ Kenneth~G. Wilson.
 
 \bibitem{GattringerLang2010}
 Christof Gattringer and Christian~B. Lang.
-\newblock {\em Quantum Chromodynamics on the Lattice: An Introductory
-  Presentation}, volume 788 of {\em Lecture Notes in Physics}.
+\newblock {\em Quantum Chromodynamics on the Lattice: An Introductory Presentation}, volume 788 of {\em Lecture Notes in Physics}.
 \newblock Springer, Berlin, Heidelberg, 2010.
 
 \bibitem{MontvayMuenster1994}
 Istv{\'a}n Montvay and Gernot M{\"u}nster.
 \newblock {\em Quantum Fields on a Lattice}.
-\newblock Cambridge Monographs on Mathematical Physics. Cambridge University
-  Press, 1994.
-
-\bibitem{Foerster1980}
-D.~Foerster, H.~B. Nielsen, and M.~Ninomiya.
-\newblock Dynamical stability of local gauge symmetry: Creation of light from
-  chaos.
-\newblock {\em Physics Letters B}, 94(2):135--140, 1980.
-
-\bibitem{Bonati2021Breaking}
-Claudio Bonati, Andrea Pelissetto, and Ettore Vicari.
-\newblock Breaking of gauge symmetry in lattice gauge theories.
-\newblock {\em Physical Review Letters}, 127:091601, 2021.
-
-\bibitem{Risch2024SmearingContinuum}
-Andreas Risch.
-\newblock Gauge field smearing and controlled continuum extrapolations.
-\newblock {\em arXiv preprint}, 2024.
+\newblock Cambridge Monographs on Mathematical Physics. Cambridge University Press, 1994.
 
 \bibitem{Creutz1980}
 Michael Creutz.
 \newblock Monte carlo study of quantized {SU(2)} gauge theory.
 \newblock {\em Physical Review D}, 21:2308--2315, 1980.
+
+\bibitem{Risch2024SmearingContinuum}
+Andreas Risch.
+\newblock Gauge field smearing and controlled continuum extrapolations.
+\newblock {\em arXiv preprint}, 2024.
 
 \end{thebibliography}
