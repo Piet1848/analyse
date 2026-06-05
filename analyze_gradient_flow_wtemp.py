@@ -896,6 +896,7 @@ def save_thermalization_preview_plot(
     path: Path,
     group: dict[str, Any],
     suggested_cut: int,
+    data_path: Path | None = None,
 ) -> None:
     go = _get_plotly()
     from plotly.subplots import make_subplots
@@ -958,6 +959,33 @@ def save_thermalization_preview_plot(
 
     if not series_by_key:
         raise ValueError("no thermalization preview data available")
+
+    if data_path is not None:
+        preview_records: list[dict[str, Any]] = []
+        for flow_time, l_size, t_size in sorted(series_by_key):
+            for row in series_by_key[(flow_time, l_size, t_size)]:
+                preview_records.append(
+                    {
+                        "t_over_a2": float(flow_time),
+                        "L": int(l_size),
+                        "T": int(t_size),
+                        "run_label": str(row["run_label"]),
+                        "configuration_id": [float(step) for step in row["steps"]],
+                        "W_temp": [float(value) for value in row["values"]],
+                        "running_mean": [
+                            float(value) for value in row["running_mean"]
+                        ],
+                    }
+                )
+        save_decision_json(
+            data_path,
+            {
+                "schema_version": 1,
+                "suggested_thermalization_cut": int(suggested_cut),
+                "records": preview_records,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     fig = make_subplots(
         rows=2,
@@ -1461,13 +1489,16 @@ def main() -> int:
 
         if args.THERM is None:
             thermalization_plot_path = group_output_dir / "thermalization_preview.html"
+            thermalization_data_path = group_output_dir / "thermalization_preview_data.json"
             try:
                 save_thermalization_preview_plot(
                     thermalization_plot_path,
                     group,
                     suggested_cut=int(run_evaluation.THERMALIZATION_STEPS),
+                    data_path=thermalization_data_path,
                 )
                 print(f"Saved thermalization preview: {thermalization_plot_path}")
+                print(f"Saved thermalization preview data: {thermalization_data_path}")
             except ValueError as exc:
                 print(f"Could not save thermalization preview: {exc}")
             thermalization_by_input = prompt_thermalization_for_group(
@@ -1512,6 +1543,7 @@ def main() -> int:
                         "saved_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
+                print(f"Saved bootstrap block-size data: {scan_json_path}")
                 save_bootstrap_block_size_scan_plot(
                     scan_plot_path,
                     scan_records,
