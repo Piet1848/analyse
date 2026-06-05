@@ -53,6 +53,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from finalized_analysis_helpers import save_matplotlib_figure
 import run_evaluation
 from calculator import Calculator
 from load_input_yaml import load_params
@@ -426,7 +427,7 @@ def write_plot(
     variable_label: str,
     run_label: str,
     recommended_block_size: int | None,
-) -> None:
+) -> dict[str, Path]:
     valid_mask = np.isfinite(results["estimate_error"])
     if not np.any(valid_mask):
         raise RuntimeError("All calculations failed; no finite error estimates available to plot.")
@@ -453,9 +454,11 @@ def write_plot(
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=160)
+    written = save_matplotlib_figure(fig, path, dpi=160)
     plt.close(fig)
+    if not written:
+        raise RuntimeError(f"No plot exports could be written for {path}.")
+    return written
 
 
 def print_table(results: dict[str, np.ndarray]) -> None:
@@ -597,7 +600,7 @@ def main() -> None:
 
     write_csv(csv_path, rows)
     try:
-        write_plot(
+        plot_paths = write_plot(
             output_path,
             rows,
             variable_label=variable_label,
@@ -619,7 +622,8 @@ def main() -> None:
         print("Tau hint: unavailable from loaded data")
     else:
         print(f"Tau hint: tau_int={tau_hint:.6g}, recommended block size={recommended_block_size}")
-    print(f"Plot written to: {output_path}")
+    for fmt, path in sorted(plot_paths.items()):
+        print(f"Plot {fmt.upper()} written to: {path}")
     print(f"CSV written to: {csv_path}")
 
 

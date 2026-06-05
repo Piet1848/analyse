@@ -18,7 +18,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 
 from calculator import creutz_chi_from_wilson
-from finalized_analysis_helpers import _get_plotly, _write_figure_html
+from finalized_analysis_helpers import _get_plotly, _write_figure_html, save_matplotlib_figure
 
 
 STATS_FILENAME = "wilson_loop_stats.dat"
@@ -742,7 +742,7 @@ def build_dimensionless_fit_for_flow(
     }
 
 
-def save_fit_png(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> None:
+def save_fit_png(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> dict[str, Path]:
     grid = fit["grid"]
     x_grid = np.asarray(grid["x"], dtype=float)
     fig, (ax_fit, ax_rel) = plt.subplots(1, 2, figsize=(9.2, 3.4), dpi=160)
@@ -804,9 +804,11 @@ def save_fit_png(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> Non
     ax_rel.legend(frameon=True, fontsize=7)
     ax_rel.set_ylim(bottom=0)
     fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path)
+    written = save_matplotlib_figure(fig, path)
     plt.close(fig)
+    if not written:
+        raise RuntimeError(f"No fit plot exports could be written for {path}.")
+    return written
 
 
 def save_fit_html(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> None:
@@ -949,13 +951,15 @@ def save_dimensionless_fit_outputs(
         png_path = fit_dir / f"fit_t_over_a2_{token}.png"
         html_path = fit_dir / f"fit_t_over_a2_{token}.html"
         save_json(json_path, fit)
-        save_fit_png(png_path, fit, config)
+        fit_plot_paths = save_fit_png(png_path, fit, config)
         save_fit_html(html_path, fit, config)
         flow_entries[f"{flow_time:g}"] = {
             "status": "ok",
             "json": str(json_path),
-            "png": str(png_path),
+            "png": str(fit_plot_paths.get("png", png_path)),
+            "pdf": str(fit_plot_paths["pdf"]) if "pdf" in fit_plot_paths else None,
             "html": str(html_path),
+            "plots": {fmt: str(fmt_path) for fmt, fmt_path in fit_plot_paths.items()},
             "n_points_fit": int(fit["n_points_fit"]),
             "n_points_available": int(fit["n_points_available"]),
         }
@@ -1044,7 +1048,7 @@ def plot_png(
     err_key: str,
     x_title: str,
     y_title: str,
-) -> None:
+) -> dict[str, Path]:
     fig, ax = plt.subplots(figsize=(4.8, 3.8), dpi=160)
     for flow_time in sorted({float(record["t_over_a2"]) for record in records}):
         rows = sorted(
@@ -1072,9 +1076,11 @@ def plot_png(
     ax.legend(title=r"$8t_f/a^2$", frameon=True, fontsize=8, title_fontsize=8)
     ax.tick_params(direction="in", top=True, right=True)
     fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path)
+    written = save_matplotlib_figure(fig, path)
     plt.close(fig)
+    if not written:
+        raise RuntimeError(f"No plot exports could be written for {path}.")
+    return written
 
 
 def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: float | None, r0_over_a: float | None) -> dict[str, str]:
@@ -1095,9 +1101,10 @@ def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: f
         x_title="R = T midpoint",
         y_title="chi_lattice",
     )
-    plot_png(raw_png, diag, x_key="R_mid", y_key="chi", err_key="chi_err", x_title="R = T midpoint", y_title="chi_lattice")
+    raw_plot_paths = plot_png(raw_png, diag, x_key="R_mid", y_key="chi", err_key="chi_err", x_title="R = T midpoint", y_title="chi_lattice")
     paths["raw_diagonal_html"] = str(raw_html)
-    paths["raw_diagonal_png"] = str(raw_png)
+    for fmt, fmt_path in raw_plot_paths.items():
+        paths[f"raw_diagonal_{fmt}"] = str(fmt_path)
 
     if t0_over_a2 is not None:
         dim_html = output_dir / "dimensionless_creutz_ratios_t0_diagonal.html"
@@ -1112,7 +1119,7 @@ def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: f
             x_title="r / sqrt(8 t0)",
             y_title="chi_hat = chi_lattice * 8 t0/a^2",
         )
-        plot_png(
+        dim_plot_paths = plot_png(
             dim_png,
             diag,
             x_key="r_hat_t0",
@@ -1122,7 +1129,8 @@ def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: f
             y_title=r"$\hat\chi = \chi_{\rm lat}\,8t_0/a^2$",
         )
         paths["dimensionless_t0_diagonal_html"] = str(dim_html)
-        paths["dimensionless_t0_diagonal_png"] = str(dim_png)
+        for fmt, fmt_path in dim_plot_paths.items():
+            paths[f"dimensionless_t0_diagonal_{fmt}"] = str(fmt_path)
 
     if r0_over_a is not None:
         dim_html = output_dir / "dimensionless_creutz_ratios_r0_diagonal.html"
@@ -1137,7 +1145,7 @@ def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: f
             x_title="r / r0",
             y_title="chi_hat = chi_lattice * (r0/a)^2",
         )
-        plot_png(
+        dim_plot_paths = plot_png(
             dim_png,
             diag,
             x_key="r_hat_r0",
@@ -1147,7 +1155,8 @@ def save_plots(output_dir: Path, records: list[dict[str, Any]], *, t0_over_a2: f
             y_title=r"$\hat\chi = \chi_{\rm lat}(r_0/a)^2$",
         )
         paths["dimensionless_r0_diagonal_html"] = str(dim_html)
-        paths["dimensionless_r0_diagonal_png"] = str(dim_png)
+        for fmt, fmt_path in dim_plot_paths.items():
+            paths[f"dimensionless_r0_diagonal_{fmt}"] = str(fmt_path)
 
     return paths
 

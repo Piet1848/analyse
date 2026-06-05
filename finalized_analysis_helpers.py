@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
@@ -454,9 +456,141 @@ def _get_plotly():
     return go
 
 
+_PLOT_EXPORT_WARNINGS: set[str] = set()
+_PLOTLY_STATIC_FORMATS_ENV = "ANALYSIS_PLOTLY_STATIC_FORMATS"
+_MATPLOTLIB_FORMATS_ENV = "ANALYSIS_MATPLOTLIB_FORMATS"
+_DEFAULT_PLOTLY_STATIC_FORMATS = ("pdf",)
+_DEFAULT_MATPLOTLIB_FORMATS = ("png", "pdf")
+_SUPPORTED_PLOTLY_STATIC_FORMATS = {"pdf", "svg", "png", "jpg", "jpeg", "webp"}
+
+
+def parse_plot_formats(value: str | list[str] | tuple[str, ...] | None, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return tuple(default)
+
+    if isinstance(value, str):
+        tokens = value.replace(",", " ").split()
+    else:
+        tokens = [str(item) for item in value]
+
+    formats: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        fmt = token.strip().lower().lstrip(".")
+        if not fmt or fmt in seen:
+            continue
+        formats.append(fmt)
+        seen.add(fmt)
+    return tuple(formats)
+
+
+def _plot_formats_from_env(env_name: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw_value = os.environ.get(env_name)
+    if raw_value is None:
+        return tuple(default)
+    return parse_plot_formats(raw_value, default=default)
+
+
+def _warn_plot_export_once(message: str) -> None:
+    if message in _PLOT_EXPORT_WARNINGS:
+        return
+    _PLOT_EXPORT_WARNINGS.add(message)
+    print(f"Warning: {message}", file=sys.stderr)
+
+
+def _ensure_plotly_browser_path() -> None:
+    if os.environ.get("BROWSER_PATH"):
+        return
+    local_chrome = Path(__file__).resolve().parent / ".venv" / "chrome" / "chrome-linux64" / "chrome"
+    if local_chrome.is_file():
+        os.environ["BROWSER_PATH"] = str(local_chrome)
+
+
+def _write_plotly_static_exports(
+    fig: Any,
+    html_path: Path,
+    *,
+    formats: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Path]:
+    export_formats = parse_plot_formats(
+        formats,
+        default=_plot_formats_from_env(_PLOTLY_STATIC_FORMATS_ENV, default=_DEFAULT_PLOTLY_STATIC_FORMATS),
+    )
+    export_formats = tuple(fmt for fmt in export_formats if fmt != "html")
+    if not export_formats:
+        return {}
+
+    unsupported = sorted(set(export_formats) - _SUPPORTED_PLOTLY_STATIC_FORMATS)
+    if unsupported:
+        _warn_plot_export_once(
+            "Unsupported Plotly static export format(s): "
+            + ", ".join(unsupported)
+            + ". Supported formats are: "
+            + ", ".join(sorted(_SUPPORTED_PLOTLY_STATIC_FORMATS))
+            + "."
+        )
+        export_formats = tuple(fmt for fmt in export_formats if fmt in _SUPPORTED_PLOTLY_STATIC_FORMATS)
+    if not export_formats:
+        return {}
+
+    try:
+        import kaleido  # noqa: F401
+    except ImportError:
+        _warn_plot_export_once(
+            "Plotly PDF export requires kaleido. Install the requirements or set "
+            f"{_PLOTLY_STATIC_FORMATS_ENV}= to disable static Plotly exports."
+        )
+        return {}
+
+    _ensure_plotly_browser_path()
+    written: dict[str, Path] = {}
+    for fmt in export_formats:
+        output_path = html_path.with_suffix(f".{fmt}")
+        try:
+            fig.write_image(output_path)
+        except Exception as exc:  # Plotly wraps renderer and browser errors here.
+            _warn_plot_export_once(f"Could not write Plotly {fmt.upper()} export for {html_path}: {exc}")
+            continue
+        written[fmt] = output_path
+    return written
+
+
 def _write_figure_html(fig, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(path, include_plotlyjs="cdn", full_html=True)
+    _write_plotly_static_exports(fig, path)
+
+
+def save_matplotlib_figure(
+    fig: Any,
+    path: Path,
+    *,
+    dpi: int | float | None = None,
+    formats: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Path]:
+    export_formats = parse_plot_formats(
+        formats,
+        default=_plot_formats_from_env(_MATPLOTLIB_FORMATS_ENV, default=_DEFAULT_MATPLOTLIB_FORMATS),
+    )
+    if not export_formats:
+        path_format = path.suffix.lower().lstrip(".") or "png"
+        export_formats = (path_format,)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    primary_format = path.suffix.lower().lstrip(".")
+    written: dict[str, Path] = {}
+    for fmt in export_formats:
+        output_path = path if fmt == primary_format else path.with_suffix(f".{fmt}")
+        save_kwargs: dict[str, Any] = {}
+        if dpi is not None and fmt in {"png", "jpg", "jpeg", "webp", "tif", "tiff"}:
+            save_kwargs["dpi"] = dpi
+        try:
+            fig.savefig(output_path, **save_kwargs)
+        except Exception as exc:
+            _warn_plot_export_once(f"Could not write matplotlib {fmt.upper()} export for {path}: {exc}")
+            continue
+        written[fmt] = output_path
+    return written
 
 
 def _select_preview_pair_keys(

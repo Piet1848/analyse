@@ -26,7 +26,7 @@ from analyze_precomputed_creutz_ratios import (
     fit_model_curves,
     load_dimensionless_bootstrap_matrix,
 )
-from finalized_analysis_helpers import _get_plotly, _write_figure_html
+from finalized_analysis_helpers import _get_plotly, _write_figure_html, save_matplotlib_figure
 
 
 SUMMARY_FILENAME = "summary.json"
@@ -1217,6 +1217,10 @@ def sorted_unique(values: list[float], *, decimals: int = 12) -> list[float]:
     return sorted({round(float(value), decimals) for value in values})
 
 
+def nonzero_flow_plot_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if abs(float(row["t_over_a2"])) > 1e-12]
+
+
 def color_for_index(index: int) -> str:
     palette = plt.get_cmap("tab10")
     r, g, b, _ = palette(index % 10)
@@ -1247,7 +1251,7 @@ def save_continuum_png(
     r_hat: float,
     eps_label: str,
     physical_tau: list[float],
-) -> None:
+) -> dict[str, Path]:
     fig, ax = plt.subplots(figsize=(6.2, 4.1), dpi=160)
     ahat2_values = [float(row["ahat2"]) for row in rows]
     x_max = max(ahat2_values) if ahat2_values else 0.0
@@ -1326,9 +1330,11 @@ def save_continuum_png(
     ax.tick_params(direction="in", top=True, right=True)
     ax.legend(frameon=True, fontsize=7)
     fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path)
+    written = save_matplotlib_figure(fig, path)
     plt.close(fig)
+    if not written:
+        raise RuntimeError(f"No continuum plot exports could be written for {path}.")
+    return written
 
 
 def add_plotly_band(
@@ -1556,7 +1562,7 @@ def save_rhat_guide_png(
     eps_label: str,
     scale: str,
     common_range: tuple[float | None, float | None],
-) -> None:
+) -> dict[str, Path]:
     betas = sorted({entry.get("beta") for entry in entries}, key=beta_sort_key)
     if not betas:
         raise ValueError("No relative-uncertainty entries are available.")
@@ -1598,9 +1604,11 @@ def save_rhat_guide_png(
     axes[-1].set_xlabel("r / r0" if scale == "r0" else "r / sqrt(8 t0)")
     fig.suptitle(f"Relative interpolation uncertainty, {eps_label}", fontsize=10)
     fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path)
+    written = save_matplotlib_figure(fig, path)
     plt.close(fig)
+    if not written:
+        raise RuntimeError(f"No r-hat guide plot exports could be written for {path}.")
+    return written
 
 
 def save_rhat_guide_html(
@@ -1700,7 +1708,7 @@ def save_rhat_guide_outputs(
     png_path = output_dir / f"{token}.png"
     html_path = output_dir / f"{token}.html"
     summary_path = output_dir / f"{token}.json"
-    save_rhat_guide_png(png_path, entries, eps_label=eps_label, scale=scale, common_range=common_range)
+    plot_paths = save_rhat_guide_png(png_path, entries, eps_label=eps_label, scale=scale, common_range=common_range)
     save_rhat_guide_html(html_path, entries, eps_label=eps_label, scale=scale, common_range=common_range)
     save_json(
         summary_path,
@@ -1725,14 +1733,16 @@ def save_rhat_guide_outputs(
             ],
             "skipped": skipped,
             "paths": {
-                "plot_png": str(png_path),
+                "plot_png": str(plot_paths.get("png", png_path)),
+                "plot_pdf": str(plot_paths["pdf"]) if "pdf" in plot_paths else None,
                 "plot_html": str(html_path),
                 "summary": str(summary_path),
+                "plot_formats": {fmt: str(fmt_path) for fmt, fmt_path in plot_paths.items()},
             },
             "saved_at": datetime.now(timezone.utc).isoformat(),
         },
     )
-    return {"png": png_path, "html": html_path, "summary": summary_path}
+    return {**plot_paths, "html": html_path, "summary": summary_path}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1759,6 +1769,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--flow-time", nargs="+", type=float, help="One or more Wilson-loop flow times t_f/a^2 to include. Default: 0 0.25 0.5 0.75 1.0.")
     parser.add_argument("--eight-t-over-a2", nargs="+", type=float, help="One or more smearing strengths s=8*t_f/a^2 to include.")
+    parser.add_argument(
+        "--hide-zero-flow-in-plot",
+        action="store_true",
+        help="Do not draw t_f/a^2=0 (s=0) in the continuum PNG/HTML plots; fits and tables still include it.",
+    )
     parser.add_argument("--physical-tau", nargs="*", type=float, default=[], help="Optional dashed physical-flow curves at fixed tau=t_f/t0.")
     parser.add_argument(
         "--fit-mode",
@@ -1936,11 +1951,16 @@ def main() -> int:
     s_token = "s_" + "_".join(filename_token(f"{8.0 * value:g}") for value in flow_times)
     mode_token = args.fit_mode.replace("-", "_")
     token = f"rhat_{filename_token(f'{r_hat:g}')}__{s_token}__{args.scale}__{mode_token}"
+    plot_rows = nonzero_flow_plot_rows(rows) if args.hide_zero_flow_in_plot else rows
+    if not plot_rows:
+        parser.error("--hide-zero-flow-in-plot removed all continuum points; include at least one nonzero flow time.")
+    plot_token = f"{token}__plot_no_s0" if args.hide_zero_flow_in_plot else token
+
     table_path = output_dir / f"continuum_points__{token}.dat"
     comparison_path = output_dir / f"continuum_limits__{token}.dat"
     summary_path = output_dir / f"continuum_summary__{token}.json"
-    png_path = output_dir / f"continuum_plot__{token}.png"
-    html_path = output_dir / f"continuum_plot__{token}.html"
+    png_path = output_dir / f"continuum_plot__{plot_token}.png"
+    html_path = output_dir / f"continuum_plot__{plot_token}.html"
     bootstrap_path = output_dir / f"continuum_bootstrap__{token}.npz"
 
     continuum_estimates = continuum_estimate_rows(fit)
@@ -1971,8 +1991,8 @@ def main() -> int:
                 )
                 npz_payload[f"term_names_s_{suffix}"] = np.asarray(subfit.get("term_names", []))
         np.savez(bootstrap_path, **npz_payload)
-    save_continuum_png(png_path, rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
-    save_continuum_html(html_path, rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
+    continuum_plot_paths = save_continuum_png(png_path, plot_rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
+    save_continuum_html(html_path, plot_rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
     save_json(
         summary_path,
         {
@@ -1981,6 +2001,9 @@ def main() -> int:
             "r_hat": float(r_hat),
             "t_over_a2_values": [float(value) for value in flow_times],
             "eight_t_over_a2_values": [float(8.0 * value) for value in flow_times],
+            "plot_t_over_a2_values": sorted_unique([float(row["t_over_a2"]) for row in plot_rows]),
+            "plot_eight_t_over_a2_values": sorted_unique([float(row["eight_t_over_a2"]) for row in plot_rows]),
+            "hide_zero_flow_in_plot": bool(args.hide_zero_flow_in_plot),
             "physical_tau_values": [float(value) for value in args.physical_tau],
             "fit_mode": args.fit_mode,
             "eps_label": eps_label,
@@ -2012,8 +2035,10 @@ def main() -> int:
                 "table": str(table_path),
                 "continuum_limits_table": str(comparison_path),
                 "summary": str(summary_path),
-                "plot_png": str(png_path),
+                "plot_png": str(continuum_plot_paths.get("png", png_path)),
+                "plot_pdf": str(continuum_plot_paths["pdf"]) if "pdf" in continuum_plot_paths else None,
                 "plot_html": str(html_path),
+                "plot_formats": {fmt: str(fmt_path) for fmt, fmt_path in continuum_plot_paths.items()},
                 "bootstrap_npz": str(bootstrap_path) if bootstrap_matrix is not None else None,
             },
             "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -2024,6 +2049,8 @@ def main() -> int:
     print(f"Saved continuum limit comparison: {comparison_path}")
     print(f"Saved continuum summary: {summary_path}")
     print(f"Saved continuum plot: {html_path}")
+    if "pdf" in continuum_plot_paths:
+        print(f"Saved continuum plot PDF: {continuum_plot_paths['pdf']}")
     if fit.get("mode") == "combined-risch":
         print(
             "Shared continuum value c00: "
