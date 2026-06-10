@@ -271,8 +271,8 @@ def wilson_flow_time_pair_filter(
 def wilson_flow_time_filter_label(requested_flow_time: float | None) -> str:
     normalized_requested = data_organizer._normalize_flow_time(requested_flow_time)
     if normalized_requested is None:
-        return "flow_time=unflowed"
-    return f"flow_time={float(normalized_requested):g}"
+        return "t_lat=unflowed"
+    return f"t_lat={float(normalized_requested):g}"
 
 
 def analysis_hash(
@@ -835,7 +835,7 @@ class FinalizedAnalysisRunner:
     def _analysis_dir_path(self) -> Path:
         flow_part = ""
         if self.wilson_flow_time is not None:
-            flow_part = f"__tf_{format_token(self.wilson_flow_time)}"
+            flow_part = f"__tlat_{format_token(self.wilson_flow_time)}"
         folder_name = (
             f"beta_{format_token(self.metro.beta)}"
             f"__L_{self.metro.L0}x{self.metro.L1}x{self.metro.L2}x{self.metro.L3}"
@@ -1406,16 +1406,16 @@ class FinalizedAnalysisRunner:
             ) or "none"
             requested_text = "unflowed" if self.wilson_flow_time is None else f"{float(self.wilson_flow_time):g}"
             raise RuntimeError(
-                f"Requested Wilson-loop flow time {requested_text} is not available. "
-                f"Available Wilson-loop flow times: {available_text}."
+                f"Requested Wilson-loop t_lat {requested_text} is not available. "
+                f"Available Wilson-loop t_lat values: {available_text}."
             )
         if self.wilson_flow_time is not None:
-            self.print(f"Using Wilson-loop flow time t_f={self.wilson_flow_time:g}.")
+            self.print(f"Using Wilson-loop t_lat={self.wilson_flow_time:g}.")
         self.unique_rs = [int(r) for r in self.calc.get_unique_Rs(flow_time=self.wilson_flow_time)]
         self.unique_ts = [int(t) for t in self.calc.get_unique_Ts(flow_time=self.wilson_flow_time)]
         if not self.unique_rs or not self.unique_ts:
             requested_text = "unflowed" if self.wilson_flow_time is None else f"{float(self.wilson_flow_time):g}"
-            raise RuntimeError(f"No Wilson-loop R/T pairs are available for flow time {requested_text}.")
+            raise RuntimeError(f"No Wilson-loop R/T pairs are available for t_lat {requested_text}.")
         self.windows = enumerate_t_windows(self.unique_ts)
 
         self.manifest["aggregation"] = aggregation
@@ -2176,12 +2176,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--flow-time",
+        "--t-lat",
         "--t-f",
         dest="wilson_flow_time",
         type=float,
         default=None,
         help=(
-            "Use Wilson loops at this gradient-flow t_over_a2 value from gradient_flow_wtemp.dat "
+            "Use Wilson loops at this gradient-flow t_lat value from gradient_flow_wtemp.dat "
             "for finalized V(R), r0, and Creutz analysis. Omit to use unflowed W_temp.out."
         ),
     )

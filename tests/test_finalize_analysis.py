@@ -11,6 +11,7 @@ from unittest import mock
 import numpy as np
 import yaml
 
+import analyze_gradient_flow_wtemp
 import finalize_analysis
 import analyze_creutz_flow
 import finalized_analysis_helpers as helpers
@@ -31,6 +32,7 @@ def write_input_yaml(
     gradient_dt: float = 0.05,
     gradient_t_values: list[float] | None = None,
     w_temp_pairs=None,
+    l3: int = 4,
 ) -> None:
     payload = {
         "MetropolisParams": {
@@ -40,7 +42,7 @@ def write_input_yaml(
             "L0": 4,
             "L1": 4,
             "L2": 4,
-            "L3": 4,
+            "L3": l3,
             "nHits": 10,
             "nSweep": n_sweep,
             "seed": seed,
@@ -160,6 +162,7 @@ def make_run(
     w_temp_pairs=None,
     w_temp_r_values: list[int] | None = None,
     w_temp_t_values: list[int] | None = None,
+    l3: int = 4,
 ) -> Path:
     run_dir = base_dir / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -172,6 +175,7 @@ def make_run(
         gradient_dt=gradient_dt,
         gradient_t_values=gradient_t_values,
         w_temp_pairs=w_temp_pairs,
+        l3=l3,
     )
     write_w_temp(
         run_dir,
@@ -450,6 +454,72 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertEqual(len(grouped_paths), 2)
             self.assertIn(sorted([str(run_a.resolve()), str(run_b.resolve())]), grouped_paths)
             self.assertIn([str(run_c.resolve())], grouped_paths)
+
+    def test_gradient_flow_wtemp_group_by_combines_partial_flow_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = make_run(
+                root,
+                "run_a",
+                gradient_dt=0.025,
+                gradient_t_values=[0.0, 0.25],
+                l3=48,
+            )
+            run_b = make_run(
+                root,
+                "run_b",
+                seed=2,
+                gradient_dt=0.01,
+                gradient_t_values=[0.0, 0.25, 1.0],
+                l3=64,
+            )
+            write_gradient_flow_wtemp(run_a, flow_values=[0.0, 0.25], r_values=[2], t_values=[1])
+            write_gradient_flow_wtemp(run_b, flow_values=[0.0, 0.25, 1.0], r_values=[2], t_values=[1])
+
+            _discovered, default_groups = analyze_gradient_flow_wtemp.resolve_input_groups(
+                root,
+                None,
+                None,
+                1,
+                {},
+            )
+            self.assertEqual(len(default_groups), 2)
+
+            _discovered, grouped = analyze_gradient_flow_wtemp.resolve_input_groups(
+                root,
+                None,
+                None,
+                1,
+                {},
+                ["beta", "eps1", "L0", "L1", "L2"],
+            )
+            self.assertEqual(len(grouped), 1)
+            varying = analyze_gradient_flow_wtemp.varying_fields_within_group(grouped[0])
+            self.assertIn("GradientFlowParams.dt", varying)
+            self.assertIn("GradientFlowParams.t_values", varying)
+            self.assertIn("MetropolisParams.L3", varying)
+
+            thermalization_by_input = {path: 0 for path in grouped[0]["input_paths"]}
+            with mock.patch.object(analyze_gradient_flow_wtemp, "save_wilson_loop_plot", write_stub_plot):
+                analyze_gradient_flow_wtemp.analyze(
+                    input_paths=grouped[0]["input_paths"],
+                    output_dir=root / "analysis",
+                    thermalization_by_input=thermalization_by_input,
+                    block_size=1,
+                    n_bootstrap=5,
+                    seed=123,
+                    run_dirs=grouped[0]["run_dirs"],
+                    group_signature=grouped[0]["signature"],
+                )
+
+            summary = json.loads((root / "analysis" / "summary.json").read_text(encoding="utf-8"))
+            counts = {
+                float(row["t_over_a2"]): int(row["n_measurements"])
+                for row in summary["records"]
+            }
+            self.assertEqual(counts[0.0], 8)
+            self.assertEqual(counts[0.25], 8)
+            self.assertEqual(counts[1.0], 4)
 
     def test_run_evaluation_group_key_includes_gradient_flow_dt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -826,7 +896,7 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertIsNotNone(combined)
             assert combined is not None
             self.assertEqual(combined.available_flow_times(), [None])
-            self.assertEqual(metadata["wilson_loop_filter"], "flow_time=unflowed")
+            self.assertEqual(metadata["wilson_loop_filter"], "t_lat=unflowed")
 
     def test_flow_time_normalization_matches_float32_input(self):
         self.assertEqual(data_organizer._normalize_flow_time(np.float32(0.96)), 0.96)
@@ -889,9 +959,9 @@ class FinalizeAnalysisTests(unittest.TestCase):
             self.assertEqual(runner.calc.get_available_flow_times(), [0.25])
             flowed = runner.calc.get_variable("V_R", R=2, t_min=1, t_max=None, flow_time=0.25)
             self.assertTrue(np.isfinite(flowed.get()))
-            self.assertEqual(runner.aggregation["wilson_loop_filter"], "flow_time=0.25")
+            self.assertEqual(runner.aggregation["wilson_loop_filter"], "t_lat=0.25")
             self.assertEqual(runner.manifest["wilson_flow_time"], 0.25)
-            self.assertIn("__tf_0.25__", str(runner.analysis_dir))
+            self.assertIn("__tlat_0.25__", str(runner.analysis_dir))
 
     def test_creutz_flow_runner_calculates_diagonal_ratios_for_all_flow_times(self):
         with tempfile.TemporaryDirectory() as tmp:

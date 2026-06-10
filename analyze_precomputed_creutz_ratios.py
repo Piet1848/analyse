@@ -53,6 +53,14 @@ def filename_token(value: float | str) -> str:
     return str(value).replace("-", "m").replace(".", "p")
 
 
+def flow_time_label(flow_time: float) -> str:
+    return f"t_lat={float(flow_time):g}"
+
+
+def flow_time_title(flow_time: float) -> str:
+    return f"t_lat = {float(flow_time):g}"
+
+
 def json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -267,6 +275,7 @@ def compute_creutz_records(
 
             record: dict[str, Any] = {
                 "t_over_a2": float(flow_time),
+                "t_lat": float(flow_time),
                 "eight_t_over_a2": float(8.0 * flow_time),
                 "R": int(l_size),
                 "T": int(t_size),
@@ -304,6 +313,7 @@ def write_table(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "t_over_a2",
+        "t_lat",
         "eight_t_over_a2",
         "R",
         "T",
@@ -695,6 +705,7 @@ def build_dimensionless_fit_for_flow(
     return {
         "scale": config.name,
         "flow_time": flow_time,
+        "t_lat": flow_time,
         "eight_t_over_a2": float(8.0 * flow_time),
         "n_points_available": len(all_rows),
         "n_points_fit": len(fit_rows),
@@ -783,7 +794,7 @@ def save_fit_png(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> dic
     ax_rel.plot(x_grid, np.asarray(grid["sys_rel"], dtype=float), color="#2ca02c", linewidth=1.0, label="Delta_sys")
     ax_rel.plot(x_grid, np.asarray(grid["stat_rel"], dtype=float), color="#d62728", linewidth=1.0, label="Delta_stat")
 
-    title = f"8 t_f/a^2 = {fit['eight_t_over_a2']:g}"
+    title = flow_time_title(float(fit.get("t_lat", fit["flow_time"])))
     ax_fit.text(
         0.50,
         0.95,
@@ -821,7 +832,7 @@ def save_fit_html(path: Path, fit: dict[str, Any], config: FitScaleConfig) -> No
         rows=1,
         cols=2,
         subplot_titles=(
-            f"8 t_f/a^2 = {fit['eight_t_over_a2']:g}",
+            flow_time_title(float(fit.get("t_lat", fit["flow_time"]))),
             "Relative fit uncertainty",
         ),
     )
@@ -1015,17 +1026,17 @@ def plot_html(
                     "visible": True,
                 },
                 customdata=[
-                    [float(row["R_mid"]), float(row["T_mid"]), float(row["eight_t_over_a2"])]
+                    [float(row["R_mid"]), float(row["T_mid"]), float(row["t_over_a2"])]
                     for row in rows
                 ],
                 hovertemplate=(
                     "Rmid=%{customdata[0]:g}<br>"
                     "Tmid=%{customdata[1]:g}<br>"
-                    "8 t_f/a^2=%{customdata[2]:g}<br>"
+                    "t_lat=%{customdata[2]:g}<br>"
                     f"{y_key}=%{{y:g}}<extra></extra>"
                 ),
                 mode="lines+markers",
-                name=f"{8.0 * flow_time:g}",
+                name=f"{flow_time:g}",
             )
         )
 
@@ -1034,7 +1045,7 @@ def plot_html(
         template="plotly_white",
         xaxis_title=x_title,
         yaxis_title=y_title,
-        legend_title="8 t_f/a^2",
+        legend_title="t_lat",
     )
     _write_figure_html(fig, path)
 
@@ -1069,11 +1080,11 @@ def plot_png(
             markersize=2.5,
             linewidth=0.8,
             capsize=1.5,
-            label=f"{8.0 * flow_time:g}",
+            label=f"{flow_time:g}",
         )
     ax.set_xlabel(x_title)
     ax.set_ylabel(y_title)
-    ax.legend(title=r"$8t_f/a^2$", frameon=True, fontsize=8, title_fontsize=8)
+    ax.legend(title=r"$t_{\mathrm{lat}}$", frameon=True, fontsize=8, title_fontsize=8)
     ax.tick_params(direction="in", top=True, right=True)
     fig.tight_layout()
     written = save_matplotlib_figure(fig, path)

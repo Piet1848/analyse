@@ -656,40 +656,39 @@ class Calculator:
              mean_err = np.mean(ws_err[ws_err > 0]) if np.any(ws_err > 0) else 1.0
              ws_err[ws_err == 0] = mean_err
 
-        def fit_potential(ts, ws, sigma=None):
-            # Check for empty or non-positive data before fitting to avoid log errors
+        def initial_exponential_guess(ts, ws):
+            try:
+                p = np.polyfit(ts, np.log(ws), 1)
+                return max(float(np.exp(p[1])), 1e-300), float(-p[0])
+            except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError, FloatingPointError):
+                c_guess = max(float(ws[0]), 1e-300)
+                v_guess = -float(np.log(ws[-1] / ws[0]) / (ts[-1] - ts[0])) if ts[-1] != ts[0] else 0.1
+                return c_guess, v_guess
+
+        def fit_potential(ts, ws, sigma=None, p0=None):
+            # Check for empty or non-positive data before fitting.
             if len(ws) == 0 or np.any(ws <= 0):
                 return np.nan, np.nan
 
             try:
-                # Log-Linear Fit: ln(W) = ln(C) - V*t
-                ln_ws = np.log(ws)
-                
-                w_weights = None
-                if sigma is not None:
-                    # Weights for polyfit should be inverse variance of y = ln(W)
-                    # var(ln W) ~ (sigma / W)
-                    # w = 1/var ~ (W / sigma)
-                    # Filter out zero sigma to avoid division by zero (though handled outside)
-
-                    # Attention: np.polyfit squares these weights internally.
-                    valid_sigma = (sigma > 0)
-                    if np.all(valid_sigma):
-                         w_weights = (ws / sigma)
-                    else:
-                         # Fallback if sigma has zeros (should not happen due to check above)
-                         w_weights = None
-
-                # Fit: y = p[0]*x + p[1]  =>  ln(W) = -V*t + ln(C)
-                p = np.polyfit(ts, ln_ws, 1, w=w_weights)
-                
-                V = -p[0]
-                C = np.exp(p[1])
-                return V, C
+                c_guess, v_guess = p0 if p0 is not None else initial_exponential_guess(ts, ws)
+                fit_sigma = sigma if sigma is not None and np.all(sigma > 0) else None
+                popt, _ = curve_fit(
+                    exponential_ansatz,
+                    ts,
+                    ws,
+                    p0=[max(float(c_guess), 1e-300), float(v_guess)],
+                    sigma=fit_sigma,
+                    absolute_sigma=(fit_sigma is not None),
+                    bounds=([0.0, -np.inf], [np.inf, np.inf]),
+                    maxfev=5000,
+                )
+                C, V = popt
+                return float(V), float(C)
             except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
                 return np.nan, np.nan
 
-        # Weighted Fit
+        # Direct weighted fit of W(R,T) = C exp[-V T].
         V_main, C_main = fit_potential(ts_fit, ws_main, sigma=ws_err)
         
         if np.isnan(V_main):
@@ -707,7 +706,7 @@ class Calculator:
             raise ValueError(f"Bootstrap samples not available for V_R at R={R}")
         all_boots = np.stack([np.asarray(boot, dtype=float) for boot in boot_arrays], axis=0)
         all_boots_valid = all_boots[:valid_len, :]  # shape: (valid_len, n_boot)
-        use_weights = ws_err is not None and np.all(ws_err > 0)
+        bootstrap_p0 = (C_main, V_main)
 
         for i in range(n_boot):
             ws_sample = np.array(all_boots_valid[:, i], copy=True)
@@ -719,13 +718,10 @@ class Calculator:
                 bootstrap_Vs[i] = V_main
                 continue
 
-            ln_ws_sample = np.log(ws_sample)
-            w_weights = (ws_sample / ws_err) if use_weights else None
-
-            try:
-                p = np.polyfit(ts_fit, ln_ws_sample, 1, w=w_weights)
-                bootstrap_Vs[i] = -p[0]
-            except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
+            v_sample, _ = fit_potential(ts_fit, ws_sample, sigma=ws_err, p0=bootstrap_p0)
+            if np.isfinite(v_sample):
+                bootstrap_Vs[i] = v_sample
+            else:
                 bootstrap_Vs[i] = V_main
 
         var_data = data_organizer.VariableData("V_R")

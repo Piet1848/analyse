@@ -105,6 +105,36 @@ def finite_float(value: Any) -> float | None:
     return out if np.isfinite(out) else None
 
 
+def row_t_lat(row: dict[str, Any]) -> float | None:
+    value = finite_float(row.get("t_lat"))
+    if value is not None:
+        return value
+    value = finite_float(row.get("t_over_a2"))
+    if value is not None:
+        return value
+    eight_t = finite_float(row.get("eight_t_over_a2"))
+    return None if eight_t is None else eight_t / 8.0
+
+
+def t_lat_to_eight_t_over_a2(t_lat: float) -> float:
+    return 8.0 * float(t_lat)
+
+
+def t_lat_label(t_lat: float) -> str:
+    return f"t_lat={float(t_lat):g}"
+
+
+def t_lat_legend_label(t_lat: float, suffix: str | None = None) -> str:
+    label = rf"t_{{\mathrm{{lat}}}}={float(t_lat):g}"
+    if suffix:
+        label += rf"\ \mathrm{{{suffix}}}"
+    return f"${label}$"
+
+
+def continuum_t_lat_legend_label(t_lat: float) -> str:
+    return rf"$a=0,\ t_{{\mathrm{{lat}}}}={float(t_lat):g}$"
+
+
 def prompt_float(prompt: str, default: float | None = None) -> float:
     suffix = f" [{default:g}]" if default is not None and np.isfinite(default) else ""
     while True:
@@ -242,6 +272,23 @@ def filter_inputs_by_beta(inputs: list[ContinuumInput], betas: list[float]) -> l
     return [item for item in inputs if float_in_list(item.beta, betas)]
 
 
+def fit_exclusion_reason(row: dict[str, Any], excluded_betas: list[float]) -> str | None:
+    if excluded_betas and float_in_list(finite_float(row.get("beta")), excluded_betas):
+        return "beta excluded from continuum fit"
+    return None
+
+
+def mark_fit_usage(rows: list[dict[str, Any]], excluded_betas: list[float]) -> list[dict[str, Any]]:
+    fit_rows: list[dict[str, Any]] = []
+    for row in rows:
+        reason = fit_exclusion_reason(row, excluded_betas)
+        row["used_in_fit"] = reason is None
+        row["fit_exclusion_reason"] = reason
+        if reason is None:
+            fit_rows.append(row)
+    return fit_rows
+
+
 def resolve_flow_times(args: argparse.Namespace, inputs: list[ContinuumInput]) -> list[float]:
     common = common_flow_times(inputs)
     if args.eight_t_over_a2 is not None:
@@ -252,14 +299,14 @@ def resolve_flow_times(args: argparse.Namespace, inputs: list[ContinuumInput]) -
         requested = list(DEFAULT_FLOW_TIMES)
 
     if not requested:
-        raise ValueError("No common flow time exists across all selected inputs.")
+        raise ValueError("No common t_lat exists across all selected inputs.")
 
     selected: list[float] = []
     for value in requested:
         flow = nearest_flow_time(common, value)
         if flow is None:
             available_text = ", ".join(f"{item:g}" for item in common)
-            raise ValueError(f"Requested t_over_a2={value:g} is not common to all inputs. Common values: {available_text}")
+            raise ValueError(f"Requested t_lat={value:g} is not common to all inputs. Common values: {available_text}")
         if flow not in selected:
             selected.append(flow)
     return selected
@@ -465,6 +512,7 @@ def sigma_from_row(row: dict[str, Any]) -> float:
 def build_rows(
     inputs: list[ContinuumInput],
     *,
+    scale: str,
     r_hat: float,
     flow_times: list[float],
     fixed_eps_by_dir: dict[Path, float | None],
@@ -474,7 +522,10 @@ def build_rows(
     skipped: list[dict[str, Any]] = []
     for item in inputs:
         t0_over_a2 = t0_by_dir[item.analysis_dir]
-        ahat2 = 1.0 / (8.0 * t0_over_a2)
+        if item.scale_over_a is None or item.scale_over_a <= 0:
+            skipped.append({"analysis_dir": str(item.analysis_dir), "reason": f"missing positive {scale}/a scale"})
+            continue
+        ahat2 = 1.0 / (float(item.scale_over_a) ** 2)
         for flow_time in flow_times:
             path = item.flow_paths.get(flow_time)
             if path is None:
@@ -492,7 +543,7 @@ def build_rows(
                 )
                 continue
 
-            smearing_strength = 8.0 * flow_time
+            smearing_strength = t_lat_to_eight_t_over_a2(flow_time)
             tau = flow_time / t0_over_a2
             rows.append(
                 {
@@ -506,13 +557,14 @@ def build_rows(
                     "ahat2": float(ahat2),
                     "r_hat": float(r_hat),
                     "t_over_a2": float(flow_time),
+                    "t_lat": float(flow_time),
                     "eight_t_over_a2": float(smearing_strength),
                     "tau": float(tau),
                     **value,
                 }
             )
 
-    return sorted(rows, key=lambda row: (float(row["eight_t_over_a2"]), float(row["ahat2"]))), skipped
+    return sorted(rows, key=lambda row: (float(row_t_lat(row) or 0.0), float(row["ahat2"]))), skipped
 
 
 def bootstrap_scale_config(item: ContinuumInput, scale: str, t0_over_a2: float) -> FitScaleConfig | None:
@@ -946,7 +998,7 @@ def fit_combined_ansatz(rows: list[dict[str, Any]], bootstrap_y: np.ndarray | No
         {
             "mode": "combined-risch",
             "formula": "chi_hat = c00 + c20*ahat2 + c40*ahat2^2 + c01*tau + c21*ahat2*tau + c02*tau^2",
-            "fixed_smearing_formula": "tau=s*ahat2, s=8*t_f/a^2",
+            "fixed_smearing_formula": "tau=8*t_lat*ahat2",
             "n_points": int(len(rows)),
         }
     )
@@ -961,20 +1013,20 @@ def fit_separate_smearing_ansatz(
 ) -> dict[str, Any]:
     term_names = separate_term_names(order)
     bootstrap_matrix = usable_bootstrap_matrix(bootstrap_y, len(rows))
-    smearing_values = sorted_unique([float(row["eight_t_over_a2"]) for row in rows])
+    t_lat_values = sorted_unique([float(row_t_lat(row)) for row in rows if row_t_lat(row) is not None])
     smearing_fits: list[dict[str, Any]] = []
     failures: list[str] = []
 
-    for smearing_strength in smearing_values:
+    for t_lat in t_lat_values:
         row_indices = [
             index
             for index, row in enumerate(rows)
-            if abs(float(row["eight_t_over_a2"]) - smearing_strength) < 1e-10
+            if row_t_lat(row) is not None and abs(float(row_t_lat(row)) - t_lat) < 1e-10
         ]
         subset = [rows[index] for index in row_indices]
         if len(subset) < len(term_names):
             failures.append(
-                f"s={smearing_strength:g}: need {len(term_names)} usable points, got {len(subset)}"
+                f"{t_lat_label(t_lat)}: need {len(term_names)} usable points, got {len(subset)}"
             )
             continue
         ahat2 = np.asarray([float(row["ahat2"]) for row in subset], dtype=float)
@@ -987,19 +1039,20 @@ def fit_separate_smearing_ansatz(
                 subset_bootstrap,
             )
         except ValueError as exc:
-            failures.append(f"s={smearing_strength:g}: {exc}")
+            failures.append(f"{t_lat_label(t_lat)}: {exc}")
             continue
         subfit.update(
             {
                 "mode": "separate-linear" if order == 1 else "separate-quadratic",
                 "order": int(order),
-                "eight_t_over_a2": float(smearing_strength),
-                "t_over_a2_values": sorted_unique([float(row["t_over_a2"]) for row in subset]),
+                "t_lat": float(t_lat),
+                "eight_t_over_a2": float(t_lat_to_eight_t_over_a2(t_lat)),
+                "t_over_a2_values": sorted_unique([float(row_t_lat(row)) for row in subset if row_t_lat(row) is not None]),
                 "n_points": int(len(subset)),
                 "formula": (
-                    "chi_hat_s = c0 + c2*ahat2"
+                    "chi_hat_tlat = c0 + c2*ahat2"
                     if order == 1
-                    else "chi_hat_s = c0 + c2*ahat2 + c4*ahat2^2"
+                    else "chi_hat_tlat = c0 + c2*ahat2 + c4*ahat2^2"
                 ),
             }
         )
@@ -1016,9 +1069,9 @@ def fit_separate_smearing_ansatz(
         "order": int(order),
         "term_names": list(term_names),
         "formula": (
-            "For each fixed s=8*t_f/a^2: chi_hat_s = c0^(s) + c2^(s)*ahat2"
+            "For each fixed t_lat: chi_hat_tlat = c0^(t_lat) + c2^(t_lat)*ahat2"
             if order == 1
-            else "For each fixed s=8*t_f/a^2: chi_hat_s = c0^(s) + c2^(s)*ahat2 + c4^(s)*ahat2^2"
+            else "For each fixed t_lat: chi_hat_tlat = c0^(t_lat) + c2^(t_lat)*ahat2 + c4^(t_lat)*ahat2^2"
         ),
         "smearing_fits": smearing_fits,
         "continuum_estimates": continuum_estimate_rows_from_smearing_fits(smearing_fits),
@@ -1084,19 +1137,33 @@ def prediction_band_for_fit(fit: dict[str, Any], design: np.ndarray) -> Predicti
     return PredictionBand(y=y, y_low=y - err, y_high=y + err, source="linearized_parameter_covariance")
 
 
-def fit_for_smearing(fit: dict[str, Any], smearing_strength: float) -> dict[str, Any]:
+def fit_for_t_lat(fit: dict[str, Any], t_lat: float) -> dict[str, Any]:
     if fit.get("mode") != "combined-risch":
         for subfit in fit.get("smearing_fits", []):
-            if abs(float(subfit["eight_t_over_a2"]) - float(smearing_strength)) < 1e-10:
+            subfit_t_lat = finite_float(subfit.get("t_lat"))
+            if subfit_t_lat is None:
+                subfit_t_lat = finite_float((subfit.get("t_over_a2_values") or [None])[0])
+            if subfit_t_lat is None:
+                subfit_t_lat = finite_float(subfit.get("eight_t_over_a2"))
+                subfit_t_lat = None if subfit_t_lat is None else subfit_t_lat / 8.0
+            if subfit_t_lat is not None and abs(subfit_t_lat - float(t_lat)) < 1e-10:
                 return subfit
-        raise KeyError(f"No fit is available for s={smearing_strength:g}.")
+        raise KeyError(f"No fit is available for {t_lat_label(t_lat)}.")
     return fit
 
 
-def design_grid_for_smearing(fit: dict[str, Any], ahat2_grid: np.ndarray, smearing_strength: float) -> np.ndarray:
+def fit_for_smearing(fit: dict[str, Any], smearing_strength: float) -> dict[str, Any]:
+    return fit_for_t_lat(fit, float(smearing_strength) / 8.0)
+
+
+def design_grid_for_t_lat(fit: dict[str, Any], ahat2_grid: np.ndarray, t_lat: float) -> np.ndarray:
     if fit.get("mode") == "combined-risch":
-        return smearing_design_grid(ahat2_grid, smearing_strength)
+        return smearing_design_grid(ahat2_grid, t_lat_to_eight_t_over_a2(t_lat))
     return separate_design(ahat2_grid, int(fit["order"]))
+
+
+def design_grid_for_smearing(fit: dict[str, Any], ahat2_grid: np.ndarray, smearing_strength: float) -> np.ndarray:
+    return design_grid_for_t_lat(fit, ahat2_grid, float(smearing_strength) / 8.0)
 
 
 def continuum_estimate_rows_from_smearing_fits(smearing_fits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1105,6 +1172,7 @@ def continuum_estimate_rows_from_smearing_fits(smearing_fits: list[dict[str, Any
         rows.append(
             {
                 "fit_mode": subfit.get("mode"),
+                "t_lat": finite_float(subfit.get("t_lat")),
                 "eight_t_over_a2": float(subfit["eight_t_over_a2"]),
                 "t_over_a2_values": [float(value) for value in subfit.get("t_over_a2_values", [])],
                 "continuum_value": finite_float(subfit.get("continuum_value")),
@@ -1126,6 +1194,7 @@ def continuum_estimate_rows(fit: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "fit_mode": fit.get("mode"),
+            "t_lat": None,
             "eight_t_over_a2": None,
             "t_over_a2_values": None,
             "continuum_value": finite_float(fit.get("continuum_value")),
@@ -1159,12 +1228,15 @@ def write_table(path: Path, rows: list[dict[str, Any]]) -> None:
         "ahat2",
         "r_hat",
         "t_over_a2",
+        "t_lat",
         "eight_t_over_a2",
         "tau",
         "chi_hat",
         "total_err",
         "stat_err",
         "sys_err",
+        "used_in_fit",
+        "fit_exclusion_reason",
         "fit_json",
         "analysis_dir",
     ]
@@ -1187,6 +1259,7 @@ def write_table(path: Path, rows: list[dict[str, Any]]) -> None:
 def write_continuum_comparison_table(path: Path, rows: list[dict[str, Any]]) -> None:
     columns = [
         "fit_mode",
+        "t_lat",
         "eight_t_over_a2",
         "continuum_value",
         "continuum_err",
@@ -1248,6 +1321,7 @@ def save_continuum_png(
     rows: list[dict[str, Any]],
     fit: dict[str, Any],
     *,
+    scale: str,
     r_hat: float,
     eps_label: str,
     physical_tau: list[float],
@@ -1256,37 +1330,63 @@ def save_continuum_png(
     ahat2_values = [float(row["ahat2"]) for row in rows]
     x_max = max(ahat2_values) if ahat2_values else 0.0
     x_grid = np.linspace(0.0, max(x_max * 1.05, 1e-12), 240)
-    smearing_values = sorted_unique([float(row["eight_t_over_a2"]) for row in rows])
+    t_lat_values = sorted_unique([float(row_t_lat(row)) for row in rows if row_t_lat(row) is not None])
     markers = beta_marker_map(rows)
+    excluded_label_drawn = False
 
-    for index, smearing_strength in enumerate(smearing_values):
+    for index, t_lat in enumerate(t_lat_values):
         color = color_for_index(index)
-        subset = [row for row in rows if abs(float(row["eight_t_over_a2"]) - smearing_strength) < 1e-10]
+        subset = [row for row in rows if row_t_lat(row) is not None and abs(float(row_t_lat(row)) - t_lat) < 1e-10]
         subset_betas = sorted({row.get("beta") for row in subset}, key=beta_sort_key)
-        first_beta = subset_betas[0] if subset_betas else None
+        used_betas = sorted({row.get("beta") for row in subset if bool(row.get("used_in_fit", True))}, key=beta_sort_key)
+        first_used_beta = used_betas[0] if used_betas else (subset_betas[0] if subset_betas else None)
         for beta in subset_betas:
             beta_rows = [row for row in subset if row.get("beta") == beta]
-            x = np.asarray([float(row["ahat2"]) for row in beta_rows], dtype=float)
-            y = np.asarray([float(row["chi_hat"]) for row in beta_rows], dtype=float)
-            yerr = np.asarray([sigma_from_row(row) for row in beta_rows], dtype=float)
-            ax.errorbar(
-                x,
-                y,
-                yerr=yerr,
-                fmt=markers[beta],
-                color=color,
-                ecolor=color,
-                capsize=2.0,
-                markersize=4.2,
-                linestyle="none",
-                label=f"s={smearing_strength:g}" if beta == first_beta else None,
-            )
-            for x_val, y_val, row in zip(x, y, beta_rows, strict=True):
-                label = "" if row.get("beta") is None else f"{float(row['beta']):g}"
-                ax.annotate(label, (x_val, y_val), xytext=(3, 3), textcoords="offset points", fontsize=6, color=color)
+            for used_in_fit, point_rows in (
+                (True, [row for row in beta_rows if bool(row.get("used_in_fit", True))]),
+                (False, [row for row in beta_rows if not bool(row.get("used_in_fit", True))]),
+            ):
+                if not point_rows:
+                    continue
+                x = np.asarray([float(row["ahat2"]) for row in point_rows], dtype=float)
+                y = np.asarray([float(row["chi_hat"]) for row in point_rows], dtype=float)
+                yerr = np.asarray([sigma_from_row(row) for row in point_rows], dtype=float)
+                if used_in_fit:
+                    ax.errorbar(
+                        x,
+                        y,
+                        yerr=yerr,
+                        fmt=markers[beta],
+                        color=color,
+                        ecolor=color,
+                        capsize=2.0,
+                        markersize=4.2,
+                        linestyle="none",
+                        label=t_lat_label(t_lat) if beta == first_used_beta else None,
+                    )
+                    label_color = color
+                else:
+                    ax.errorbar(
+                        x,
+                        y,
+                        yerr=yerr,
+                        fmt=markers[beta],
+                        color="#7f7f7f",
+                        ecolor="#7f7f7f",
+                        markerfacecolor="none",
+                        capsize=2.0,
+                        markersize=4.2,
+                        linestyle="none",
+                        label="excluded from fit" if not excluded_label_drawn else None,
+                    )
+                    excluded_label_drawn = True
+                    label_color = "#7f7f7f"
+                for x_val, y_val, row in zip(x, y, point_rows, strict=True):
+                    label = "" if row.get("beta") is None else f"{float(row['beta']):g}"
+                    ax.annotate(label, (x_val, y_val), xytext=(3, 3), textcoords="offset points", fontsize=6, color=label_color)
 
-        subfit = fit_for_smearing(fit, smearing_strength)
-        design = design_grid_for_smearing(fit, x_grid, smearing_strength)
+        subfit = fit_for_t_lat(fit, t_lat)
+        design = design_grid_for_t_lat(fit, x_grid, t_lat)
         band = prediction_band_for_fit(subfit, design)
         ax.plot(x_grid, band.y, color=color, linewidth=1.25)
         ax.fill_between(x_grid, band.y_low, band.y_high, color=color, alpha=0.12, linewidth=0)
@@ -1301,7 +1401,7 @@ def save_continuum_png(
                 ecolor=color,
                 capsize=2.0,
                 markersize=5.0,
-                label=rf"$a=0$, s={smearing_strength:g}",
+                label=rf"$a=0$, $t_{{\mathrm{{lat}}}}={t_lat:g}$",
             )
 
     physical_tau_values = physical_tau if fit.get("mode") == "combined-risch" else []
@@ -1323,8 +1423,8 @@ def save_continuum_png(
             markersize=5.0,
             label=r"$a=0$",
         )
-    ax.set_xlabel(r"$\hat a^2 = a^2/(8t_0)$")
-    ax.set_ylabel(r"$\hat\chi(\hat r)$")
+    ax.set_xlabel(r"$(a/r_0)^2$" if scale == "r0" else r"$a^2/(8t_0)$")
+    ax.set_ylabel(r"$\hat{\chi}(\hat{r})$")
     ax.set_title(f"r_hat={r_hat:g}, {eps_label}")
     ax.set_xlim(left=0.0)
     ax.tick_params(direction="in", top=True, right=True)
@@ -1372,68 +1472,84 @@ def save_continuum_html(
     rows: list[dict[str, Any]],
     fit: dict[str, Any],
     *,
+    scale: str,
     r_hat: float,
     eps_label: str,
     physical_tau: list[float],
 ) -> None:
     go = _get_plotly()
+    x_hover_label = "(a/r<sub>0</sub>)<sup>2</sup>" if scale == "r0" else "a<sup>2</sup>/(8 t<sub>0</sub>)"
     fig = go.Figure()
     ahat2_values = [float(row["ahat2"]) for row in rows]
     x_max = max(ahat2_values) if ahat2_values else 0.0
     x_grid = np.linspace(0.0, max(x_max * 1.05, 1e-12), 240)
-    smearing_values = sorted_unique([float(row["eight_t_over_a2"]) for row in rows])
+    t_lat_values = sorted_unique([float(row_t_lat(row)) for row in rows if row_t_lat(row) is not None])
 
-    for index, smearing_strength in enumerate(smearing_values):
+    for index, t_lat in enumerate(t_lat_values):
         color = color_for_index(index)
-        subset = [row for row in rows if abs(float(row["eight_t_over_a2"]) - smearing_strength) < 1e-10]
-        fig.add_trace(
-            go.Scatter(
-                x=[float(row["ahat2"]) for row in subset],
-                y=[float(row["chi_hat"]) for row in subset],
-                error_y={"type": "data", "array": [sigma_from_row(row) for row in subset], "visible": True},
-                mode="markers+text",
-                text=[f"{float(row['beta']):g}" if row.get("beta") is not None else "" for row in subset],
-                textposition="top center",
-                marker={"color": color, "size": 7},
-                name=f"data s={smearing_strength:g}",
-                customdata=[
-                    [
-                        row.get("beta"),
-                        row.get("epsilon_fixed"),
-                        row.get("epsilon_inferred"),
-                        row.get("t0_over_a2"),
-                        row.get("t_over_a2"),
-                        row.get("eight_t_over_a2"),
-                        row.get("tau"),
-                        row.get("stat_err"),
-                        row.get("sys_err"),
-                        row.get("total_err"),
-                        row.get("analysis_dir"),
-                    ]
-                    for row in subset
-                ],
-                hovertemplate=(
-                    "beta=%{customdata[0]}<br>"
-                    "fixed eps=%{customdata[1]}<br>"
-                    "inferred eps1=%{customdata[2]}<br>"
-                    "t0/a^2=%{customdata[3]:g}<br>"
-                    "t/a^2=%{customdata[4]:g}<br>"
-                    "s=8t/a^2=%{customdata[5]:g}<br>"
-                    "tau=%{customdata[6]:g}<br>"
-                    "ahat^2=%{x:g}<br>"
-                    "chi_hat=%{y:g}<br>"
-                    "stat=%{customdata[7]:g}<br>"
-                    "sys=%{customdata[8]:g}<br>"
-                    "total=%{customdata[9]:g}<br>"
-                    "%{customdata[10]}<extra></extra>"
-                ),
+        subset = [row for row in rows if row_t_lat(row) is not None and abs(float(row_t_lat(row)) - t_lat) < 1e-10]
+        for used_in_fit, point_rows in (
+            (True, [row for row in subset if bool(row.get("used_in_fit", True))]),
+            (False, [row for row in subset if not bool(row.get("used_in_fit", True))]),
+        ):
+            if not point_rows:
+                continue
+            marker = {"color": color, "size": 7}
+            name = t_lat_legend_label(t_lat, "data")
+            if not used_in_fit:
+                marker = {"color": "#7f7f7f", "size": 7, "symbol": "circle-open"}
+                name = t_lat_legend_label(t_lat, "excluded")
+            fig.add_trace(
+                go.Scatter(
+                    x=[float(row["ahat2"]) for row in point_rows],
+                    y=[float(row["chi_hat"]) for row in point_rows],
+                    error_y={"type": "data", "array": [sigma_from_row(row) for row in point_rows], "visible": True},
+                    mode="markers+text",
+                    text=[f"{float(row['beta']):g}" if row.get("beta") is not None else "" for row in point_rows],
+                    textposition="top center",
+                    marker=marker,
+                    name=name,
+                    customdata=[
+                        [
+                            row.get("beta"),
+                            row.get("epsilon_fixed"),
+                            row.get("epsilon_inferred"),
+                            row.get("t0_over_a2"),
+                            row.get("t_over_a2"),
+                            row.get("eight_t_over_a2"),
+                            row.get("tau"),
+                            row.get("stat_err"),
+                            row.get("sys_err"),
+                            row.get("total_err"),
+                            row.get("analysis_dir"),
+                            row.get("used_in_fit", True),
+                            row.get("fit_exclusion_reason"),
+                        ]
+                        for row in point_rows
+                    ],
+                    hovertemplate=(
+                        "beta=%{customdata[0]}<br>"
+                        "fixed &epsilon;<sub>1</sub>=%{customdata[1]}<br>"
+                        "inferred &epsilon;<sub>1</sub>=%{customdata[2]}<br>"
+                        "t0/a^2=%{customdata[3]:g}<br>"
+                        "t_lat=%{customdata[4]:g}<br>"
+                        "tau=%{customdata[6]:g}<br>"
+                        f"{x_hover_label}=%{{x:g}}<br>"
+                        "&chi;&#770;=%{y:g}<br>"
+                        "stat=%{customdata[7]:g}<br>"
+                        "sys=%{customdata[8]:g}<br>"
+                        "total=%{customdata[9]:g}<br>"
+                        "used in fit=%{customdata[11]}<br>"
+                        "fit exclusion=%{customdata[12]}<br>"
+                        "%{customdata[10]}<extra></extra>"
+                    ),
+                )
             )
-        )
 
-        subfit = fit_for_smearing(fit, smearing_strength)
-        design = design_grid_for_smearing(fit, x_grid, smearing_strength)
+        subfit = fit_for_t_lat(fit, t_lat)
+        design = design_grid_for_t_lat(fit, x_grid, t_lat)
         band = prediction_band_for_fit(subfit, design)
-        add_plotly_band(fig, x_grid, band.y, band.y_low, band.y_high, color=color, name=f"fit s={smearing_strength:g}")
+        add_plotly_band(fig, x_grid, band.y, band.y_low, band.y_high, color=color, name=t_lat_legend_label(t_lat, "fit"))
 
         if fit.get("mode") != "combined-risch":
             fig.add_trace(
@@ -1443,17 +1559,17 @@ def save_continuum_html(
                     error_y={"type": "data", "array": [float(subfit["continuum_err"])], "visible": True},
                     mode="markers",
                     marker={"symbol": "square", "color": color, "size": 9},
-                    name=f"a=0, s={smearing_strength:g}",
+                    name=continuum_t_lat_legend_label(t_lat),
                     hovertemplate=(
-                        "ahat^2=0<br>"
-                        "s=%{customdata[0]:g}<br>"
-                        "chi_hat=%{y:g}<br>"
+                        f"{x_hover_label}=0<br>"
+                        "t_lat=%{customdata[0]:g}<br>"
+                        "&chi;&#770;=%{y:g}<br>"
                         "err=%{customdata[1]:g}<br>"
                         "chi2/dof=%{customdata[2]}<extra>a=0</extra>"
                     ),
                     customdata=[
                         [
-                            float(smearing_strength),
+                            float(t_lat),
                             float(subfit["continuum_err"]),
                             subfit.get("chi2_dof"),
                         ]
@@ -1476,16 +1592,17 @@ def save_continuum_html(
                 mode="markers",
                 marker={"symbol": "square", "color": "#d62728", "size": 9},
                 name="a=0, shared continuum",
-                hovertemplate="ahat^2=0<br>chi_hat=%{y:g}<extra>a=0</extra>",
+                hovertemplate=f"{x_hover_label}=0<br>&chi;&#770;=%{{y:g}}<extra>a=0</extra>",
             )
         )
     fig.update_layout(
         title=f"Continuum fit at r_hat={r_hat:g}, {eps_label}",
         template="plotly_white",
-        xaxis_title="ahat^2 = a^2/(8 t0)",
-        yaxis_title="chi_hat(r_hat)",
+        xaxis_title="$(a/r_0)^2$" if scale == "r0" else "$a^2/(8t_0)$",
+        yaxis_title="$\\hat{\\chi}(\\hat{r})$",
+        margin={"l": 58, "r": 12, "t": 48, "b": 82},
     )
-    fig.update_xaxes(rangemode="tozero")
+    fig.update_xaxes(rangemode="tozero", automargin=True, title_standoff=16)
     _write_figure_html(fig, path)
 
 
@@ -1527,6 +1644,7 @@ def relative_uncertainty_entries(
                     "beta": item.beta,
                     "epsilon_inferred": item.inferred_epsilon,
                     "t_over_a2": float(flow_time),
+                    "t_lat": float(flow_time),
                     "eight_t_over_a2": float(8.0 * flow_time),
                     "x": x[valid][order],
                     "total_rel": total_rel[valid][order],
@@ -1570,19 +1688,19 @@ def save_rhat_guide_png(
     if len(betas) == 1:
         axes = [axes]
 
-    flow_values = sorted_unique([float(entry["eight_t_over_a2"]) for entry in entries])
+    flow_values = sorted_unique([float(entry["t_lat"]) for entry in entries])
     flow_color = {flow: color_for_index(index) for index, flow in enumerate(flow_values)}
     x_lo, x_hi = common_range
     for axis, beta in zip(axes, betas, strict=True):
         beta_entries = [entry for entry in entries if entry.get("beta") == beta]
-        for entry in sorted(beta_entries, key=lambda row: float(row["eight_t_over_a2"])):
-            flow = float(entry["eight_t_over_a2"])
+        for entry in sorted(beta_entries, key=lambda row: float(row["t_lat"])):
+            flow = float(entry["t_lat"])
             axis.plot(
                 np.asarray(entry["x"], dtype=float),
                 np.asarray(entry["total_rel"], dtype=float),
                 color=flow_color[flow],
                 linewidth=1.1,
-                label=f"8t/a^2={flow:g}",
+                label=t_lat_label(flow),
             )
         if x_lo is not None and x_hi is not None:
             axis.axvspan(float(x_lo), float(x_hi), color="0.5", alpha=0.08, linewidth=0)
@@ -1631,20 +1749,20 @@ def save_rhat_guide_html(
         shared_xaxes=True,
         subplot_titles=["beta=unknown" if beta is None else f"beta={beta:g}" for beta in betas],
     )
-    flow_values = sorted_unique([float(entry["eight_t_over_a2"]) for entry in entries])
+    flow_values = sorted_unique([float(entry["t_lat"]) for entry in entries])
     flow_color = {flow: color_for_index(index) for index, flow in enumerate(flow_values)}
     x_lo, x_hi = common_range
     for row_index, beta in enumerate(betas, start=1):
         beta_entries = [entry for entry in entries if entry.get("beta") == beta]
-        for entry in sorted(beta_entries, key=lambda row: float(row["eight_t_over_a2"])):
-            flow = float(entry["eight_t_over_a2"])
+        for entry in sorted(beta_entries, key=lambda row: float(row["t_lat"])):
+            flow = float(entry["t_lat"])
             fig.add_trace(
                 go.Scatter(
                     x=[float(value) for value in entry["x"]],
                     y=[float(value) for value in entry["total_rel"]],
                     mode="lines",
                     line={"color": flow_color[flow], "width": 1.7},
-                    name=f"8t/a^2={flow:g}",
+                    name=t_lat_label(flow),
                     legendgroup=f"flow-{flow:g}",
                     showlegend=row_index == 1,
                     customdata=[
@@ -1653,8 +1771,8 @@ def save_rhat_guide_html(
                     ],
                     hovertemplate=(
                         "beta=%{customdata[0]}<br>"
-                        "eps1=%{customdata[1]}<br>"
-                        "t/a^2=%{customdata[2]:g}<br>"
+                        "&epsilon;<sub>1</sub>=%{customdata[1]}<br>"
+                        "t_lat=%{customdata[2]:g}<br>"
                         "r_hat=%{x:g}<br>"
                         "Delta_tot/chi=%{y:g}<br>"
                         "%{customdata[3]}<extra></extra>"
@@ -1717,6 +1835,7 @@ def save_rhat_guide_outputs(
             "scale": scale,
             "betas": [float(value) for value in betas],
             "t_over_a2_values": [float(value) for value in flow_times],
+            "t_lat_values": [float(value) for value in flow_times],
             "eight_t_over_a2_values": [float(8.0 * value) for value in flow_times],
             "eps_label": eps_label,
             "common_r_hat_range": {
@@ -1761,26 +1880,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--r-hat", type=float, help="Target r_hat where the average interpolation fit is evaluated.")
     parser.add_argument("--betas", nargs="+", type=float, default=list(DEFAULT_BETAS), help="Beta values to use. Default: 2.3 2.4 2.5 2.6.")
     parser.add_argument(
+        "--exclude-fit-beta",
+        "--exclude-beta-from-fit",
+        dest="exclude_fit_beta",
+        nargs="+",
+        type=float,
+        default=[],
+        metavar="BETA",
+        help="Beta values to keep in tables/plots but exclude from the continuum fit.",
+    )
+    parser.add_argument(
         "--eps1",
         nargs="+",
         type=float,
         default=list(DEFAULT_EPS1),
         help="epsilon1 values. Give one value for all betas, or one per beta in --betas order. Default: 0.",
     )
-    parser.add_argument("--flow-time", nargs="+", type=float, help="One or more Wilson-loop flow times t_f/a^2 to include. Default: 0 0.25 0.5 0.75 1.0.")
-    parser.add_argument("--eight-t-over-a2", nargs="+", type=float, help="One or more smearing strengths s=8*t_f/a^2 to include.")
+    parser.add_argument(
+        "--flow-time",
+        "--t-lat",
+        dest="flow_time",
+        nargs="+",
+        type=float,
+        help="One or more Wilson-loop t_lat values to include. Default: 0 0.25 0.5 0.75 1.0.",
+    )
+    parser.add_argument(
+        "--eight-t-over-a2",
+        nargs="+",
+        type=float,
+        help="Legacy alias accepting 8*t_lat values; prefer --t-lat.",
+    )
     parser.add_argument(
         "--hide-zero-flow-in-plot",
         action="store_true",
-        help="Do not draw t_f/a^2=0 (s=0) in the continuum PNG/HTML plots; fits and tables still include it.",
+        help="Do not draw t_lat=0 in the continuum PNG/HTML plots; fits and tables still include it.",
     )
-    parser.add_argument("--physical-tau", nargs="*", type=float, default=[], help="Optional dashed physical-flow curves at fixed tau=t_f/t0.")
+    parser.add_argument("--physical-tau", nargs="*", type=float, default=[], help="Optional dashed physical-flow curves at fixed tau=t_lat/(t0/a^2).")
     parser.add_argument(
         "--fit-mode",
         choices=list(FIT_MODES),
         default="separate-linear",
         help=(
-            "Continuum ansatz. separate-linear/quadratic fits each fixed smearing independently; "
+            "Continuum ansatz. separate-linear/quadratic fits each fixed t_lat independently; "
             "combined-risch uses the shared six-parameter Risch ansatz. Default: separate-linear."
         ),
     )
@@ -1793,7 +1934,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--continuum-bootstrap-samples", type=int, default=200, help="Maximum bootstrap replicas used in the continuum fit. Default: 200.")
     parser.add_argument("--continuum-bootstrap-seed", type=int, default=24680, help="Seed for Gaussian fallback replicas. Default: 24680.")
     parser.add_argument("--no-continuum-bootstrap", action="store_true", help="Use only diagonal total errors in the continuum fit.")
-    parser.add_argument("--list", action="store_true", help="List discovered inputs and common flow times, then exit.")
+    parser.add_argument("--list", action="store_true", help="List discovered inputs and common t_lat values, then exit.")
     return parser
 
 
@@ -1802,6 +1943,18 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--r-hat must be positive")
     if not args.betas:
         parser.error("--betas must contain at least one value")
+    for beta in args.betas:
+        if not np.isfinite(float(beta)):
+            parser.error("--betas values must be finite")
+    selected_betas = sorted_unique([float(beta) for beta in args.betas])
+    excluded_betas = sorted_unique([float(beta) for beta in args.exclude_fit_beta])
+    for beta in excluded_betas:
+        if not np.isfinite(float(beta)):
+            parser.error("--exclude-fit-beta values must be finite")
+        if not float_in_list(beta, args.betas):
+            parser.error(f"--exclude-fit-beta {beta:g} is not present in --betas")
+    if len(excluded_betas) >= len(selected_betas):
+        parser.error("--exclude-fit-beta cannot exclude every selected beta")
     if not args.eps1 and not args.eps_map:
         parser.error("--eps1 must contain at least one value unless --eps-map is given")
     if args.flow_time is not None and args.eight_t_over_a2 is not None:
@@ -1822,8 +1975,8 @@ def make_eps_label(args: argparse.Namespace, eps_info: dict[str, Any]) -> str:
         return args.eps_label
     values = sorted({value for value in (eps_info.get("by_beta") or {}).values() if value is not None})
     if not values:
-        return "fixed eps"
-    return "fixed eps=" + ",".join(f"{value:g}" for value in values)
+        return r"fixed $\epsilon_1$"
+    return r"fixed $\epsilon_1=$" + ",".join(f"{value:g}" for value in values)
 
 
 def main() -> int:
@@ -1856,8 +2009,7 @@ def main() -> int:
         except ValueError as exc:
             parser.error(str(exc))
         common = common_flow_times(list_inputs)
-        print("Common t_over_a2: " + (", ".join(f"{value:g}" for value in common) if common else "none"))
-        print("Common s=8*t_over_a2: " + (", ".join(f"{8.0 * value:g}" for value in common) if common else "none"))
+        print("Common t_lat: " + (", ".join(f"{value:g}" for value in common) if common else "none"))
         print("Selected fixed eps: " + json.dumps(eps_info["by_beta"], sort_keys=True))
         for item in sorted(list_inputs, key=lambda row: (beta_sort_key(row.beta), str(row.analysis_dir))):
             t0_text = "none" if item.summary_t0_over_a2 is None else f"{item.summary_t0_over_a2:g}"
@@ -1920,6 +2072,7 @@ def main() -> int:
 
     rows, skipped = build_rows(
         selected_inputs,
+        scale=args.scale,
         r_hat=r_hat,
         flow_times=flow_times,
         fixed_eps_by_dir=fixed_eps_by_dir,
@@ -1928,15 +2081,19 @@ def main() -> int:
     skipped.extend(eps_skipped)
     if not rows:
         parser.error("No usable continuum points remain after interpolation to the selected r_hat.")
-    if args.fit_mode == "combined-risch" and len(rows) < len(FIT_TERM_NAMES):
-        parser.error(f"Need at least {len(FIT_TERM_NAMES)} usable points for the combined Risch ansatz; got {len(rows)}.")
+    fit_excluded_betas = sorted_unique([float(value) for value in args.exclude_fit_beta])
+    fit_rows = mark_fit_usage(rows, fit_excluded_betas)
+    if not fit_rows:
+        parser.error("No usable continuum points remain after applying --exclude-fit-beta.")
+    if args.fit_mode == "combined-risch" and len(fit_rows) < len(FIT_TERM_NAMES):
+        parser.error(f"Need at least {len(FIT_TERM_NAMES)} usable points for the combined Risch ansatz; got {len(fit_rows)}.")
 
     bootstrap_matrix: np.ndarray | None = None
     bootstrap_metadata: list[dict[str, Any]] = []
     if not args.no_continuum_bootstrap:
         inputs_by_dir = {str(item.analysis_dir): item for item in selected_inputs}
         bootstrap_matrix, bootstrap_metadata = build_interpolated_bootstrap_matrix(
-            rows,
+            fit_rows,
             inputs_by_dir,
             scale=args.scale,
             max_samples=args.continuum_bootstrap_samples,
@@ -1944,16 +2101,19 @@ def main() -> int:
         )
 
     try:
-        fit = fit_continuum_ansatz(rows, mode=args.fit_mode, bootstrap_y=bootstrap_matrix)
+        fit = fit_continuum_ansatz(fit_rows, mode=args.fit_mode, bootstrap_y=bootstrap_matrix)
     except ValueError as exc:
         parser.error(str(exc))
 
     s_token = "s_" + "_".join(filename_token(f"{8.0 * value:g}") for value in flow_times)
     mode_token = args.fit_mode.replace("-", "_")
     token = f"rhat_{filename_token(f'{r_hat:g}')}__{s_token}__{args.scale}__{mode_token}"
+    if fit_excluded_betas:
+        excluded_token = "_".join(filename_token(f"{value:g}") for value in fit_excluded_betas)
+        token += f"__fit_excludes_beta_{excluded_token}"
     plot_rows = nonzero_flow_plot_rows(rows) if args.hide_zero_flow_in_plot else rows
     if not plot_rows:
-        parser.error("--hide-zero-flow-in-plot removed all continuum points; include at least one nonzero flow time.")
+        parser.error("--hide-zero-flow-in-plot removed all continuum points; include at least one nonzero t_lat value.")
     plot_token = f"{token}__plot_no_s0" if args.hide_zero_flow_in_plot else token
 
     table_path = output_dir / f"continuum_points__{token}.dat"
@@ -1969,10 +2129,15 @@ def main() -> int:
     if bootstrap_matrix is not None:
         npz_payload: dict[str, Any] = {
             "y_bootstrap": bootstrap_matrix,
-            "row_analysis_dir": np.asarray([str(row["analysis_dir"]) for row in rows]),
-            "row_t_over_a2": np.asarray([float(row["t_over_a2"]) for row in rows], dtype=float),
-            "row_ahat2": np.asarray([float(row["ahat2"]) for row in rows], dtype=float),
-            "row_tau": np.asarray([float(row["tau"]) for row in rows], dtype=float),
+            "row_analysis_dir": np.asarray([str(row["analysis_dir"]) for row in fit_rows]),
+            "row_beta": np.asarray([float(row["beta"]) if row.get("beta") is not None else np.nan for row in fit_rows], dtype=float),
+            "row_t_over_a2": np.asarray([float(row["t_over_a2"]) for row in fit_rows], dtype=float),
+            "row_t_lat": np.asarray(
+                [float(value) if (value := row_t_lat(row)) is not None else np.nan for row in fit_rows],
+                dtype=float,
+            ),
+            "row_ahat2": np.asarray([float(row["ahat2"]) for row in fit_rows], dtype=float),
+            "row_tau": np.asarray([float(row["tau"]) for row in fit_rows], dtype=float),
         }
         if fit.get("mode") == "combined-risch":
             raw_coefficient_samples = (fit.get("bootstrap") or {}).get("coefficient_samples")
@@ -1991,8 +2156,29 @@ def main() -> int:
                 )
                 npz_payload[f"term_names_s_{suffix}"] = np.asarray(subfit.get("term_names", []))
         np.savez(bootstrap_path, **npz_payload)
-    continuum_plot_paths = save_continuum_png(png_path, plot_rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
-    save_continuum_html(html_path, plot_rows, fit, r_hat=r_hat, eps_label=eps_label, physical_tau=args.physical_tau)
+    continuum_plot_paths = save_continuum_png(
+        png_path,
+        plot_rows,
+        fit,
+        scale=args.scale,
+        r_hat=r_hat,
+        eps_label=eps_label,
+        physical_tau=args.physical_tau,
+    )
+    save_continuum_html(
+        html_path,
+        plot_rows,
+        fit,
+        scale=args.scale,
+        r_hat=r_hat,
+        eps_label=eps_label,
+        physical_tau=args.physical_tau,
+    )
+    x_axis_definition = (
+        "ahat2 = (a/r0)^2 = 1/(r0_over_a)^2"
+        if args.scale == "r0"
+        else "ahat2 = a^2/(8 t0) = 1/(8 t0_over_a2)"
+    )
     save_json(
         summary_path,
         {
@@ -2000,17 +2186,21 @@ def main() -> int:
             "scale": args.scale,
             "r_hat": float(r_hat),
             "t_over_a2_values": [float(value) for value in flow_times],
+            "t_lat_values": [float(value) for value in flow_times],
             "eight_t_over_a2_values": [float(8.0 * value) for value in flow_times],
             "plot_t_over_a2_values": sorted_unique([float(row["t_over_a2"]) for row in plot_rows]),
+            "plot_t_lat_values": sorted_unique([float(row_t_lat(row)) for row in plot_rows if row_t_lat(row) is not None]),
             "plot_eight_t_over_a2_values": sorted_unique([float(row["eight_t_over_a2"]) for row in plot_rows]),
             "hide_zero_flow_in_plot": bool(args.hide_zero_flow_in_plot),
             "physical_tau_values": [float(value) for value in args.physical_tau],
             "fit_mode": args.fit_mode,
+            "fit_excluded_betas": [float(value) for value in fit_excluded_betas],
+            "fit_n_points": len(fit_rows),
             "eps_label": eps_label,
             "fixed_epsilon_selection": eps_info,
             "t0_over_a2_by_beta": t0_info,
-            "x_axis": "ahat2 = a^2/(8 t0) = 1/(8 t0_over_a2)",
-            "tau_definition": "tau = t_f/t0 = (t_f/a^2)/(t0/a^2)",
+            "x_axis": x_axis_definition,
+            "tau_definition": "tau = t_lat/(t0/a^2)",
             "error_formula": "total_err^2 = stat_err^2 + sys_err^2; sys_err = 0.5*(max_i model_i - min_i model_i)",
             "continuum_error_formula": "When bootstrap refits are available, continuum_err is std_b(c0^(b)) and plotted bands are 16-84 percentiles of refitted curves; otherwise linearized fit covariance is used.",
             "bootstrap_propagation": {
@@ -2029,7 +2219,9 @@ def main() -> int:
             "continuum_estimates": continuum_estimates,
             "fit": fit,
             "n_points": len(rows),
+            "n_points_used_in_fit": len(fit_rows),
             "points": rows,
+            "fit_points": fit_rows,
             "skipped": skipped,
             "paths": {
                 "table": str(table_path),
@@ -2049,6 +2241,12 @@ def main() -> int:
     print(f"Saved continuum limit comparison: {comparison_path}")
     print(f"Saved continuum summary: {summary_path}")
     print(f"Saved continuum plot: {html_path}")
+    if fit_excluded_betas:
+        print(
+            "Excluded beta values from fit: "
+            + ", ".join(f"{value:g}" for value in fit_excluded_betas)
+            + f" ({len(rows) - len(fit_rows)} of {len(rows)} point(s))"
+        )
     if "pdf" in continuum_plot_paths:
         print(f"Saved continuum plot PDF: {continuum_plot_paths['pdf']}")
     if fit.get("mode") == "combined-risch":
@@ -2069,7 +2267,7 @@ def main() -> int:
         for estimate in continuum_estimates:
             chi2_text = "nan" if estimate.get("chi2_dof") is None else f"{float(estimate['chi2_dof']):.3g}"
             print(
-                f"  s={float(estimate['eight_t_over_a2']):g}: "
+                f"  {t_lat_label(float(estimate['t_lat']))}: "
                 f"c0={float(estimate['continuum_value']):.8g} +/- {float(estimate['continuum_err']):.3g} "
                 f"(chi2/dof={chi2_text})"
             )

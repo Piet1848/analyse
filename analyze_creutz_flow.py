@@ -45,8 +45,8 @@ def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any])
             plot_flow = 0.0 if flow_time is None else float(flow_time)
         except (TypeError, ValueError):
             continue
-        # Unflowed and explicit t_f=0 are the same curve. If both are present,
-        # prefer the explicit t_f=0 value for duplicate R points.
+        # Unflowed and explicit t_lat=0 are the same curve. If both are present,
+        # prefer the explicit t_lat=0 value for duplicate R points.
         source_priority = 0 if flow_time is None else 1
         chi = payload.get("chi", {}) if isinstance(payload, dict) else {}
         chi_err = payload.get("chi_err", {}) if isinstance(payload, dict) else {}
@@ -92,7 +92,7 @@ def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any])
                 customdata=[row[0] for row in rows],
                 hovertemplate=(
                     "R=T midpoint=%{customdata:g}<br>"
-                    "chi=%{y:g}<extra>flow %{fullData.name}</extra>"
+                    "chi=%{y:g}<extra>t_lat %{fullData.name}</extra>"
                 ),
                 mode="lines+markers",
                 name=f"{plot_flow:g}",
@@ -110,11 +110,11 @@ def save_combined_creutz_flow_diagonal_plot(path: Path, by_flow: dict[str, Any])
         )
 
     fig.update_layout(
-        title="Creutz ratios on R = T by flow time",
+        title="Creutz ratios on R = T by t_lat",
         template="plotly_white",
         xaxis_title="R = T midpoint",
         yaxis_title="chi(R,T)",
-        legend_title="Wilson-loop flow time",
+        legend_title="t_lat",
     )
     _write_figure_html(fig, path)
 
@@ -507,7 +507,7 @@ class CreutzFlowAnalysisRunner(finalize_analysis.FinalizedAnalysisRunner):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Analyze diagonal Creutz ratios for every Wilson-loop flow time and gradient-flow t2E."
+        description="Analyze diagonal Creutz ratios for every Wilson-loop t_lat value and gradient-flow t2E."
     )
     parser.add_argument("run_dirs", nargs="*", help="Exact run directories, or roots containing run directories.")
     parser.add_argument("--run-root", nargs="+", help="Discover run directories beneath one or more roots.")

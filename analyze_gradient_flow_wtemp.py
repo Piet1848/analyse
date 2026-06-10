@@ -143,6 +143,15 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME=VALUE",
         help="YAML parameter filters applied before grouping, e.g. beta=2.4 eps1=0.0 L0=24.",
     )
+    parser.add_argument(
+        "--group-by",
+        nargs="+",
+        metavar="FIELD",
+        help=(
+            "Optional YAML parameter fields used to split discovered runs, e.g. beta eps1 L0 L1 L2. "
+            "When supplied, other fields may vary within the same analysis group."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -163,6 +172,26 @@ def build_filter_field_map() -> dict[str, tuple[str, Any]]:
 
 
 FILTER_FIELD_MAP = build_filter_field_map()
+
+
+def full_group_field_name(block_name: str, attr_name: str) -> str:
+    if block_name == "metro":
+        return f"MetropolisParams.{attr_name}"
+    if block_name == "gauge":
+        return f"GaugeObservableParams.{attr_name}"
+    return f"GradientFlowParams.{attr_name}"
+
+
+def canonical_group_field_name(name: str) -> str:
+    stripped = name.strip()
+    if stripped.startswith(("MetropolisParams.", "GaugeObservableParams.", "GradientFlowParams.")):
+        return stripped
+    canonical = FILTER_FIELD_ALIASES.get(stripped, stripped)
+    if canonical not in FILTER_FIELD_MAP:
+        raise ValueError(f"Unknown grouping field: {name!r}")
+    block_name, _typ = FILTER_FIELD_MAP[canonical]
+    attr_name = canonical.split(".", 1)[1] if "." in canonical else canonical
+    return full_group_field_name(block_name, attr_name)
 
 
 def parse_bool(value: str) -> bool:
@@ -313,7 +342,7 @@ def freeze_group_value(value: Any) -> Any:
     return value
 
 
-def group_signature_for_run(run_dir: Path) -> tuple[tuple[str, Any], ...]:
+def all_group_fields_for_run(run_dir: Path) -> dict[str, Any]:
     metro, gauge = load_params(str(run_dir / "input.yaml"))
     gradient_flow = load_gradient_flow_params(str(run_dir / "input.yaml"))
 
@@ -328,6 +357,20 @@ def group_signature_for_run(run_dir: Path) -> tuple[tuple[str, Any], ...]:
         if key not in IGNORED_OUTPUT_GROUP_FIELDS:
             fields[f"GradientFlowParams.{key}"] = freeze_group_value(value)
 
+    return fields
+
+
+def group_signature_for_run(
+    run_dir: Path,
+    group_by_fields: list[str] | None = None,
+) -> tuple[tuple[str, Any], ...]:
+    fields = all_group_fields_for_run(run_dir)
+    if group_by_fields:
+        requested = [canonical_group_field_name(name) for name in group_by_fields]
+        missing = [name for name in requested if name not in fields]
+        if missing:
+            raise ValueError(f"Unknown grouping field(s): {', '.join(missing)}")
+        return tuple((name, fields[name]) for name in requested)
     return tuple(sorted(fields.items()))
 
 
@@ -385,6 +428,39 @@ def format_group_difference(signature: tuple[tuple[str, Any], ...], fields: list
     lookup = dict(signature)
     parts = [f"{field}={format_difference_value(lookup.get(field))}" for field in fields]
     return "; ".join(parts)
+
+
+def varying_fields_within_group(group: dict[str, Any]) -> dict[str, list[Any]]:
+    run_dirs = group.get("run_dirs") or []
+    if len(run_dirs) <= 1:
+        return {}
+    selected_fields = {name for name, _value in group.get("signature", ())}
+    field_values: dict[str, set[Any]] = {}
+    for run_dir in run_dirs:
+        fields = all_group_fields_for_run(run_dir)
+        for name, value in fields.items():
+            if name in selected_fields:
+                continue
+            field_values.setdefault(name, set()).add(value)
+    return {
+        name: sorted(values, key=repr)
+        for name, values in sorted(field_values.items())
+        if len(values) > 1
+    }
+
+
+def format_varying_fields(values_by_field: dict[str, list[Any]]) -> str:
+    parts = []
+    for field, values in values_by_field.items():
+        formatted = ", ".join(format_difference_value(value) for value in values)
+        parts.append(f"{field}=[{formatted}]")
+    return "; ".join(parts)
+
+
+def print_varying_fields_if_any(group: dict[str, Any]) -> None:
+    varying = varying_fields_within_group(group)
+    if varying:
+        print(f"  varies within group: {format_varying_fields(varying)}")
 
 
 def compact_int_range(values: list[int]) -> str:
@@ -475,6 +551,7 @@ def resolve_input_groups(
     date_max: date | None,
     min_group_size: int,
     filter_criteria: dict[str, Any],
+    group_by_fields: list[str] | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
     path = normalize_path(path)
     if path.is_file():
@@ -517,7 +594,7 @@ def resolve_input_groups(
     grouped: dict[tuple[tuple[str, Any], ...], list[Path]] = {}
     for run_dir in run_dirs:
         try:
-            signature = group_signature_for_run(run_dir)
+            signature = group_signature_for_run(run_dir, group_by_fields=group_by_fields)
         except Exception as exc:
             raise ValueError(f"failed to read parameters from {run_dir / 'input.yaml'}: {exc}") from exc
         grouped.setdefault(signature, []).append(run_dir)
@@ -1437,6 +1514,7 @@ def main() -> int:
             date_max,
             args.min_group_size,
             filter_criteria,
+            args.group_by,
         )
     except OSError as exc:
         sys.exit(f"failed to read input: {exc}")
@@ -1450,6 +1528,7 @@ def main() -> int:
             diff_text = format_group_difference(group["signature"], diff_fields)
             if diff_text:
                 print(f"  differs: {diff_text}")
+            print_varying_fields_if_any(group)
             print_pair_coverage_if_mixed(group)
             for run_dir in group["run_dirs"]:
                 print(f"  {run_dir}")
@@ -1465,6 +1544,7 @@ def main() -> int:
         diff_text = format_group_difference(group["signature"], diff_fields)
         if diff_text:
             print(f"  differs: {diff_text}")
+        print_varying_fields_if_any(group)
         print_pair_coverage_if_mixed(group)
         for run_dir in group["run_dirs"]:
             print(f"  {run_dir}")
